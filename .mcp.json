@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "spritifer": {
+      "command": "node",
+      "args": ["dist/server/cli.js", "mcp", "--workspace", "./sprites"]
+    }
+  }
+}

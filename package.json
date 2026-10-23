@@ -1,0 +1,37 @@
+{
+  "name": "spritifer",
+  "version": "0.1.0",
+  "description": "Pixel art & animation editor with spritesheet export and an MCP server so Claude can draw sprites pixel by pixel.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "spritifer": "dist/server/cli.js"
+  },
+  "scripts": {
+    "build": "npm run build:web && npm run build:server",
+    "build:web": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "dev:web": "vite",
+    "start": "node dist/server/cli.js serve",
+    "mcp": "node dist/server/cli.js mcp",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "pngjs": "^7.0.0",
+    "ws": "^8.22.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/pngjs": "^6.0.5",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}

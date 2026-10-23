@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "spritifer",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["dist/server/cli.js", "serve", "--workspace", "sprites", "--port", "7420"],
+      "port": 7420
+    }
+  ]
+}

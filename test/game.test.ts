@@ -278,3 +278,141 @@ describe('scripts', () => {
     expect(r.logs.some((l) => l.endsWith('arrived 78 hp 3'))).toBe(true);
   });
 });
+
+describe('effects during dialogs', () => {
+  it('ends screen shake and blinking even while a dialog pauses the scene', async () => {
+    const b = platformBundle();
+    b.scripts = { s: `onStart(async () => { shake(3, 0.2); findOne('player').flash(0.3); await say('Hello') })` };
+    const w = new World(b);
+    for (let i = 0; i < 60; i++) { w.step(); await w.settle(); }
+    expect(w.scripts.dialog).not.toBeNull();
+    expect(w.clock).toBeGreaterThan(w.shake.until);
+    expect(w.actors.find((a) => a.type.name === 'player')!.flashUntil).toBeLessThan(w.clock);
+  });
+});
+
+import { parseDialogues } from '../src/core/game/dialogue.js';
+
+describe('dialogues', () => {
+  const town = () => {
+    const b = platformBundle();
+    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 80 }];
+    b.game.objects.push(normalizeObject({ name: 'villager', sprite: 'coin', behaviors: [{ type: 'solid' }, { type: 'dialogue' }] }));
+    b.game.variables = { gold: 12, potions: 0, metElder: false };
+    b.scenes.level1.instances = [
+      { id: 'p', object: 'player', x: 40, y: 160 },
+      { id: 'e', object: 'villager', name: 'Elder', x: 52, y: 164, props: { dialogue: 'elder' } },
+      { id: 'k', object: 'villager', name: 'Kid', x: 200, y: 164, props: { dialogue: 'kid' } },
+    ];
+    b.dialogues = {
+      village: `# villagers
+=== elder
+if !metElder
+  self: Welcome, traveler.
+  self: Need a potion? You have {gold} gold.
+  * Buy one [if gold >= 10]
+    ~ gold -= 10
+    ~ potions += 1
+    ! sound coin
+    self: Here you go.
+  * No thanks
+    self: Suit yourself.
+  ~ metElder = true
+else
+  self: Hello again.
+  -> goodbye
+
+=== kid
+Kid: I am {self.name}! Catch me!
+~ self.caught = true
+
+=== goodbye
+Narrator text without a speaker.
+`,
+    };
+    return b;
+  };
+  const talk = (w: World, x: number) => {
+    const p = w.actors.find((a) => a.type.name === 'player')!;
+    p.x = x;
+    p.facing = 'right';
+  };
+
+  it('parses with line-numbered errors', () => {
+    const r = parseDialogues('=== a\nhello\n* yes [if 1 +]\n  ok\nelse\n! nope\n~ broken\nloose', 'f');
+    const msgs = r.errors.map((e) => `${e.line}: ${e.message}`).join('\n');
+    expect(msgs).toMatch(/3: .*end/);
+    expect(msgs).toMatch(/5: else without an if/);
+    expect(msgs).toMatch(/6: unknown command "nope"/);
+    expect(msgs).toMatch(/7: write variables as/);
+    expect(parseDialogues('hi\n=== x\nok', 'f').errors[0].message).toMatch(/outside a dialogue/);
+  });
+
+  it('lets one NPC object type be different characters with their own dialogues', async () => {
+    const b = town();
+    const w = new World(b, { autoDialog: { choices: [0], delay: 0.2 } });
+    const step = async (n: number, press = false) => {
+      for (let i = 0; i < n; i++) {
+        w.step(press && i === 0 ? { ...emptyInput(), down: new Set(['action']), pressed: new Set(['action']) } : emptyInput());
+        await w.settle();
+      }
+    };
+    await step(2);
+    talk(w, 52 - 16 - 3 + 2);
+    await step(1, true);
+    await step(120);
+    expect(w.logs.some((l) => l.includes('dialog: Elder: Welcome, traveler.'))).toBe(true);
+    expect(w.logs.some((l) => l.includes('dialog: Elder: Need a potion? You have 12 gold. [Buy one / No thanks]'))).toBe(true);
+    expect(w.globals).toMatchObject({ gold: 2, potions: 1, metElder: true });
+    // Second time: other branch and a jump to another dialogue (narration, no speaker).
+    await step(1, true);
+    await step(80);
+    expect(w.logs.some((l) => l.includes('dialog: Elder: Hello again.'))).toBe(true);
+    expect(w.logs.some((l) => l.endsWith('dialog: Narrator text without a speaker.'))).toBe(true);
+    // The other villager says its own lines and remembers in its own properties.
+    talk(w, 200 - 16 - 3 + 2);
+    await step(1, true);
+    await step(60);
+    expect(w.logs.some((l) => l.includes('dialog: Kid: I am Kid! Catch me!'))).toBe(true);
+    expect(w.actors.find((a) => a.instName === 'Kid')!.vars.caught).toBe(true);
+    expect(w.actors.find((a) => a.instName === 'Elder')!.vars.caught).toBeUndefined();
+  });
+
+  it('starts dialogues from events and hides choices whose condition is false', async () => {
+    const b = town();
+    b.game.variables.gold = 3;
+    b.scenes.level1.events.push({ trigger: { type: 'start' }, conditions: [], actions: [{ type: 'dialogue', dialogue: 'elder' }] });
+    const r = await runPlaytest(b, { seconds: 2 });
+    expect(r.logs.some((l) => l.includes('[No thanks]'))).toBe(true);
+    expect(r.final.globals.potions).toBe(0);
+  });
+
+  it('remembers instances of persistent scenes until the scene restarts', async () => {
+    const b = town();
+    b.scenes.level1.persistent = true;
+    b.scenes.other = createScene({ name: 'other', cols: 5, rows: 5 });
+    const w = new World(b);
+    w.step();
+    const kid = w.actors.find((a) => a.instName === 'Kid')!;
+    kid.vars.caught = true;
+    kid.x = 123;
+    w.destroy(w.actors.find((a) => a.instName === 'Elder')!);
+    w.gotoScene('other');
+    w.step();
+    w.gotoScene('level1');
+    w.step();
+    expect(w.actors.find((a) => a.instName === 'Elder')).toBeUndefined();
+    expect(w.actors.find((a) => a.instName === 'Kid')).toMatchObject({ x: 123, vars: { caught: true } });
+    w.restartScene();
+    w.step();
+    expect(w.actors.find((a) => a.instName === 'Elder')).toBeDefined();
+  });
+
+  it('uses per-instance sprite overrides', () => {
+    const b = town();
+    b.scenes.level1.instances[2].sprite = 'hero';
+    const w = new World(b);
+    expect(w.actors.find((a) => a.instName === 'Kid')!.asset!.name).toBe('hero');
+    expect(w.actors.find((a) => a.instName === 'Elder')!.asset!.name).toBe('coin');
+  });
+});

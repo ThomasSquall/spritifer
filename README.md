@@ -19,7 +19,7 @@ Avvia l'editor web (sprite salvati in `./sprites`):
 npm start
 ```
 
-Poi apri http://localhost:7420. Le schede in alto sono le parti del gioco: **Sprites** (asset), **Objects** (tipi di oggetto), **Scenes** (livelli), **Scripts** (codice), **Game** (impostazioni ed export), più **Play** ed **Export**. Il pulsante con il nome del progetto, in alto a sinistra, apre la pagina **Projects**.
+Poi apri http://localhost:7420. Le schede in alto sono le parti del gioco: **Sprites** (asset), **Objects** (tipi di oggetto), **Scenes** (livelli), **Dialogues** (conversazioni), **Scripts** (codice), **Game** (impostazioni ed export), più **Play** ed **Export**. Il pulsante con il nome del progetto, in alto a sinistra, apre la pagina **Projects**.
 
 ### Progetti
 
@@ -62,18 +62,36 @@ Ogni evento è **QUANDO** *trigger* **SE** *condizioni* **FAI** *azioni*:
 
 Le **espressioni** sono un piccolo linguaggio sicuro: `score + 10`, `self.hp <= 0 && !self.invincible`, `"Monete: " + score`, `count("enemy") == 0`, `dist(self.x, self.y, other.x, other.y) < 32`, `random(1, 6)`. Nomi: variabili globali (`score`), `self.*` e `other.*` (campi come `x`, `y`, `vx`, `vy`, `flipX`, `onGround` e le proprietà), `scene.*`, `game.time`.
 
+### Dialoghi
+
+Le conversazioni si scrivono come un copione, senza codice, nella scheda **Dialogues** (file `dialogues/<nome>.dialogue`, anche più dialoghi per file):
+
+```
+=== fornaio
+self: Pane fresco! Solo 5 monete.
+* Compra il pane [if gold >= 5]
+  ~ gold -= 5
+  ! sound coin
+  self: Buon appetito!
+* No grazie
+  self: Torna quando vuoi.
+```
+
+- `Nome: testo` è una battuta con il nome di chi parla; `self:` usa il nome del personaggio piazzato nella scena; una riga senza nome è narrazione. `{espressione}` inserisce valori (`Hai {gold} monete`).
+- `* scelta` crea un menu (la riga subito sopra diventa la domanda); `[if condizione]` mostra la scelta solo se vera; le righe rientrate sono quello che succede dopo.
+- `if` / `elif` / `else` con blocchi rientrati, `~ variabile = valore` (anche `+=`, `-=`, e `self.x` per le proprietà del singolo personaggio), `! comando` (`sound`, `goto`, `call`, `emit`, `wait`, `shake`, `anim`, `face player`, `destroy`, `spawn`), `-> altro_dialogo` per saltare, `-> end` per finire.
+- Gli errori compaiono mentre scrivi, con il numero di riga. Il pulsante ▶ accanto a ogni dialogo lo **prova** in una finestra a chat, con le variabili iniziali del gioco, e alla fine mostra cosa è cambiato.
+
+**Un solo NPC, tanti personaggi.** Crea un tipo di oggetto con il comportamento **Talks (dialogue)** (modello *NPC (talks)*) e piazzalo quante volte vuoi. Nell'inspector della scena ogni istanza ha il suo **Name**, il suo **Sprite** e il suo **Dialogue**: il giocatore ci parla premendo Spazio/Z accanto. I dialoghi partono anche dagli eventi (azione **Start dialogue**, per esempio all'inizio della scena) e dagli script (`await dialogue('nome', self)`).
+
 ### Script
 
-Per quello che gli eventi non esprimono bene (conversazioni con scelte, NPC, sequenze animate, battaglie a turni, inventari, menu e HUD personalizzati) ci sono gli **script**: file JavaScript in `scripts/<nome>.js`, scritti nella scheda **Scripts** (evidenziazione, numeri di riga, salvataggio automatico, riferimento API a lato) o da Claude con `write_script` / `edit_script`.
+Per la logica che gli eventi non esprimono bene (sequenze animate, battaglie a turni, inventari, menu e HUD personalizzati) ci sono gli **script**: file JavaScript in `scripts/<nome>.js`, scritti nella scheda **Scripts** (evidenziazione, numeri di riga, salvataggio automatico, riferimento API a lato) o da Claude con `write_script` / `edit_script`.
 
 ```js
-// Un NPC: dai al tipo di oggetto il comportamento { type: "script", name: "shopkeeper" }
-behavior('shopkeeper', {
-  interact: async (self, player) => {
-    await say('Pozioni fresche!', { speaker: 'Mercante' })
-    const c = await choose(['Compra (10 oro)', 'Esci'])
-    if (c === 0 && vars.gold >= 10) { vars.gold -= 10; vars.potions += 1; sound('coin') }
-  },
+// Un comportamento: dai al tipo di oggetto { type: "script", name: "guard" }
+behavior('guard', {
+  update: (self, dt) => { if (self.distanceTo(player()) < 40) self.face(player().x < self.x ? 'left' : 'right') },
 })
 
 // Una funzione richiamabile dagli eventi con l'azione "Run script function"
@@ -97,12 +115,18 @@ Nel playtest di Claude gli script girano isolati (`node:vm`). I dialoghi si conf
 - Giocatore `topdown` con animazioni `walk_<dir>`/`idle_<dir>` e hitbox sui piedi.
 - Scene con **Sort by Y**: chi sta più in basso viene disegnato davanti, per dare profondità.
 - Livelli tile *solid* per muri, alberi e acqua.
-- NPC con il trigger *Player interacts* o con un comportamento script (`interact`).
+- NPC con il comportamento *Talks (dialogue)*: un tipo di oggetto, tanti personaggi diversi (nome, sprite e dialogo per istanza). Scrigni come dialoghi che usano le proprietà dell'istanza (`~ self.opened = true`, `~ gold += self.gold`).
+- Scene con memoria, così il villaggio resta com'era dopo una battaglia.
 - Battaglie in una scena dedicata, guidate da `onSceneStart('battle', async () => …)`, con menu `choose` e barre HP in `onDraw`.
 
-L'esempio `examples/village` mostra tutto questo in circa 200 righe di script.
+L'esempio `examples/village` mostra tutto questo: tutte le conversazioni stanno in `dialogues/village.dialogue`, la battaglia in `scripts/battle.js`, il messaggio di benvenuto è un evento della scena *town* (*Scene starts* → *Start dialogue intro*).
 
 ### Editor di scena
+
+A destra ci sono tre schede: **Hierarchy** (tutti gli oggetti piazzati nella scena, con filtro; cliccandone uno lo selezioni e lo inquadri), **Add** (i tipi di oggetto da piazzare) e **Scene** (dimensioni, sfondo, Sort by Y, memoria, variabili, eventi). Sotto c'è l'**Inspector** dell'istanza selezionata: nome, tipo, sprite e animazione propri, dialogo, posizione, proprietà (anche solo di quell'istanza).
+
+Con **Remember instances when leaving** la scena ricorda posizioni, proprietà e oggetti distrutti quando la lasci (per esempio un villaggio dopo una battaglia); *Restart scene* la riporta all'inizio.
+
 
 - Strumenti: pennello tile (B, trascina sul tileset per un timbro multi-tile), rettangolo (R), secchiello (G), gomma (E, o tasto destro), piazza oggetti (P, allineati al tile; Alt = posizione libera), seleziona/sposta (V, aggancio alla griglia; Alt = libero).
 - Alt+click preleva un tile, Canc elimina l'istanza selezionata, Ctrl+D la duplica, frecce per spostarla di 1 px (Shift = 1 tile), Ctrl+Z / Ctrl+Shift+Z.
@@ -163,6 +187,7 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Export/import | `export_spritesheet` (PNG + JSON), `import_png` |
 | Gioco | `game_reference` (vocabolario completo di trigger, condizioni, azioni, comportamenti ed espressioni), `get_game`, `set_game`, `set_object`, `delete_object`, `set_events` |
 | Scene | `create_scene`, `get_scene` (anche la mappa come griglia di caratteri), `update_scene`, `delete_scene`, `set_tile_layer`, `paint_tiles` (righe + legenda come `draw_pixels`, o rettangoli), `place_instances`, `update_instances`, `tileset_preview` (indici dei tile) |
+| Dialoghi | `dialogue_reference`, `list_dialogues`, `read_dialogue`, `write_dialogue` (controllato prima di salvare), `edit_dialogue`, `delete_dialogue`; `place_instances` / `update_instances` con nome, sprite e `props.dialogue` per istanza |
 | Script | `script_reference` (API completa con esempio di battaglia), `list_scripts`, `read_script`, `write_script` (con controllo della sintassi e nomi registrati), `edit_script`, `delete_script` |
 | Progetti | `list_projects`, `open_project`, `create_project` (vuoto, platformer, rpg) |
 | Verifica ed export del gioco | `validate_game`, `preview_scene`, `playtest` (gioco headless con input scriptati e risposte ai menu: log, dialoghi, stato, screenshot), `export_game` (HTML unico per il web), `undo_game_change` |
@@ -274,7 +299,8 @@ Il workspace (default `./sprites`) contiene tutto il progetto:
 - `<nome>.sprite.json`: dimensioni, palette, livelli, frame, tag, griglia tile opzionale e pixel RGBA (base64) per ogni cel `livello/frame`;
 - `<nome>.scene.json`: dimensioni in tile, tileset, livelli tile (indici, `-1` = vuoto), istanze, eventi e variabili della scena;
 - `game.json`: impostazioni, variabili globali e tipi di oggetto con comportamenti ed eventi;
-- `scripts/<nome>.js`: gli script del gioco.
+- `scripts/<nome>.js`: gli script del gioco;
+- `dialogues/<nome>.dialogue`: i dialoghi.
 
 Sono JSON leggibili e versionabili. L'editor e il server MCP leggono e scrivono gli stessi file; un watcher notifica le modifiche al browser via WebSocket.
 

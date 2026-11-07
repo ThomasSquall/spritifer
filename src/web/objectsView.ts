@@ -21,6 +21,7 @@ interface Template {
 export const TEMPLATES: Template[] = [
   { id: 'platformer', label: 'Platformer player', hint: 'Runs and jumps, camera follows', make: () => ({ behaviors: [{ type: 'platformer', speed: 100, jump: 300 }, { type: 'camera' }], events: [{ trigger: { type: 'leftScene' }, conditions: [], actions: [{ type: 'restartScene' }] }] }) },
   { id: 'topdown', label: 'Top-down player', hint: '8-way movement, camera follows', make: () => ({ behaviors: [{ type: 'topdown', speed: 80 }, { type: 'camera' }] }) },
+  { id: 'npc', label: 'NPC (talks)', hint: 'Place it many times: each one gets its own name, look and dialogue', make: () => ({ behaviors: [{ type: 'solid', oneWay: false }, { type: 'dialogue', dialogue: '' }] }) },
   { id: 'enemy', label: 'Patrolling enemy', hint: 'Walks and turns at walls/ledges', make: (_n, player) => ({ behaviors: [{ type: 'patrol', speed: 40 }], events: [{ trigger: { type: 'collision', with: player }, conditions: [], actions: [{ type: 'sound', sound: 'hurt' }, { type: 'restartScene' }] }] }) },
   { id: 'chaser', label: 'Chasing enemy', hint: 'Follows the player when near', make: (_n, player) => ({ behaviors: [{ type: 'chase', target: player, speed: 45, range: 140 }] }) },
   { id: 'pickup', label: 'Pickup (coin)', hint: 'Floats; +1 score when touched', make: (_n, player) => ({ behaviors: [{ type: 'sine', axis: 'y', amplitude: 2, period: 1.2 }], events: [{ trigger: { type: 'collision', with: player }, conditions: [], actions: [{ type: 'add', target: 'score', value: '1' }, { type: 'sound', sound: 'coin' }, { type: 'destroy', target: 'self' }] }] }) },
@@ -41,6 +42,7 @@ export function sheetContext(obj: ObjectType | null, animations: string[]): Shee
     variables: [...Object.keys(g.variables), ...(obj ? Object.keys(obj.properties).map((p) => `self.${p}`) : [])],
     functions: state.scriptInfo.functions,
     scriptBehaviors: state.scriptInfo.behaviors,
+    dialogues: state.dialogueInfo.nodes,
   };
 }
 

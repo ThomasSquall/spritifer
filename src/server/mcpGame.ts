@@ -26,6 +26,7 @@ import { scaleBitmap } from '../core/draw.js';
 import type { Workspace } from './store.js';
 import { SCRIPT_TEMPLATE, checkScriptSyntax, inspectScripts, nodeEvaluator } from './scripts.js';
 import { SCRIPT_REFERENCE } from '../core/game/script.js';
+import { DIALOGUE_REFERENCE, buildDialogueBook, parseDialogues } from '../core/game/dialogue.js';
 
 type Content = CallToolResult['content'];
 
@@ -48,8 +49,9 @@ Model:
 - Object types (set_object) are reusable things: player, enemy, coin, door, bullet, score label. Each has a sprite (+ default animation tag), an optional hitbox, behaviors (platformer, topdown, solid, bullet, patrol, chase, sine, camera, bounded, lifetime, wrap), properties (instance variables with defaults) and an event sheet. Text objects (text = expression, hud = true) show scores and labels.
 - Scenes (create_scene) are tile maps (cols x rows, tileSize from the tileset sprite's grid) with tile layers (solid layers collide) and placed instances. Scenes have their own event sheet and variables.
 - Events: WHEN trigger IF conditions DO actions. Call game_reference for the full vocabulary (triggers, conditions, actions, behaviors, keys, sounds, expression syntax).
-- Scripts (write_script, script_reference) are JavaScript files for anything events can't express well: RPG dialogs with choices (await say / choose), NPC behaviors (behavior(name, { interact })), cutscenes (moveTo, wait, lockControls), turn-based battles, inventories and custom UI (onDraw with bars, panels, text). Attach script behaviors to object types with { type: "script", name } and call script functions from events with the action "call".
-- RPGs: top-down player (topdown + camera, sprite tags walk_<dir>/idle_<dir>), scene ySort: true for depth, solid tile layers for walls, the "interact" trigger (or a script behavior's interact hook) for talking and opening chests, a battle scene driven by onSceneStart('battle', async () => ...).
+- Dialogues (write_dialogue, dialogue_reference) are plain-text conversations: speakers, choices, conditions, variables, commands, jumps. NPCs: ONE object type with the behavior "dialogue" (+ solid), placed many times, each instance with its own name, optional sprite override and props { dialogue: "<name>" }. Never create one object type or script per NPC.
+- Scripts (write_script, script_reference) are JavaScript files for game logic events can't express well: cutscenes (moveTo, wait, lockControls), turn-based battles, inventories and custom UI (onDraw with bars, panels, text). Attach script behaviors to object types with { type: "script", name } and call script functions from events with the action "call".
+- RPGs: top-down player (topdown + camera, sprite tags walk_<dir>/idle_<dir>), scene y_sort and persistent (towns remember chests/positions after battles), solid tile layers for walls, NPCs and chests via dialogues (~ self.opened = true), an intro via a scene event (start → dialogue), battles in a scene driven by a script onSceneStart('battle', async () => ...).
 - Projects: list_projects / open_project / create_project switch between games; each project folder has its own sprites, scenes, scripts and game.json.
 
 Workflow that works:
@@ -104,7 +106,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
     const counts = new Map<string, number>();
     for (const i of s.instances) counts.set(i.object, (counts.get(i.object) ?? 0) + 1);
     const lines = [
-      `Scene "${s.name}": ${s.cols}x${s.rows} tiles of ${s.tileSize}px (${s.cols * s.tileSize}x${s.rows * s.tileSize}px), tileset ${s.tileset ?? 'none'}${s.background ? `, background ${s.background}` : ''}${s.ySort ? ', y-sorted' : ''}`,
+      `Scene "${s.name}": ${s.cols}x${s.rows} tiles of ${s.tileSize}px (${s.cols * s.tileSize}x${s.rows * s.tileSize}px), tileset ${s.tileset ?? 'none'}${s.background ? `, background ${s.background}` : ''}${s.ySort ? ', y-sorted' : ''}${s.persistent ? ', persistent' : ''}`,
       `Layers: ${s.layers.map((l, i) => `[${i}] ${l.name}${l.solid ? ' (solid)' : ''}${l.visible ? '' : ' (hidden)'}: ${l.tiles.filter((t) => t >= 0).length} tiles`).join(', ')}`,
       `Instances (${s.instances.length}): ${[...counts].map(([k, v]) => `${k}×${v}`).join(', ') || 'none'}`,
     ];
@@ -370,7 +372,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
   }, (a) => {
     const s = ws.loadScene(a.scene);
     const lines = [describeScene(s), '', 'Instances:'];
-    for (const i of s.instances) lines.push(`- ${i.id}: ${i.object} at ${i.x},${i.y} (tile ${Math.floor(i.x / s.tileSize)},${Math.floor(i.y / s.tileSize)})${i.flipX ? ' flipped' : ''}${i.props ? ' ' + JSON.stringify(i.props) : ''}`);
+    for (const i of s.instances) lines.push(`- ${i.id}: ${i.name ? `"${i.name}" (${i.object})` : i.object}${i.sprite ? ` sprite ${i.sprite}` : ''} at ${i.x},${i.y} (tile ${Math.floor(i.x / s.tileSize)},${Math.floor(i.y / s.tileSize)})${i.flipX ? ' flipped' : ''}${i.props ? ' ' + JSON.stringify(i.props) : ''}`);
     if (a.layer) {
       const l = s.layers.find((x) => x.name === a.layer);
       if (!l) throw new Error(`No layer "${a.layer}"`);
@@ -401,9 +403,14 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       backgrounds: z.array(z.object({ sprite: z.string(), parallax: z.number().optional(), repeat_x: z.boolean().optional(), y: z.number().optional() })).optional().describe('Parallax background images, back to front'),
       variables: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       y_sort: z.boolean().optional().describe('Draw instances lower on screen in front (top-down / RPG depth)'),
+      persistent: z.boolean().optional().describe('Remember instances when leaving (positions, properties, destroyed ones), e.g. an RPG town you come back to after a battle'),
     },
     (a) => {
       const { scene } = mutateScene(a.scene, (s) => {
+        if (a.persistent !== undefined) {
+          if (a.persistent) s.persistent = true;
+          else delete s.persistent;
+        }
         if (a.y_sort !== undefined) {
           if (a.y_sort) s.ySort = true;
           else delete s.ySort;
@@ -535,7 +542,16 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
     'Place instances of object types in a scene. x, y are the sprite top-left in pixels; with tiles: true they are tile coordinates and the sprite stands on the bottom of that tile (bottom-aligned, horizontally centered).',
     {
       scene: z.string(),
-      instances: z.array(z.object({ object: z.string(), x: z.number(), y: z.number(), props: z.record(z.string(), valueSchema).optional(), flip_x: z.boolean().optional() })).min(1),
+      instances: z.array(z.object({
+        object: z.string(),
+        x: z.number(),
+        y: z.number(),
+        name: z.string().optional().describe('Instance name (hierarchy, dialogue speaker "self"), e.g. "Elder Tom"'),
+        sprite: z.string().optional().describe('Use this sprite instead of the object type\'s (one NPC type, many looks)'),
+        animation: z.string().optional(),
+        props: z.record(z.string(), valueSchema).optional().describe('Instance properties, e.g. { dialogue: "elder" } for a Talks NPC'),
+        flip_x: z.boolean().optional(),
+      })).min(1),
       tiles: z.boolean().optional(),
     },
     (a) => {
@@ -549,7 +565,9 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           let x = i.x;
           let y = i.y;
           if (a.tiles) {
-            const asset = obj.sprite ? loaded.bundle.sprites[obj.sprite] : undefined;
+            const spr = i.sprite ?? obj.sprite;
+          if (i.sprite && !loaded.bundle.sprites[i.sprite] && !ws.exists(i.sprite)) throw new Error(`Sprite "${i.sprite}" not found`);
+          const asset = spr ? loaded.bundle.sprites[spr] ?? (ws.exists(spr) ? buildAsset(ws.load(spr), false).asset : undefined) : undefined;
             const w = asset?.width ?? s.tileSize;
             const hh = asset?.height ?? s.tileSize;
             x = Math.round(i.x * s.tileSize + (s.tileSize - w) / 2);
@@ -557,7 +575,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           }
           const id = newGameId();
           ids.push(id);
-          s.instances.push({ id, object: i.object, x, y, ...(i.props ? { props: i.props } : {}), ...(i.flip_x ? { flipX: true } : {}) });
+          s.instances.push({ id, object: i.object, x, y, ...(i.name ? { name: i.name } : {}), ...(i.sprite ? { sprite: i.sprite } : {}), ...(i.animation ? { animation: i.animation } : {}), ...(i.props ? { props: i.props } : {}), ...(i.flip_x ? { flipX: true } : {}) });
         }
       });
       return text(`Placed ${ids.length} instance(s): ${ids.join(', ')}. Scene now has ${scene.instances.length}.`);
@@ -566,7 +584,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
 
   tool(
     'update_instances',
-    'Move, flip, change props of, or remove instances in a scene (by id, or every instance of an object type).',
+    'Move, flip, rename, re-skin (sprite override), change props (e.g. dialogue) of, or remove instances in a scene (by id, or every instance of an object type).',
     {
       scene: z.string(),
       ids: z.array(z.string()).optional(),
@@ -577,6 +595,9 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       dx: z.number().optional().describe('Relative move'),
       dy: z.number().optional(),
       flip_x: z.boolean().optional(),
+      name: z.string().nullable().optional().describe('Rename (null clears)'),
+      sprite: z.string().nullable().optional().describe('Sprite override (null = the object type\'s)'),
+      animation: z.string().nullable().optional(),
       props: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
     },
     (a) => {
@@ -599,6 +620,12 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           if (a.flip_x !== undefined) {
             if (a.flip_x) i.flipX = true;
             else delete i.flipX;
+          }
+          for (const key of ['name', 'sprite', 'animation'] as const) {
+            const v = a[key];
+            if (v === undefined) continue;
+            if (v === null || v === '') delete i[key];
+            else i[key] = v;
           }
           for (const [k, v] of Object.entries(a.props ?? {})) {
             i.props ??= {};
@@ -682,7 +709,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       const fmtState = (s: (typeof r)['final']) =>
         [
           `t=${s.time}s scene=${s.scene} globals=${JSON.stringify(s.globals)}${Object.keys(s.sceneVars).length ? ` scene=${JSON.stringify(s.sceneVars)}` : ''}`,
-          ...s.actors.filter((x) => x.object).slice(0, 60).map((x) => `  ${x.object}#${x.id} at ${x.x},${x.y} v=${x.vx},${x.vy}${x.onGround ? ' ground' : ''}${x.animation ? ` anim=${x.animation}` : ''}${Object.keys(x.vars).length ? ' ' + JSON.stringify(x.vars) : ''}`),
+          ...s.actors.filter((x) => x.object).slice(0, 60).map((x) => `  ${x.name ? `"${x.name}" ` : ''}${x.object}#${x.id} at ${x.x},${x.y} v=${x.vx},${x.vy}${x.onGround ? ' ground' : ''}${x.animation ? ` anim=${x.animation}` : ''}${Object.keys(x.vars).length ? ' ' + JSON.stringify(x.vars) : ''}`),
           s.actors.length > 60 ? `  ... ${s.actors.length - 60} more` : '',
         ].filter(Boolean).join('\n');
       const lines = [
@@ -749,6 +776,51 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
   }, { destructiveHint: true });
 
   void SCRIPT_TEMPLATE;
+
+  // ------------------------------------------------------------------ dialogues
+
+  const dialogueSummary = () => {
+    const book = buildDialogueBook(ws.loadDialogues());
+    return `Dialogues: ${[...book.nodes.keys()].sort().join(', ') || 'none'}${book.errors.length ? `\nERRORS:\n${book.errors.map((e) => `- ${e.file}.dialogue line ${e.line}: ${e.message}`).join('\n')}` : ''}`;
+  };
+
+  tool('dialogue_reference', 'Reference of the dialogue language: plain-text conversations with speakers, choices, conditions, variables, commands and jumps, and how NPCs use them (one NPC object type, many characters). Read it before writing dialogues.', {}, () => text(DIALOGUE_REFERENCE), { readOnlyHint: true });
+
+  tool('list_dialogues', 'List dialogue files (dialogues/<file>.dialogue) and the dialogue names they define.', {}, () => {
+    const list = ws.listDialogues();
+    return text(`${list.length ? list.map((d) => `${d.name}.dialogue (${d.size} bytes)`).join('\n') : 'No dialogue files yet. Create one with write_dialogue.'}\n\n${dialogueSummary()}`);
+  }, { readOnlyHint: true });
+
+  tool('read_dialogue', 'Read a dialogue file with line numbers.', { file: z.string() }, (a) => {
+    const code = ws.readDialogue(a.file);
+    return text(code.split('\n').map((l, i) => `${String(i + 1).padStart(4)}  ${l}`).join('\n'));
+  }, { readOnlyHint: true });
+
+  const saveDialogue = (file: string, code: string) => {
+    const r = parseDialogues(code, file);
+    if (r.errors.length) throw new Error(`Not saved, fix these first:\n${r.errors.map((e) => `- line ${e.line}: ${e.message}`).join('\n')}`);
+    ws.writeDialogue(file, code);
+    return text(`Saved dialogues/${file}.dialogue (${r.nodes.length} dialogue(s): ${r.nodes.map((n) => n.name).join(', ')}).\n${dialogueSummary()}\n\n${problemsText()}`);
+  };
+
+  tool(
+    'write_dialogue',
+    'Create or replace a dialogue file (see dialogue_reference). It is checked before saving. Then make NPCs talk: an object type with the behavior { type: "dialogue" } and, per placed instance, props { dialogue: "<name>" } plus a name (place_instances / update_instances). Or start one from an event (action "dialogue").',
+    { file: z.string().describe('File name without extension, e.g. "village", "quests"'), code: z.string() },
+    (a) => saveDialogue(a.file, a.code),
+  );
+
+  tool('edit_dialogue', 'Replace one exact snippet in a dialogue file (must match exactly once).', { file: z.string(), find: z.string(), replace: z.string() }, (a) => {
+    const code = ws.readDialogue(a.file);
+    const n = code.split(a.find).length - 1;
+    if (n !== 1) throw new Error(n ? `The snippet appears ${n} times; include more context` : 'Snippet not found (read_dialogue shows the current text)');
+    return saveDialogue(a.file, code.replace(a.find, () => a.replace));
+  });
+
+  tool('delete_dialogue', 'Delete a dialogue file.', { file: z.string() }, (a) => {
+    ws.removeDialogue(a.file);
+    return text(`Deleted dialogues/${a.file}.dialogue.\n${dialogueSummary()}`);
+  }, { destructiveHint: true });
 
   tool('validate_game', 'Check the game for problems: unknown triggers/actions/behaviors, bad expressions, missing sprites, objects and scenes.', {}, () => text(problemsText()), { readOnlyHint: true });
 

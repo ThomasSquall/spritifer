@@ -9,6 +9,7 @@ import { type ExprContext, MATH_FUNCTIONS, compile, fmt, parseTarget, toNum, tru
 import { measureText } from './font.js';
 import type { Behavior, EventStep, GameBundle, GameEvent, GameProject, Hitbox, ObjectType, Scene, SpriteAsset, Value } from './types.js';
 import { type ScriptEvaluator, ScriptHost, wrapText } from './script.js';
+import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
 
 export const STEP = 1 / 60;
 
@@ -78,6 +79,8 @@ export class Actor {
   flashUntil = 0;
   createdAt: number;
   facing: 'down' | 'up' | 'left' | 'right' = 'down';
+  /** Name given to the placed instance (hierarchy / dialogue speaker). */
+  instName: string | null = null;
   /** Instances touched last frame (for "collision" = start of touch). */
   touching = new Set<Actor>();
   /** One-frame trigger flags. */
@@ -178,7 +181,8 @@ export class World {
   clock = 0;
   frame = 0;
   camera = { x: 0, y: 0 };
-  shake = { until: 0, intensity: 0 };
+  /** Screen shake, timed with `clock` (keeps running while dialogs pause the scene, so it always ends). */
+  shake = { until: 0, intensity: 0, duration: 0 };
   message: { text: string; until: number } | null = null;
   logs: string[] = [];
   input: InputFrame = emptyInput();
@@ -193,8 +197,14 @@ export class World {
   private solidLayers: number[][] = [];
   private started = false;
   private gameStarted = false;
+  /** Per persistent scene: what happened to each placed instance. */
+  private memory = new Map<string, Map<string, { destroyed?: boolean; x?: number; y?: number; vars?: Record<string, Value>; flipX?: boolean; facing?: Actor['facing']; anim?: string }>>();
+  private resetPending = false;
   readonly opts: EngineOptions;
   readonly scripts: ScriptHost;
+  readonly dialogues: DialogueBook;
+  /** Instances in a conversation right now (pressing action again doesn't restart it). */
+  private talking = new Set<Actor>();
   /** Player controls ignore input (cutscenes, battles). */
   controlsLocked = false;
 
@@ -218,6 +228,8 @@ export class World {
         }
       }
     }
+    this.dialogues = buildDialogueBook(bundle.dialogues ?? {});
+    for (const e of this.dialogues.errors) this.log(`ERROR dialogues/${e.file}.dialogue line ${e.line}: ${e.message}`);
     this.scripts = new ScriptHost(this);
     this.scripts.load(bundle.scripts ?? {}, opts.evaluator);
     const names = Object.keys(bundle.scenes);
@@ -267,31 +279,60 @@ export class World {
       this.error('gotoScene', new Error(`no scene "${name}"`));
       return;
     }
+    // Leaving a persistent scene: remember where everything is.
+    const prev = this.scene;
+    if (prev?.persistent && prev.name !== name) {
+      const mem = this.memory.get(prev.name) ?? new Map();
+      for (const a of this.actors) {
+        if (!a.sceneId || a.destroyed) continue;
+        mem.set(a.sceneId, { x: a.x, y: a.y, vars: { ...a.vars }, flipX: a.flipX, facing: a.facing, anim: a.anim });
+      }
+      this.memory.set(prev.name, mem);
+    }
+    if (this.resetPending || prev?.name === name) this.memory.delete(name);
+    this.resetPending = false;
+    const remembered = scene.persistent ? this.memory.get(name) : undefined;
     this.scene = scene;
     this.actors = [];
     this.sceneVars = { ...scene.variables };
     this.time = 0;
     this.sceneTimers.clear();
     this.message = null;
-    this.shake = { until: 0, intensity: 0 };
+    this.shake = { until: 0, intensity: 0, duration: 0 };
     this.camera = { x: 0, y: 0 };
     this.solidLayers = scene.layers.filter((l) => l.solid).map((l) => l.tiles);
     this.scripts?.resetScene();
     for (const inst of scene.instances) {
       const type = this.objectMap.get(inst.object);
       if (!type) continue;
-      const a = this.makeActor(type, inst.x, inst.y);
+      const mem = remembered?.get(inst.id);
+      if (mem?.destroyed) continue;
+      const a = this.makeActor(type, inst.x, inst.y, inst.sprite);
       a.sceneId = inst.id;
+      a.instName = inst.name ?? null;
+      if (inst.animation) a.anim = inst.animation;
       if (inst.props) Object.assign(a.vars, inst.props);
       if (inst.flipX) a.flipX = true;
+      if (mem) {
+        a.x = a.startX = mem.x ?? a.x;
+        a.y = a.startY = mem.y ?? a.y;
+        if (mem.vars) a.vars = { ...mem.vars };
+        if (mem.flipX !== undefined) a.flipX = mem.flipX;
+        if (mem.facing) a.facing = mem.facing;
+        if (mem.anim !== undefined) {
+          a.anim = mem.anim;
+          if (a.hasTag(mem.anim)) a.animLock = Infinity;
+        }
+      }
       this.actors.push(a);
     }
     this.started = false;
     this.log(`scene "${name}" started`);
   }
 
-  private makeActor(type: ObjectType, x: number, y: number): Actor {
-    const asset = type.sprite ? this.bundle.sprites[type.sprite] : undefined;
+  private makeActor(type: ObjectType, x: number, y: number, spriteOverride?: string): Actor {
+    const spriteName = spriteOverride && this.bundle.sprites[spriteOverride] ? spriteOverride : type.sprite;
+    const asset = spriteName ? this.bundle.sprites[spriteName] : undefined;
     const a = new Actor(this.nextId++, type, asset, x, y, this.time);
     type.events.forEach((e, i) => {
       if (e.trigger.type === 'timer') a.timers.set(i, this.time + Math.max(0.01, toNum(e.trigger.seconds ?? 1)));
@@ -334,6 +375,107 @@ export class World {
   gotoScene(name: string): void {
     if (!this.bundle.scenes[name]) throw new Error(`no scene "${name}"`);
     this.pendingScene = name;
+  }
+
+  /** Restarts the current scene from scratch (a persistent scene forgets what happened). */
+  restartScene(): void {
+    this.resetPending = true;
+    this.pendingScene = this.scene.name;
+  }
+
+  /** Plays a dialogue (dialogues/*.dialogue). `self` is the instance that speaks, `other` usually the player. */
+  startDialogue(name: string, self?: Actor, other?: Actor): Promise<void> {
+    if (self) {
+      if (this.talking.has(self)) return Promise.resolve();
+      this.talking.add(self);
+    }
+    const ctx: ExecCtx = { self, other };
+    const p = runDialogue(this.dialogues, name, {
+      show: (text, speaker, choices) => this.scripts.openDialog(text, { speaker, choices: choices ?? undefined }),
+      evaluate: (expr) => this.eval(expr, ctx),
+      read: (target) => this.read(parseTarget(target), ctx),
+      assign: (target, value) => this.assign(parseTarget(target), value, ctx),
+      selfName: self ? this.displayName(self) : '',
+      log: (m) => this.log(m),
+      command: (cmd, args) => this.dialogueCommand(cmd, args, ctx),
+    });
+    return p
+      .catch((err) => this.error(`dialogue ${name}`, err))
+      .finally(() => {
+        if (self) this.talking.delete(self);
+      });
+  }
+
+  private async dialogueCommand(cmd: string, args: string[], ctx: ExecCtx): Promise<'stop' | void> {
+    const self = ctx.self;
+    switch (cmd) {
+      case 'sound':
+        this.opts.sound?.(args[0] ?? 'blip', args[1] ? toNum(args[1]) : 0.5);
+        return;
+      case 'goto':
+        this.gotoScene(String(args[0]));
+        return 'stop';
+      case 'restart':
+        this.restartScene();
+        return 'stop';
+      case 'call': {
+        const fn = this.scripts.functions.get(String(args[0]));
+        if (!fn) throw new Error(`no script function "${args[0]}"`);
+        const arg = args.length > 1 ? this.eval(args.slice(1).join(' '), ctx) : undefined;
+        await this.scripts.run(`func ${args[0]}`, fn, this.scripts.handle(self), this.scripts.handle(ctx.other), arg);
+        return;
+      }
+      case 'emit':
+        this.emit(args.join(' '));
+        return;
+      case 'wait':
+        await new Promise<void>((resolve) => this.scripts.waitFor(toNum(args[0] ?? 1), resolve));
+        return;
+      case 'shake':
+        this.startShake(args[0] ? toNum(args[0]) : 3, args[1] ? toNum(args[1]) : 0.3);
+        return;
+      case 'anim':
+        if (self) {
+          this.setAnim(self, '');
+          this.setAnim(self, String(args[0] ?? ''));
+          self.animLock = self.hasTag(String(args[0])) ? Infinity : 0;
+        }
+        return;
+      case 'face': {
+        if (!self) return;
+        let dir = args[0] as Actor['facing'] | 'player';
+        if (dir === 'player' && ctx.other) {
+          const dx = ctx.other.x - self.x;
+          const dy = ctx.other.y - self.y;
+          dir = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : dy < 0 ? 'up' : 'down';
+        }
+        if (dir === 'player') return;
+        self.facing = dir;
+        if (self.hasTag(`idle_${dir}`)) this.setAnim(self, `idle_${dir}`);
+        else if (dir === 'left' || dir === 'right') self.flipX = dir === 'left';
+        return;
+      }
+      case 'destroy':
+        if (self) this.destroy(self);
+        return;
+      case 'spawn': {
+        const [obj, x = '0', y = '0'] = args;
+        this.spawn(String(obj), toNum(this.eval(x, ctx)) + (self?.x ?? 0), toNum(this.eval(y, ctx)) + (self?.y ?? 0));
+        return;
+      }
+      default:
+        throw new Error(`unknown command "${cmd}"`);
+    }
+  }
+
+  /** Display name of an instance: its own name, else the object type's. */
+  displayName(a: Actor): string {
+    return a.instName ?? a.type.name;
+  }
+
+  startShake(intensity: number, seconds: number): void {
+    const dur = Math.max(0, Math.min(10, seconds));
+    this.shake = { until: this.clock + dur, intensity: Math.max(0, Math.min(32, intensity)), duration: dur };
   }
 
   emit(message: string): void {
@@ -473,7 +615,7 @@ export class World {
       let bd = Infinity;
       for (const o of this.actors) {
         if (o === p || o.destroyed || o.type.hud) continue;
-        const hasHook = o.type.events.some((e) => !e.disabled && e.trigger.type === 'interact') || this.scriptBehaviors(o).some((sb) => sb.hooks.interact);
+        const hasHook = o.type.events.some((e) => !e.disabled && e.trigger.type === 'interact') || !!o.behavior('dialogue') || this.scriptBehaviors(o).some((sb) => sb.hooks.interact);
         if (!hasHook || !overlap(probe, o.box())) continue;
         const ob = o.box();
         const d = Math.hypot(ob.x + ob.w / 2 - (b.x + b.w / 2), ob.y + ob.h / 2 - (b.y + b.h / 2));
@@ -484,6 +626,12 @@ export class World {
       }
       if (!best) continue;
       this.fireObject(best, 'interact', undefined, p);
+      const talk = best.behavior('dialogue');
+      if (talk) {
+        const node = String(best.vars.dialogue ?? '') || String(talk.dialogue ?? '');
+        if (node) void this.startDialogue(node, best, p);
+        else this.error(`object ${best.type.name}`, new Error('Talks behavior without a dialogue (set the dialogue property of the instance)'));
+      }
       for (const sb of this.scriptBehaviors(best)) this.scripts.run(`${sb.name}.interact`, sb.hooks.interact, this.scripts.handle(best), this.scripts.handle(p));
       return;
     }
@@ -965,6 +1113,11 @@ export class World {
   destroy(a: Actor): void {
     if (a.destroyed) return;
     a.destroyed = true;
+    if (this.scene.persistent && a.sceneId) {
+      const mem = this.memory.get(this.scene.name) ?? new Map();
+      mem.set(a.sceneId, { destroyed: true });
+      this.memory.set(this.scene.name, mem);
+    }
     this.fireObject(a, 'destroyed');
     for (const sb of this.scriptBehaviors(a)) this.scripts.run(`${sb.name}.destroy`, sb.hooks.destroy, this.scripts.handle(a));
   }
@@ -1054,25 +1207,25 @@ export class World {
       }
       case 'flash': {
         const a = this.target(ctx, s.target);
-        if (a) a.flashUntil = this.time + toNum(s.seconds);
+        if (a) a.flashUntil = this.clock + toNum(s.seconds);
         return;
       }
       case 'gotoScene':
         this.gotoScene(String(s.scene));
         return;
       case 'restartScene':
-        this.pendingScene = this.scene.name;
+        this.restartScene();
         return;
       case 'sound':
         this.opts.sound?.(String(s.sound), toNum(s.volume ?? 0.5));
         return;
       case 'shake':
-        this.shake = { until: this.time + toNum(s.seconds), intensity: toNum(s.intensity) };
+        this.startShake(toNum(s.intensity), toNum(s.seconds));
         return;
       case 'say': {
         const text = fmt(this.eval(s.text, ctx));
         const secs = toNum(s.seconds);
-        this.message = text ? { text, until: secs > 0 ? this.time + secs : Infinity } : null;
+        this.message = text ? { text, until: secs > 0 ? this.clock + secs : Infinity } : null;
         this.log(`say: ${text}`);
         return;
       }
@@ -1087,6 +1240,9 @@ export class World {
         this.scripts.run(`func ${name}`, fn, this.scripts.handle(ctx.self), this.scripts.handle(ctx.other), arg);
         return;
       }
+      case 'dialogue':
+        void this.startDialogue(String(s.dialogue ?? ''), ctx.self, ctx.other ?? this.actors.find((a) => !a.destroyed && a.behaviors.some((b) => (b.type === 'topdown' || b.type === 'platformer') && b.controls !== false)));
+        return;
       case 'talk':
         void this.scripts.openDialog(fmt(this.eval(s.text, ctx)), { speaker: String(s.speaker ?? '') });
         return;
@@ -1125,6 +1281,7 @@ export class World {
       case 'onGround': return a.onGround;
       case 'animation': return a.anim;
       case 'object': return a.type.name;
+      case 'name': return this.displayName(a);
       case 'text': return a.textOverride ?? '';
       case 'id': return a.id;
       case 'age': return this.time - a.createdAt;
@@ -1246,7 +1403,7 @@ export class World {
   // ------------------------------------------------------------------ inspection
 
   /** Compact description of the running state, for playtest reports. */
-  snapshot(): { scene: string; time: number; globals: Record<string, Value>; sceneVars: Record<string, Value>; actors: { id: number; object: string; x: number; y: number; vx: number; vy: number; onGround: boolean; animation: string; vars: Record<string, Value> }[] } {
+  snapshot(): { scene: string; time: number; globals: Record<string, Value>; sceneVars: Record<string, Value>; actors: { id: number; object: string; name?: string; x: number; y: number; vx: number; vy: number; onGround: boolean; animation: string; vars: Record<string, Value> }[] } {
     return {
       scene: this.scene.name,
       time: Math.round(this.time * 100) / 100,
@@ -1255,6 +1412,7 @@ export class World {
       actors: this.actors.map((a) => ({
         id: a.id,
         object: a.type.name,
+        ...(a.instName ? { name: a.instName } : {}),
         x: Math.round(a.x * 10) / 10,
         y: Math.round(a.y * 10) / 10,
         vx: Math.round(a.vx),
@@ -1286,9 +1444,11 @@ export function renderWorld(w: World, r: Renderer): void {
   r.clear(scene.background || w.game.background);
   let camX = w.camera.x;
   let camY = w.camera.y;
-  if (w.time < w.shake.until) {
-    camX += (w.random() * 2 - 1) * w.shake.intensity;
-    camY += (w.random() * 2 - 1) * w.shake.intensity;
+  if (w.clock < w.shake.until) {
+    // Fades out over its duration.
+    const k = w.shake.intensity * Math.min(1, (w.shake.until - w.clock) / Math.max(0.01, w.shake.duration));
+    camX += (Math.random() * 2 - 1) * k;
+    camY += (Math.random() * 2 - 1) * k;
   }
   camX = Math.round(camX);
   camY = Math.round(camY);
@@ -1355,7 +1515,7 @@ export function renderWorld(w: World, r: Renderer): void {
   for (const a of hud) drawActor(w, r, a, 0, 0);
   w.scripts.draw(r, camX, camY);
 
-  if (w.message && w.time < w.message.until) {
+  if (w.message && w.clock < w.message.until) {
     const m = measureText(w.message.text);
     const s = m.width * 2 + 16 <= vw ? 2 : 1;
     const bw = m.width * s + 12;
@@ -1429,7 +1589,7 @@ function drawDialog(w: World, r: Renderer): void {
 
 function drawActor(w: World, r: Renderer, a: Actor, camX: number, camY: number): void {
   if (!a.visible || a.destroyed) return;
-  if (a.flashUntil > w.time && Math.floor(w.time * 12) % 2 === 0) return;
+  if (a.flashUntil > w.clock && Math.floor(w.clock * 12) % 2 === 0) return;
   const x = Math.round(a.x - camX);
   const y = Math.round(a.y - camY);
   if (a.asset && a.asset.frames.length) {

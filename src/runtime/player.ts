@@ -314,17 +314,23 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
   let raf = 0;
   let last = performance.now();
   let acc = 0;
-  const frame = (now: number) => {
-    raf = requestAnimationFrame(frame);
+  let busy = false;
+  const frame = async (now: number) => {
+    raf = requestAnimationFrame((t) => void frame(t));
+    if (busy) return;
+    busy = true;
     acc += Math.min(0.25, (now - last) / 1000);
     last = now;
     let steps = 0;
     while (acc >= STEP && steps < 5) {
       world.step(readInput());
+      // Let dialogue and script continuations (await say / choose / wait) run before the next step.
+      await world.settle();
       acc -= STEP;
       steps++;
     }
     if (steps === 5) acc = 0;
+    busy = false;
     renderWorld(world, renderer);
     if (showHitboxes) {
       ctx.globalAlpha = 0.8;
@@ -339,7 +345,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       ctx.globalAlpha = 1;
     }
   };
-  raf = requestAnimationFrame(frame);
+  raf = requestAnimationFrame((t) => void frame(t));
   if (opts.autofocus !== false) canvas.focus();
 
   const player: Player = {

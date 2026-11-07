@@ -14,14 +14,23 @@ class GameState {
   scenes: SceneSummary[] = [];
   /** What the project scripts register (for dropdowns) and their loading errors. */
   scriptInfo: { behaviors: string[]; functions: string[]; errors: string[] } = { behaviors: [], functions: [], errors: [] };
+  /** Dialogue names and parse errors (Dialogues tab). */
+  dialogueInfo: { nodes: string[]; errors: { file: string; line: number; message: string }[] } = { nodes: [], errors: [] };
   private listeners = new Set<Listener>();
   private saveTimer = 0;
   private lastRev = '';
   private dirty = false;
 
   async load(): Promise<void> {
-    const [game, sprites, scenes, scriptInfo] = await Promise.all([gameApi.getGame(), api.list(), gameApi.listScenes(), gameApi.scriptInfo().catch(() => this.scriptInfo)]);
+    const [game, sprites, scenes, scriptInfo, dialogueInfo] = await Promise.all([
+      gameApi.getGame(),
+      api.list(),
+      gameApi.listScenes(),
+      gameApi.scriptInfo().catch(() => this.scriptInfo),
+      gameApi.dialogueInfo().catch(() => this.dialogueInfo),
+    ]);
     this.scriptInfo = scriptInfo;
+    this.dialogueInfo = dialogueInfo;
     this.saved = game.saved;
     this.game = game;
     this.lastRev = game.rev;
@@ -82,7 +91,12 @@ class GameState {
   }
 
   /** Handles live notifications from the server (Claude editing through MCP, other tabs). */
-  async remote(kind: 'sprite' | 'scene' | 'game' | 'script', rev: string | null): Promise<boolean> {
+  async remote(kind: 'sprite' | 'scene' | 'game' | 'script' | 'dialogue', rev: string | null): Promise<boolean> {
+    if (kind === 'dialogue') {
+      this.dialogueInfo = await gameApi.dialogueInfo();
+      this.emit();
+      return true;
+    }
     if (kind === 'script') {
       this.scriptInfo = await gameApi.scriptInfo();
       this.emit();

@@ -14,7 +14,7 @@ const SUFFIX = '.sprite.json';
 const SCENE_SUFFIX = '.scene.json';
 export const GAME_FILE = 'game.json';
 
-export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script';
+export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script' | 'dialogue';
 const SCRIPT_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
 
 export interface SpriteSummary {
@@ -237,6 +237,58 @@ export class Workspace {
     fs.rmSync(this.scriptFile(name));
   }
 
+  // ------------------------------------------------------------------ dialogues
+
+  get dialoguesDir(): string {
+    return path.join(this.dir, 'dialogues');
+  }
+
+  dialogueFile(name: string): string {
+    if (!SCRIPT_RE.test(name)) throw new Error(`Invalid dialogue file name "${name}". Use letters, digits, "_" and "-".`);
+    return path.join(this.dialoguesDir, `${name}.dialogue`);
+  }
+
+  dialogueExists(name: string): boolean {
+    return fs.existsSync(this.dialogueFile(name));
+  }
+
+  listDialogues(): { name: string; size: number; updatedAt: number }[] {
+    if (!fs.existsSync(this.dialoguesDir)) return [];
+    return fs
+      .readdirSync(this.dialoguesDir)
+      .filter((f) => f.endsWith('.dialogue') && SCRIPT_RE.test(f.slice(0, -9)))
+      .map((f) => {
+        const st = fs.statSync(path.join(this.dialoguesDir, f));
+        return { name: f.slice(0, -9), size: st.size, updatedAt: st.mtimeMs };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  readDialogue(name: string): string {
+    const f = this.dialogueFile(name);
+    if (!fs.existsSync(f)) {
+      const names = this.listDialogues().map((s) => s.name);
+      throw new Error(`Dialogue file "${name}" not found.${names.length ? ' Available: ' + names.join(', ') : ' There are no dialogue files yet.'}`);
+    }
+    return fs.readFileSync(f, 'utf8');
+  }
+
+  loadDialogues(): Record<string, string> {
+    return Object.fromEntries(this.listDialogues().map((s) => [s.name, this.readDialogue(s.name)]));
+  }
+
+  writeDialogue(name: string, code: string): void {
+    const f = this.dialogueFile(name);
+    fs.mkdirSync(this.dialoguesDir, { recursive: true });
+    const tmp = path.join(this.dialoguesDir, `.${name}.${process.pid}.tmp`);
+    fs.writeFileSync(tmp, code);
+    fs.renameSync(tmp, f);
+  }
+
+  removeDialogue(name: string): void {
+    fs.rmSync(this.dialogueFile(name));
+  }
+
   private atomicWrite(target: string, data: string): void {
     const tmp = path.join(this.dir, `.${path.basename(target)}.${process.pid}.tmp`);
     fs.writeFileSync(tmp, data);
@@ -282,9 +334,21 @@ export class Workspace {
         onChange(name, 'script');
       }, 40));
     });
+    fs.mkdirSync(this.dialoguesDir, { recursive: true });
+    const dialogueWatcher = fs.watch(this.dialoguesDir, (_event, filename) => {
+      if (!filename || !filename.endsWith('.dialogue') || filename.startsWith('.')) return;
+      const name = filename.slice(0, -9);
+      const key = 'dialogue:' + name;
+      clearTimeout(timers.get(key));
+      timers.set(key, setTimeout(() => {
+        timers.delete(key);
+        onChange(name, 'dialogue');
+      }, 40));
+    });
     return () => {
       watcher.close();
       scriptWatcher.close();
+      dialogueWatcher.close();
     };
   }
 }

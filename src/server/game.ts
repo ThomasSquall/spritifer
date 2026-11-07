@@ -14,6 +14,7 @@ import type { GameBundle, GameProject, Scene, SpriteAsset } from '../core/game/t
 import { encodePng } from './png.js';
 import { inspectScripts } from './scripts.js';
 import type { ScriptInfo } from '../core/game/script.js';
+import { type DialogueError, buildDialogueBook } from '../core/game/dialogue.js';
 import type { Workspace } from './store.js';
 
 /** Sprite names a game actually uses (objects, tilesets, backgrounds). */
@@ -22,6 +23,7 @@ export function usedSprites(game: GameProject, scenes: Scene[]): Set<string> {
   for (const o of game.objects) if (o.sprite) out.add(o.sprite);
   for (const s of scenes) {
     if (s.tileset) out.add(s.tileset);
+    for (const i of s.instances) if (i.sprite) out.add(i.sprite);
     for (const b of s.backgrounds) if (b.sprite) out.add(b.sprite);
   }
   return out;
@@ -63,6 +65,7 @@ export interface LoadedGame {
   sheets: Map<string, Bitmap>;
   problems: Problem[];
   scriptInfo: ScriptInfo;
+  dialogueInfo: { nodes: string[]; errors: DialogueError[] };
 }
 
 /** Loads the game, all scenes and the sprites they use from the workspace. */
@@ -82,8 +85,11 @@ export function loadGameBundle(ws: Workspace, opts: { images?: boolean } = {}): 
   }
   const scripts = ws.loadScripts();
   const scriptInfo = inspectScripts(scripts);
-  const problems = validateGame(game, scenes, available, scriptInfo);
-  return { bundle: { game, scenes: Object.fromEntries(scenes.map((s) => [s.name, s])), sprites, scripts }, sheets, problems, scriptInfo };
+  const dialogues = ws.loadDialogues();
+  const book = buildDialogueBook(dialogues);
+  const dialogueInfo = { nodes: [...book.nodes.keys()].sort(), errors: book.errors };
+  const problems = validateGame(game, scenes, available, scriptInfo, dialogueInfo);
+  return { bundle: { game, scenes: Object.fromEntries(scenes.map((s) => [s.name, s])), sprites, scripts, dialogues }, sheets, problems, scriptInfo, dialogueInfo };
 }
 
 // ---------------------------------------------------------------------------

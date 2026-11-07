@@ -15,11 +15,9 @@
   "gold": 0,
   "potions": 1,
   "slain": "",
-  "opened": "",
-  "returnX": 0,
-  "returnY": 0,
   "foeId": "",
   "grace": 0,
+  "introDone": false,
   "metElder": false,
   "quest": 0,
   "questDone": false
@@ -50,15 +48,14 @@
    }
   },
   {
-   "name": "elder",
+   "name": "villager",
    "properties": {},
    "behaviors": [
     {
      "type": "solid"
     },
     {
-     "type": "script",
-     "name": "elder"
+     "type": "dialogue"
     }
    ],
    "events": [],
@@ -71,36 +68,17 @@
    }
   },
   {
-   "name": "merchant",
-   "properties": {},
-   "behaviors": [
-    {
-     "type": "solid"
-    },
-    {
-     "type": "script",
-     "name": "merchant"
-    }
-   ],
-   "events": [],
-   "sprite": "merchant",
-   "hitbox": {
-    "x": 2,
-    "y": 8,
-    "w": 12,
-    "h": 8
-   }
-  },
-  {
    "name": "chest",
-   "properties": {},
+   "properties": {
+    "gold": 10
+   },
    "behaviors": [
     {
      "type": "solid"
     },
     {
-     "type": "script",
-     "name": "chest"
+     "type": "dialogue",
+     "dialogue": "chest"
     }
    ],
    "events": [],
@@ -155,6 +133,6 @@
    "animation": "walk"
   }
  ],
- "rev": "er05zmzs",
+ "rev": "cvn1j0iy",
  "updatedBy": "claude"
 }

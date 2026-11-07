@@ -13,6 +13,7 @@ import { renderGameSettings } from './gameView.js';
 import { type SceneEditorHandle, mountSceneEditor } from './sceneEditor.js';
 import { renderProjects } from './projectsView.js';
 import { renderScripts } from './scriptsView.js';
+import { renderDialogues } from './dialoguesView.js';
 import { currentProjectId } from './api.js';
 
 const root = document.getElementById('app')!;
@@ -22,8 +23,8 @@ let current: { editor: Editor; view: ReturnType<typeof mountEditor> } | null = n
 let sceneEd: SceneEditorHandle | null = null;
 /** Re-renders the current list page after remote changes. */
 let refreshPage: (() => void) | null = null;
-let page: 'sprites' | 'objects' | 'scenes' | 'scripts' | 'game' | 'sprite' | 'scene' | 'projects' = 'sprites';
-let scriptsPage: ReturnType<typeof renderScripts> | null = null;
+let page: 'sprites' | 'objects' | 'scenes' | 'scripts' | 'dialogues' | 'game' | 'sprite' | 'scene' | 'projects' = 'sprites';
+let scriptsPage: { refresh: () => void; destroy: () => void } | null = null;
 
 /** The previous in-app page, so "back" from the sprite editor returns where the user came from. */
 let prevHash = '#/';
@@ -93,6 +94,13 @@ async function route(): Promise<void> {
     refreshPage = renderProjects(root);
     return;
   }
+  if ((m = /^#\/dialogues(?:\/(.+))?$/.exec(hash))) {
+    page = 'dialogues';
+    document.title = 'Dialogues · Spritifer';
+    scriptsPage = renderDialogues(root, m[1] ? decodeURIComponent(m[1]) : null, (name) => go(name ? `#/dialogues/${encodeURIComponent(name)}` : '#/dialogues'));
+    refreshPage = scriptsPage.refresh;
+    return;
+  }
   if ((m = /^#\/scripts(?:\/(.+))?$/.exec(hash))) {
     page = 'scripts';
     document.title = 'Scripts · Spritifer';
@@ -154,13 +162,18 @@ state.subscribe(() => {
 });
 
 async function onRemoteChange(e: ChangeEvent): Promise<void> {
-  const kind = e.type.replace('-changed', '') as 'sprite' | 'scene' | 'game' | 'script';
+  const kind = e.type.replace('-changed', '') as 'sprite' | 'scene' | 'game' | 'script' | 'dialogue';
   const fromSelf = e.updatedBy === 'editor';
   // Changes to other projects (e.g. Claude working elsewhere) only show a note.
   const mine = currentProjectId();
   if (e.project && mine && e.project !== mine) {
     if (page === 'projects') refreshSoon();
     if (e.updatedBy === 'claude') toast(`Claude is editing project "${e.project}"`, 'claude');
+    return;
+  }
+  if (kind === 'dialogue') {
+    await state.remote('dialogue', e.rev);
+    if (page === 'dialogues') refreshSoon();
     return;
   }
   if (kind === 'script') {

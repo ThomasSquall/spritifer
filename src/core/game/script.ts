@@ -179,10 +179,10 @@ export class ScriptHost {
         a.animLock = lock > 0 ? w.time + lock : a.hasTag(anim) ? Infinity : 0;
       },
       destroy: () => w.destroy(a),
-      flash: (seconds = 0.6) => (a.flashUntil = w.time + seconds),
+      flash: (seconds = 0.6) => (a.flashUntil = w.clock + seconds),
       moveTo: (x: number, y: number, speed = 60) => new Promise<void>((resolve) => this.movers.push({ actor: a, x, y, speed, stuck: 0, resolve })),
       moveBy: (dx: number, dy: number, speed = 60) => new Promise<void>((resolve) => this.movers.push({ actor: a, x: a.x + dx, y: a.y + dy, speed, stuck: 0, resolve })),
-      say: (text: string, opts: { choices?: string[]; portrait?: string } = {}) => this.openDialog(String(text), { speaker: a.type.name, ...opts }),
+      say: (text: string, opts: { choices?: string[]; portrait?: string } = {}) => this.openDialog(String(text), { speaker: w.displayName(a), ...opts }),
       distanceTo: (other: Handle) => Math.hypot(other.__actor.x - a.x, other.__actor.y - a.y),
       overlaps: (other: Handle) => {
         const p = a.box();
@@ -205,7 +205,7 @@ export class ScriptHost {
         if (p in methods) return methods[p];
         if (fields.has(p)) return (a as unknown as Record<string, unknown>)[p];
         switch (p) {
-          case 'name':
+          case 'name': return w.displayName(a);
           case 'object': return a.type.name;
           case 'id': return a.id;
           case 'sceneId': return a.sceneId ?? '';
@@ -276,6 +276,11 @@ export class ScriptHost {
   }
 
   // ------------------------------------------------------------------ time
+
+  /** Resolves after `seconds` of game clock. */
+  waitFor(seconds: number, resolve: () => void): void {
+    this.timers.push({ at: this.world.clock + Math.max(0, seconds), resolve });
+  }
 
   /** Resolves waits, waitUntil conditions and moveTo movements. Called every frame. */
   tick(dt: number): void {
@@ -441,6 +446,7 @@ export class ScriptHost {
       // dialogs & flow
       say: (text: unknown, opts: { speaker?: string; portrait?: string } = {}) => this.openDialog(String(text), opts).then(() => undefined),
       choose: (choices: unknown[], opts: { text?: string; speaker?: string; portrait?: string } = {}) => this.openDialog(String(opts.text ?? ''), { ...opts, choices: choices.map(String) }),
+      dialogue: (name: string, self?: Handle, other?: Handle) => w.startDialogue(String(name), self?.__actor, other?.__actor),
       wait: (seconds: number) => new Promise<void>((resolve) => this.timers.push({ at: w.clock + Math.max(0, Number(seconds) || 0), resolve })),
       waitUntil: (test: () => boolean) => new Promise<void>((resolve) => this.conditions.push({ test, resolve })),
       // state
@@ -475,9 +481,9 @@ export class ScriptHost {
       },
       // world
       goto: (scene: string) => w.gotoScene(String(scene)),
-      restart: () => w.gotoScene(w.scene.name),
+      restart: () => w.restartScene(),
       sound: (name: string, volume = 0.5) => w.opts.sound?.(String(name), volume),
-      shake: (intensity = 3, seconds = 0.3) => (w.shake = { until: w.time + seconds, intensity }),
+      shake: (intensity = 3, seconds = 0.3) => w.startShake(intensity, seconds),
       emit: (msg: string) => w.emit(String(msg)),
       lockControls: (on = true) => (w.controlsLocked = !!on),
       log: (...args: unknown[]) => w.log(args.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')),
@@ -527,6 +533,7 @@ REGISTER
 FLOW (return promises — use await inside async functions)
 - await say(text, { speaker, portrait })       dialog box with typewriter text; the player confirms with Space/Z/Enter. The game pauses while a dialog is open.
 - const i = await choose(['Attack', 'Run'], { text, speaker })   menu, returns the chosen index (Up/Down + confirm)
+- await dialogue('name', self, other)   plays a dialogue written in dialogues/*.dialogue (see dialogue_reference)
 - await wait(seconds)    await waitUntil(() => condition)
 - await self.moveTo(x, y, speed)   await self.moveBy(dx, dy, speed)   (walks with walk_<dir> animations, stops at walls)
 - lockControls(true/false)   freeze player controls during cutscenes

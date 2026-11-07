@@ -1,0 +1,77 @@
+# Everything people say in Mossbrook.
+# "self" is the villager you talk to: its Name comes from the scene inspector.
+
+=== intro
+Welcome to Mossbrook!
+Walk with the arrows. Press Space or Z next to people and things to talk.
+~ introDone = true
+
+=== elder
+! face player
+if !metElder
+  self: Welcome to Mossbrook, traveler.
+  self: Slimes have been eating our cabbages all summer...
+  self: Will you chase them away?
+  * I will help!
+    ~ quest = 1
+    ~ potions += 1
+    ! sound powerup
+    self: Bless you! Take this potion. Walk into a slime to fight it.
+  * Not my problem.
+    self: Hmph. Come back if you change your mind.
+  ~ metElder = true
+elif count("slime") > 0
+  if !quest
+    self: Changed your mind?
+    * Fine, I will help.
+      ~ quest = 1
+      self: Thank you!
+    * Still no.
+      self: Hmph.
+  else
+    self: {count("slime")} slimes still roam the village.
+elif !questDone
+  ~ questDone = true
+  ~ gold += 20
+  ! sound coin
+  self: The slimes are gone! Here are 20 gold, hero.
+else
+  self: Thanks to you, the cabbages are safe.
+
+=== merchant
+! face player
+self: Potions! Fresh potions!
+-> shop
+
+=== shop
+self: You have {gold} gold. Potions are 10.
+* Buy a potion [if gold >= 10]
+  ~ gold -= 10
+  ~ potions += 1
+  ! sound coin
+  self: Pleasure doing business!
+  -> shop
+* Leave
+  self: Come again!
+
+=== mira
+! face player
+self: Hi! I'm {self.name}.
+if count("slime") > 0
+  self: Grandpa says I can't go near the pond. There's a slime there!
+else
+  self: The slimes are gone! Can I go to the pond now?
+* Be careful!
+  self: I will!
+* Bye!
+  self: Bye bye!
+
+=== chest
+if self.opened
+  It is empty.
+else
+  ! anim open
+  ! sound powerup
+  ~ self.opened = true
+  ~ gold += self.gold
+  You found {self.gold} gold!

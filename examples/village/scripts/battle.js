@@ -1,5 +1,5 @@
 // Turn-based battles: touching a slime on the map starts one.
-
+// Battles are game logic, so they live in a script (conversations are in the Dialogues tab).
 const FOES = { slime: { name: 'Slime', hp: 12, attack: [1, 4], gold: 5 } }
 let battle = null
 
@@ -9,23 +9,14 @@ behavior('monster', {
     if (String(vars.slain).split(',').includes(String(self.sceneId))) self.destroy()
   },
   collide(self, other) {
-    if (other.name !== 'player' || battle || game.clock < vars.grace) return
-    vars.returnX = other.x
-    vars.returnY = other.y
+    if (other.object !== 'player' || battle || game.clock < vars.grace) return
     vars.foeId = self.sceneId
     sound('blip')
     goto('battle')
   },
 })
 
-// Coming back from a battle: put the player where the fight started.
-onSceneStart('town', () => {
-  const p = player()
-  if (p && vars.returnX) {
-    p.x = vars.returnX
-    p.y = vars.returnY
-  }
-})
+// The town is a persistent scene: coming back from a battle, everyone is where they were.
 
 onSceneStart('battle', async () => {
   const def = FOES.slime
@@ -73,7 +64,6 @@ onSceneStart('battle', async () => {
   } else if (vars.hp <= 0) {
     await say('You fainted... The elder nursed you back to health.')
     vars.hp = vars.maxHp
-    vars.returnX = 0
   }
   if (fled || vars.hp > 0) vars.grace = game.clock + 2
   battle = null

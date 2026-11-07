@@ -29,6 +29,8 @@ export interface SheetContext {
   /** Names registered by the project scripts. */
   functions: string[];
   scriptBehaviors: string[];
+  /** Dialogue names from the Dialogues tab. */
+  dialogues: string[];
 }
 
 const sounds = new SoundBoard();
@@ -87,6 +89,9 @@ export function paramInput(spec: ParamSpec, value: Value | undefined, onChange: 
       break;
     case 'function':
       input = select([['', ctx.functions.length ? '— function —' : '— no script functions —'], ...ctx.functions], String(v), onChange);
+      break;
+    case 'dialogue':
+      input = select([['', ctx.dialogues.length ? '— dialogue —' : '— no dialogues yet —'], ...ctx.dialogues], String(v), onChange);
       break;
     case 'scriptBehavior':
       input = select([['', ctx.scriptBehaviors.length ? '— script behavior —' : '— none in scripts —'], ...ctx.scriptBehaviors], String(v), onChange);

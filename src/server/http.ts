@@ -14,6 +14,8 @@ import { buildGameHtml, exportGame, loadGameBundle, loadRuntime, renderScenePrev
 import { renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
 import { SCRIPT_TEMPLATE, checkScriptSyntax, inspectScripts } from './scripts.js';
 import { SCRIPT_REFERENCE } from '../core/game/script.js';
+import { DIALOGUE_REFERENCE, buildDialogueBook } from '../core/game/dialogue.js';
+import { DIALOGUE_TEMPLATE } from './scripts.js';
 
 const WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
 
@@ -72,6 +74,8 @@ export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1
           updatedBy = raw.updatedBy;
         } else if (kind === 'script') {
           rev = pws.scriptExists(name) ? String(Date.now()) : null;
+        } else if (kind === 'dialogue') {
+          rev = pws.dialogueExists(name) ? String(Date.now()) : null;
         } else if (kind === 'scene') {
           const sc = pws.loadScene(name);
           rev = sc.rev;
@@ -177,6 +181,7 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
   if (parts[1] === 'game') return handleGame(ws, req, res, parts.slice(2), url);
   if (parts[1] === 'scenes') return handleScenes(ws, req, res, parts.slice(2), url);
   if (parts[1] === 'scripts') return handleScripts(ws, req, res, parts.slice(2));
+  if (parts[1] === 'dialogues') return handleDialogues(ws, req, res, parts.slice(2));
 
   if (parts[1] !== 'sprites') throw new HttpError(404, 'Not found');
   const name = parts[2];
@@ -347,6 +352,49 @@ async function handleScripts(ws: Workspace, req: http.IncomingMessage, res: http
     if (ws.scriptExists(body.to)) throw new HttpError(409, `Script "${body.to}" already exists`);
     ws.writeScript(body.to, ws.readScript(name));
     ws.removeScript(name);
+    return sendJson(res, 200, { name: body.to });
+  }
+  throw new HttpError(404, 'Not found');
+}
+
+async function handleDialogues(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {
+  const method = req.method ?? 'GET';
+  const name = parts[0];
+  if (!name) {
+    if (method === 'GET') return sendJson(res, 200, ws.listDialogues());
+    if (method === 'POST') {
+      const body = (await readJson(req)) as { name: string; code?: string };
+      if (ws.dialogueExists(body.name)) throw new HttpError(409, `Dialogue file "${body.name}" already exists`);
+      ws.writeDialogue(body.name, body.code ?? DIALOGUE_TEMPLATE);
+      return sendJson(res, 201, { name: body.name });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (name === '_info' && method === 'GET') {
+    const book = buildDialogueBook(ws.loadDialogues());
+    return sendJson(res, 200, { nodes: [...book.nodes.keys()].sort(), errors: book.errors });
+  }
+  if (name === '_reference' && method === 'GET') return sendJson(res, 200, { reference: DIALOGUE_REFERENCE });
+  const sub = parts[1];
+  if (!sub) {
+    if (method === 'GET') return sendJson(res, 200, { name, code: ws.readDialogue(name) });
+    if (method === 'PUT') {
+      const body = (await readJson(req)) as { code: string };
+      if (typeof body.code !== 'string') throw new HttpError(400, 'Missing code');
+      ws.writeDialogue(name, body.code);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (method === 'DELETE') {
+      ws.removeDialogue(name);
+      return sendJson(res, 200, { ok: true });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (sub === 'rename' && method === 'POST') {
+    const body = (await readJson(req)) as { to: string };
+    if (ws.dialogueExists(body.to)) throw new HttpError(409, `Dialogue file "${body.to}" already exists`);
+    ws.writeDialogue(body.to, ws.readDialogue(name));
+    ws.removeDialogue(name);
     return sendJson(res, 200, { name: body.to });
   }
   throw new HttpError(404, 'Not found');

@@ -81,6 +81,12 @@ export interface TileLayer {
 export interface Instance {
   id: string;
   object: string;
+  /** Name shown in the hierarchy and used as the speaker in dialogues ("Mira", "Old Tom"). */
+  name?: string;
+  /** Draw this sprite instead of the object type's one (same NPC type, different characters). */
+  sprite?: string;
+  /** Start with this animation instead of the object type's one. */
+  animation?: string;
   x: number;
   y: number;
   /** Overrides of the object's properties for this instance. */
@@ -113,6 +119,8 @@ export interface Scene {
   events: GameEvent[];
   /** Draw instances lower on screen in front of higher ones (top-down / RPG depth). */
   ySort?: boolean;
+  /** Remember placed instances when leaving the scene (positions, properties, destroyed ones): RPG towns. Restarting the scene forgets. */
+  persistent?: boolean;
   /** Scene variables (reset when the scene starts). Read as `scene.name`. */
   variables: Record<string, Value>;
   rev: string;
@@ -264,6 +272,9 @@ export function normalizeScene(v: unknown): Scene {
     const props = vars(I.props);
     if (Object.keys(props).length) inst.props = props;
     if (I.flipX === true) inst.flipX = true;
+    if (typeof I.name === 'string' && I.name) inst.name = I.name;
+    if (typeof I.sprite === 'string' && I.sprite) inst.sprite = I.sprite;
+    if (typeof I.animation === 'string' && I.animation) inst.animation = I.animation;
     return inst;
   });
   const backgrounds: SceneBackground[] = (Array.isArray(o.backgrounds) ? o.backgrounds : []).map((b: unknown) => {
@@ -284,6 +295,7 @@ export function normalizeScene(v: unknown): Scene {
     instances,
     events: normalizeEvents(o.events),
     ...(o.ySort === true ? { ySort: true } : {}),
+    ...(o.persistent === true ? { persistent: true } : {}),
     variables: vars(o.variables),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
@@ -346,4 +358,6 @@ export interface GameBundle {
   sprites: Record<string, SpriteAsset>;
   /** Script sources by name (scripts/<name>.js). */
   scripts?: Record<string, string>;
+  /** Dialogue sources by file name (dialogues/<name>.dialogue). */
+  dialogues?: Record<string, string>;
 }

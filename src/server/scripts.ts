@@ -34,20 +34,28 @@ export function checkScriptSyntax(code: string, filename: string): string | null
   }
 }
 
-export const SCRIPT_TEMPLATE = `// Scripts register behaviors, functions and hooks. See the reference on the right.
-
-// An NPC you can talk to: give an object type the behavior { type: "script", name: "npc" }
-// and a "line" property with what it says.
-behavior('npc', {
-  interact: async (self, player) => {
-    self.face(player.x < self.x ? 'left' : 'right')
-    await say(self.line || 'Hello!', { speaker: self.name })
-  },
-})
+export const SCRIPT_TEMPLATE = `// Scripts hold game logic that events can't express well. See the reference on the right.
+// (Conversations go in the Dialogues tab.)
 
 // A function you can call from an event with the action "Run script function".
 func('reward', async (self, other, amount) => {
   vars.score = (vars.score || 0) + (amount || 1)
   sound('coin')
 })
+
+// Custom HUD drawn every frame.
+onDraw((ui) => {
+  ui.text('SCORE ' + (vars.score || 0), ui.width - 6, 6, { align: 'right' })
+})
+`;
+
+export const DIALOGUE_TEMPLATE = `# Dialogues: one file can hold many. Give an NPC object type the behavior "Talks (dialogue)",
+# then set each placed instance's "dialogue" property (and its Name) in the scene inspector.
+
+=== villager
+self: Nice weather today!
+* Ask about the village
+  self: It's small, but we like it here.
+* Say goodbye
+  self: See you around!
 `;

@@ -52,7 +52,9 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   let dimOthers = false;
   let hover: { x: number; y: number } | null = null;
   let tileset: LoadedAsset | undefined;
+  /** Loaded sprites by sprite name (object sprites and per-instance overrides). */
   const assets = new Map<string, LoadedAsset>();
+  const spriteOf = (i: Instance) => i.sprite ?? state.object(i.object)?.sprite;
   const undoStack: string[] = [];
   const redoStack: string[] = [];
   let saveTimer = 0;
@@ -119,15 +121,18 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const loadAssets = async () => {
     tileset = scene.tileset ? await state.asset(scene.tileset) : undefined;
     assets.clear();
+    const names = new Set<string>();
+    for (const o of state.game!.objects) if (o.sprite) names.add(o.sprite);
+    for (const i of scene.instances) if (i.sprite) names.add(i.sprite);
     await Promise.all(
-      state.game!.objects.map(async (o) => {
-        const a = await state.asset(o.sprite);
-        if (a) assets.set(o.name, a);
+      [...names].map(async (n) => {
+        const a = await state.asset(n);
+        if (a) assets.set(n, a);
       }),
     );
     draw();
     renderPalette();
-    renderObjectList();
+    renderRight();
   };
 
   // ---------------------------------------------------------------- layout
@@ -210,10 +215,11 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   };
 
   const instanceFrame = (i: Instance) => {
-    const a = assets.get(i.object);
+    const spr = spriteOf(i);
+    const a = spr ? assets.get(spr) : undefined;
     if (!a || !a.frames.length) return null;
     const obj = state.object(i.object);
-    const tag = a.tags.find((t) => t.name === obj?.animation);
+    const tag = a.tags.find((t) => t.name === (i.animation ?? obj?.animation));
     return { a, f: a.frames[tag?.from ?? 0] ?? a.frames[0] };
   };
 
@@ -436,7 +442,8 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   };
   const placeAt = (wx: number, wy: number, free: boolean) => {
     if (!placeObject) return toast('Pick an object type on the right first', 'error');
-    const a = assets.get(placeObject);
+    const po = state.object(placeObject);
+    const a = po?.sprite ? assets.get(po.sprite) : undefined;
     const w = a?.width ?? ts();
     const hh = a?.height ?? ts();
     let x: number;
@@ -794,11 +801,86 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     redraw();
   }
 
-  // ---------------------------------------------------------------- right side: objects, inspector, scene settings
+  // ---------------------------------------------------------------- right side: hierarchy / objects / scene tabs + inspector
+  type RightTab = 'hierarchy' | 'objects' | 'scene';
+  let rightTab: RightTab = 'hierarchy';
+  let filter = '';
+  const tabsBar = h('div', { class: 'right-tabs' });
+  const hierarchyBox = h('div', { class: 'panel hierarchy' });
   const objectsBox = h('div', { class: 'panel' });
   const inspectorBox = h('div', { class: 'panel' });
   const settingsBox = h('div', { class: 'panel' });
-  rightSide.append(objectsBox, inspectorBox, settingsBox);
+  const tabBody = h('div', { class: 'right-tab-body' });
+  rightSide.append(tabsBar, tabBody, inspectorBox);
+
+  function renderRight(): void {
+    clear(tabsBar);
+    const tabs: [RightTab, string][] = [['hierarchy', `Hierarchy (${scene.instances.length})`], ['objects', 'Add'], ['scene', 'Scene']];
+    for (const [id, label] of tabs) tabsBar.append(h('button', { class: `right-tab${rightTab === id ? ' active' : ''}`, onclick: () => { rightTab = id; renderRight(); } }, label));
+    clear(tabBody);
+    if (rightTab === 'hierarchy') {
+      renderHierarchy();
+      tabBody.append(hierarchyBox);
+    } else if (rightTab === 'objects') {
+      renderObjectList();
+      tabBody.append(objectsBox);
+    } else {
+      renderSettings();
+      tabBody.append(settingsBox);
+    }
+  }
+
+  /** Brings an instance into view (when it is outside the canvas). */
+  const reveal = (inst: Instance) => {
+    const r = wrap.getBoundingClientRect();
+    const b = instanceBox(inst);
+    const sx = panX + b.x * zoom;
+    const sy = panY + b.y * zoom;
+    if (sx < 20 || sy < 20 || sx + b.w * zoom > r.width - 20 || sy + b.h * zoom > r.height - 20) {
+      panX = Math.round(r.width / 2 - (b.x + b.w / 2) * zoom);
+      panY = Math.round(r.height / 2 - (b.y + b.h / 2) * zoom);
+    }
+  };
+
+  function select(id: string | null, focus = false): void {
+    selectedId = id;
+    const inst = scene.instances.find((i) => i.id === id);
+    if (inst && focus) reveal(inst);
+    if (rightTab === 'hierarchy') renderHierarchy();
+    renderInspector();
+    draw();
+  }
+
+  function renderHierarchy(): void {
+    clear(hierarchyBox);
+    const search = h('input', { type: 'text', placeholder: 'Filter by name or type…', value: filter, class: 'hier-search', oninput: () => { filter = search.value; renderRows(); } });
+    const rows = h('div', { class: 'hier-list' });
+    const renderRows = () => {
+      clear(rows);
+      const f = filter.trim().toLowerCase();
+      const list = scene.instances.filter((i) => !f || (i.name ?? '').toLowerCase().includes(f) || i.object.toLowerCase().includes(f) || String(i.props?.dialogue ?? '').toLowerCase().includes(f));
+      if (!list.length) rows.append(h('p', { class: 'muted small' }, scene.instances.length ? 'Nothing matches.' : 'No instances yet: place objects from the “Add” tab.'));
+      for (const inst of list) {
+        const spr = state.sprite(spriteOf(inst));
+        const obj = state.object(inst.object);
+        const talk = inst.props?.dialogue;
+        rows.append(h('div', {
+          class: `hier-row${inst.id === selectedId ? ' active' : ''}`,
+          title: `${inst.object} at ${inst.x}, ${inst.y}`,
+          onclick: () => select(inst.id, true),
+        },
+          h('span', { class: 'hier-thumb' }, spr ? h('img', { src: api.previewUrl(spr.name, spr.rev, 1), alt: '' }) : h('span', { class: 'txt-badge' }, obj?.text !== undefined ? 'Aa' : '?')),
+          h('span', { class: 'hier-name' }, inst.name ?? inst.object),
+          inst.name ? h('span', { class: 'hier-type muted' }, inst.object) : null,
+          talk ? h('span', { class: 'hier-talk', title: `Dialogue: ${talk}` }, '💬') : null,
+          obj ? null : h('span', { class: 'danger-text small' }, '?'),
+        ));
+      }
+    };
+    renderRows();
+    hierarchyBox.append(search, rows);
+    hierarchyBox.querySelector('.hier-row.active')?.scrollIntoView({ block: 'nearest' });
+  }
 
   function renderObjectList(): void {
     clear(objectsBox);
@@ -831,39 +913,105 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   }
 
   function renderInspector(): void {
+    // Keep the hierarchy's highlight and count in sync with the selection.
+    if (rightTab === 'hierarchy' && !hierarchyBox.contains(document.activeElement)) renderRight();
     clear(inspectorBox);
     const inst = scene.instances.find((i) => i.id === selectedId);
-    inspectorBox.append(h('div', { class: 'panel-title' }, 'Instance'));
+    inspectorBox.append(h('div', { class: 'panel-title' }, 'Inspector'));
     if (!inst) {
-      inspectorBox.append(h('p', { class: 'muted small' }, `${scene.instances.length} instance${scene.instances.length === 1 ? '' : 's'} in this scene. Select one with the move tool (V) to edit it; Delete removes it, Ctrl+D duplicates, arrows nudge.`));
+      inspectorBox.append(h('p', { class: 'muted small' }, 'Click an instance in the Hierarchy or on the map (move tool, V) to see its properties. Delete removes it, Ctrl+D duplicates, arrows nudge.'));
       return;
     }
     const obj = state.object(inst.object);
+    const edit = (fn: () => void) => { snapshot(); fn(); changed(); };
     const num = (label: string, get: () => number, set: (v: number) => void) => {
-      const inp = h('input', { type: 'number', class: 'num', value: String(get()), onchange: () => { snapshot(); set(Number(inp.value) || 0); changed(); } });
+      const inp = h('input', { type: 'number', class: 'num', value: String(get()), onchange: () => edit(() => set(Number(inp.value) || 0)) });
       return h('label', {}, label, inp);
     };
-    const flip = h('input', { type: 'checkbox', checked: !!inst.flipX, onchange: () => { snapshot(); if (flip.checked) inst.flipX = true; else delete inst.flipX; changed(); } });
-    const props = h('div', { class: 'props' });
     const parse = (s: string): Value => (s === 'true' ? true : s === 'false' ? false : s.trim() !== '' && Number.isFinite(Number(s)) ? Number(s) : s);
-    for (const [k, def] of Object.entries(obj?.properties ?? {})) {
-      const cur = inst.props?.[k];
-      const inp = h('input', { type: 'text', value: cur !== undefined ? String(cur) : '', placeholder: String(def), oninput: () => {
-        inst.props ??= {};
-        if (inp.value === '') delete inst.props[k];
-        else inst.props[k] = parse(inp.value);
-        if (!Object.keys(inst.props).length) delete inst.props;
-        changed();
-      } });
-      props.append(h('div', { class: 'prop-row' }, h('code', {}, k), inp));
+    const setProp = (k: string, v: Value | undefined) => {
+      inst.props ??= {};
+      if (v === undefined || v === '') delete inst.props[k];
+      else inst.props[k] = v;
+      if (!Object.keys(inst.props).length) delete inst.props;
+    };
+
+    const nameIn = h('input', { type: 'text', value: inst.name ?? '', placeholder: inst.object, oninput: () => {
+      if (nameIn.value.trim()) inst.name = nameIn.value.trim();
+      else delete inst.name;
+      changed();
+      if (rightTab === 'hierarchy') {
+        const row = hierarchyBox.querySelector('.hier-row.active .hier-name');
+        if (row) row.textContent = inst.name ?? inst.object;
+      }
+    } });
+    const typeSel = h('select', { onchange: () => edit(() => { inst.object = typeSel.value; renderInspector(); renderRight(); void loadAssets(); }) },
+      ...state.game!.objects.map((o) => h('option', { value: o.name, selected: o.name === inst.object }, o.name)));
+    if (!obj) typeSel.prepend(h('option', { value: inst.object, selected: true }, `${inst.object} (missing)`));
+    const spriteSel = h('select', { onchange: () => edit(() => { if (spriteSel.value) inst.sprite = spriteSel.value; else delete inst.sprite; delete inst.animation; void loadAssets(); renderInspector(); }) },
+      h('option', { value: '' }, `— ${obj?.sprite ?? 'none'} (from ${inst.object}) —`),
+      ...state.sprites.map((sp) => h('option', { value: sp.name, selected: sp.name === inst.sprite }, sp.name)));
+    const animSel = h('select', { onchange: () => edit(() => { if (animSel.value) inst.animation = animSel.value; else delete inst.animation; }) }, h('option', { value: '' }, `— ${obj?.animation ?? 'default'} —`));
+    const effective = spriteOf(inst);
+    if (effective) void state.asset(effective).then((a) => {
+      for (const t of a?.tags ?? []) animSel.append(h('option', { value: t.name, selected: t.name === inst.animation }, t.name));
+    });
+    const flip = h('input', { type: 'checkbox', checked: !!inst.flipX, onchange: () => edit(() => { if (flip.checked) inst.flipX = true; else delete inst.flipX; }) });
+
+    // Dialogue: only for object types that talk.
+    const talks = obj?.behaviors.find((b) => b.type === 'dialogue');
+    let dialogueRow: HTMLElement | null = null;
+    if (talks) {
+      const cur = String(inst.props?.dialogue ?? '');
+      const dSel = h('select', { onchange: () => edit(() => { setProp('dialogue', dSel.value || undefined); renderRight(); }) },
+        h('option', { value: '' }, talks.dialogue ? `— ${talks.dialogue} (default) —` : '— choose a dialogue —'),
+        ...state.dialogueInfo.nodes.map((n) => h('option', { value: n, selected: n === cur }, n)));
+      if (cur && !state.dialogueInfo.nodes.includes(cur)) dSel.prepend(h('option', { value: cur, selected: true }, `${cur} (missing)`));
+      dialogueRow = h('div', { class: 'dialogue-row' },
+        h('label', {}, 'Dialogue', dSel),
+        h('a', { class: 'small', href: '#/dialogues' }, 'write dialogues →'),
+      );
     }
+
+    const props = h('div', { class: 'props' });
+    const keys = new Set([...Object.keys(obj?.properties ?? {}), ...Object.keys(inst.props ?? {})]);
+    keys.delete('dialogue');
+    for (const k of keys) {
+      const def = obj?.properties[k];
+      const cur = inst.props?.[k];
+      const inp = h('input', { type: 'text', value: cur !== undefined ? String(cur) : '', placeholder: def !== undefined ? String(def) : '', oninput: () => { setProp(k, inp.value === '' ? undefined : parse(inp.value)); changed(); } });
+      props.append(h('div', { class: 'prop-row' }, h('code', { title: def === undefined ? 'Only on this instance' : 'Empty = the object type default' }, k), inp,
+        def === undefined ? iconButton('close', 'Remove', () => edit(() => { setProp(k, undefined); renderInspector(); }), { class: 'icon-btn tiny' }) : h('span', {})));
+    }
+
     inspectorBox.append(
       h('div', { class: 'form' },
-        h('div', { class: 'inst-head' }, h('strong', {}, inst.object), obj ? h('a', { class: 'small', href: `#/objects/${encodeURIComponent(inst.object)}` }, 'edit type →') : h('span', { class: 'danger-text small' }, 'unknown type')),
+        h('label', {}, 'Name', nameIn),
+        h('div', { class: 'row2' }, h('label', {}, 'Object type', typeSel), h('label', {}, 'Sprite', spriteSel)),
+        h('div', { class: 'row2' }, h('label', {}, 'Animation', animSel), h('label', { class: 'inline flip-in' }, flip, 'Flip')),
+        dialogueRow,
         h('div', { class: 'row2' }, num('x', () => inst.x, (v) => (inst.x = v)), num('y', () => inst.y, (v) => (inst.y = v))),
-        h('label', { class: 'inline' }, flip, 'Flip horizontally'),
-        Object.keys(obj?.properties ?? {}).length ? h('div', {}, h('div', { class: 'muted small' }, 'Properties (empty = default)'), props) : null,
-        h('button', { class: 'small danger', onclick: () => { snapshot(); scene.instances = scene.instances.filter((i) => i !== inst); selectedId = null; changed(); renderInspector(); } }, icon('trash', 13), 'Remove'),
+        h('div', {}, h('div', { class: 'muted small' }, keys.size ? 'Properties (empty = default of the type)' : 'Properties'), props,
+          h('button', { class: 'small ghost', onclick: async () => {
+            const k = await promptText('Instance property', 'Name (only this instance, e.g. hp, line, reward)', '');
+            if (!k) return;
+            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) return toast('Invalid name', 'error');
+            edit(() => setProp(k, 0));
+            renderInspector();
+          } }, icon('plus', 12), 'Property')),
+        h('div', { class: 'actions' },
+          obj ? h('a', { class: 'small', href: `#/objects/${encodeURIComponent(inst.object)}` }, `edit ${inst.object} →`) : h('span', { class: 'danger-text small' }, 'unknown type'),
+          h('span', { class: 'spacer' }),
+          h('button', { class: 'small', title: 'Duplicate (Ctrl+D)', onclick: () => {
+            snapshot();
+            const copy: Instance = { ...JSON.parse(JSON.stringify(inst)), id: newGameId(), x: inst.x + ts() };
+            scene.instances.push(copy);
+            changed();
+            select(copy.id);
+            renderRight();
+          } }, icon('copy', 13)),
+          h('button', { class: 'small danger', onclick: () => { snapshot(); scene.instances = scene.instances.filter((i) => i !== inst); changed(); select(null); renderRight(); } }, icon('trash', 13), 'Remove'),
+        ),
       ),
     );
   }
@@ -898,6 +1046,9 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('label', { class: 'inline', title: 'Instances lower on screen are drawn in front: depth for top-down games and RPGs' },
           h('input', { type: 'checkbox', checked: !!scene.ySort, onchange: (e: Event) => { snapshot(); if ((e.target as HTMLInputElement).checked) scene.ySort = true; else delete scene.ySort; changed(); } }),
           'Sort by Y (top-down depth)'),
+        h('label', { class: 'inline', title: 'Coming back to this scene (e.g. after a battle) keeps positions, opened chests, defeated enemies and instance properties. Restart Scene forgets.' },
+          h('input', { type: 'checkbox', checked: !!scene.persistent, onchange: (e: Event) => { snapshot(); if ((e.target as HTMLInputElement).checked) scene.persistent = true; else delete scene.persistent; changed(); } }),
+          'Remember instances when leaving'),
         vars,
         h('div', { class: 'actions' },
           h('button', { class: 'small', onclick: async () => {
@@ -926,9 +1077,8 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const renderSide = () => {
     renderLayers();
     renderPalette();
-    renderObjectList();
+    renderRight();
     renderInspector();
-    renderSettings();
   };
 
   // ---------------------------------------------------------------- start
@@ -938,7 +1088,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   requestAnimationFrame(() => fitHeight());
   await loadAssets();
   const unsub = state.subscribe(() => {
-    renderObjectList();
+    renderRight();
     void loadAssets();
   });
 

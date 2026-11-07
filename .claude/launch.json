@@ -4,8 +4,28 @@
     {
       "name": "spritifer",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["dist/server/cli.js", "serve", "--workspace", "sprites", "--port", "7420"],
+      "runtimeArgs": [
+        "dist/server/cli.js",
+        "serve",
+        "--workspace",
+        "sprites",
+        "--port",
+        "7420"
+      ],
       "port": 7420
+    },
+    {
+      "name": "coin-quest",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "dist/server/cli.js",
+        "serve",
+        "--workspace",
+        "examples/coin-quest",
+        "--port",
+        "7421"
+      ],
+      "port": 7421
     }
   ]
 }

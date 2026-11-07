@@ -120,7 +120,7 @@ export function renderGallery(root: HTMLElement, open: (name: string) => void): 
     h('div', { class: 'gallery' },
       h('header', { class: 'gallery-head' },
         h('div', { class: 'brand' }, h('span', { class: 'logo' }), h('h1', {}, 'Spritifer')),
-        h('p', { class: 'muted' }, 'Pixel art, animation and spritesheets — drawn by you or by Claude.'),
+        h('p', { class: 'muted' }, 'Make 2D games: draw sprites and tilesets, build scenes, add events, play and export for the web — by yourself or with Claude.'),
       ),
       h('div', { class: 'gallery-body' },
         h('section', { class: 'gallery-main' }, h('h2', {}, 'Sprites'), list),

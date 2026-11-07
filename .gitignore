@@ -4,3 +4,4 @@ sprites/
 *.log
 .DS_Store
 .claude/settings.local.json
+examples/*/export/

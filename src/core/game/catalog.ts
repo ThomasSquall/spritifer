@@ -1,0 +1,249 @@
+/**
+ * The vocabulary of the event system and behaviors, with parameter specs. The editor builds its forms
+ * from this, the MCP server documents it, and validateGame() checks projects against it.
+ */
+
+import { checkExpr } from './expr.js';
+import type { Behavior, EventStep, GameEvent, GameProject, Scene, Value } from './types.js';
+
+export type ParamType =
+  | 'expr' // expression, evaluated at run time
+  | 'text' // literal string
+  | 'number'
+  | 'bool'
+  | 'key' // keyboard key name
+  | 'object' // object type name
+  | 'objectOrAny' // object type name or "any"
+  | 'scene'
+  | 'sound'
+  | 'target' // assignable variable: score, self.hp, other.vx, scene.lives
+  | 'instance' // self | other
+  | 'choice';
+
+export interface ParamSpec {
+  name: string;
+  type: ParamType;
+  label?: string;
+  default?: Value;
+  options?: string[];
+  help?: string;
+  optional?: boolean;
+}
+
+export interface StepSpec {
+  type: string;
+  label: string;
+  help: string;
+  params: ParamSpec[];
+  /** Only meaningful on object event sheets (needs `self`). */
+  objectOnly?: boolean;
+}
+
+export const KEYS = [
+  'left', 'right', 'up', 'down', 'space', 'enter', 'escape', 'shift', 'action', 'action2',
+  ...'abcdefghijklmnopqrstuvwxyz'.split(''),
+  ...'0123456789'.split(''),
+  'any',
+];
+
+export const SOUNDS = ['jump', 'coin', 'hit', 'explosion', 'powerup', 'laser', 'blip', 'select', 'hurt', 'step'];
+
+export const TRIGGERS: StepSpec[] = [
+  { type: 'start', label: 'Scene starts', help: 'Once when the scene starts (after all instances are created).', params: [] },
+  { type: 'created', label: 'Created', help: 'When this instance appears (scene start or spawn).', params: [], objectOnly: true },
+  { type: 'update', label: 'Every frame', help: 'Every frame (60 times per second). Combine with conditions.', params: [] },
+  { type: 'keyPressed', label: 'Key pressed', help: 'The frame a key goes down. "action" = space/Z/J, "action2" = X/K, "any" = any key.', params: [{ name: 'key', type: 'key', default: 'space' }] },
+  { type: 'keyDown', label: 'Key held', help: 'Every frame while a key is held.', params: [{ name: 'key', type: 'key', default: 'right' }] },
+  { type: 'keyReleased', label: 'Key released', help: 'The frame a key goes up.', params: [{ name: 'key', type: 'key', default: 'space' }] },
+  { type: 'collision', label: 'Collides with', help: 'When this instance starts touching an instance of an object type ("other" is that instance).', params: [{ name: 'with', type: 'objectOrAny', default: 'any' }], objectOnly: true },
+  { type: 'overlapping', label: 'While overlapping', help: 'Every frame while touching an instance of an object type.', params: [{ name: 'with', type: 'objectOrAny', default: 'any' }], objectOnly: true },
+  { type: 'click', label: 'Clicked / tapped', help: 'When the player clicks or taps this instance (on a scene sheet: anywhere).', params: [] },
+  { type: 'timer', label: 'Timer', help: 'After N seconds; with repeat, every N seconds.', params: [{ name: 'seconds', type: 'number', default: 1 }, { name: 'repeat', type: 'bool', default: true }] },
+  { type: 'landed', label: 'Lands on ground', help: 'When a platformer/patrol instance touches the ground.', params: [], objectOnly: true },
+  { type: 'hitWall', label: 'Hits a wall', help: 'When movement is blocked sideways (or a bullet hits something solid).', params: [], objectOnly: true },
+  { type: 'animationEnd', label: 'Animation ends', help: 'When a non-looping pass of the current animation finishes.', params: [{ name: 'animation', type: 'text', default: '', optional: true }], objectOnly: true },
+  { type: 'leftScene', label: 'Leaves the scene', help: 'When the instance moves completely outside the scene bounds.', params: [], objectOnly: true },
+  { type: 'destroyed', label: 'Destroyed', help: 'Just before this instance is removed.', params: [], objectOnly: true },
+  { type: 'message', label: 'Message received', help: 'When an "emit" action sends this message.', params: [{ name: 'message', type: 'text', default: 'win' }] },
+];
+
+export const CONDITIONS: StepSpec[] = [
+  { type: 'expr', label: 'Expression is true', help: 'Any expression, e.g. `score >= 10`, `self.hp <= 0`, `count("enemy") == 0`.', params: [{ name: 'expr', type: 'expr', default: 'true' }] },
+  { type: 'keyDown', label: 'Key is held', help: 'True while the key is held.', params: [{ name: 'key', type: 'key', default: 'right' }] },
+  { type: 'onGround', label: 'Is on ground', help: 'Platformer/patrol instance stands on something solid.', params: [{ name: 'not', type: 'bool', default: false, label: 'invert' }], objectOnly: true },
+  { type: 'overlaps', label: 'Is overlapping', help: 'This instance touches an instance of an object type (sets "other").', params: [{ name: 'with', type: 'objectOrAny', default: 'any' }, { name: 'not', type: 'bool', default: false, label: 'invert' }], objectOnly: true },
+  { type: 'chance', label: 'Random chance', help: 'True with the given probability (percent).', params: [{ name: 'percent', type: 'number', default: 50 }] },
+  { type: 'animation', label: 'Animation is', help: 'The current animation of self.', params: [{ name: 'animation', type: 'text', default: 'idle' }], objectOnly: true },
+];
+
+export const ACTIONS: StepSpec[] = [
+  { type: 'set', label: 'Set variable', help: 'Set a variable: `score`, `self.hp`, `other.vx`, `scene.lives`, or fields x, y, vx, vy, visible, flipX, opacity, angle, text.', params: [{ name: 'target', type: 'target', default: 'score' }, { name: 'value', type: 'expr', default: '0' }] },
+  { type: 'add', label: 'Add to variable', help: 'Add a (possibly negative) amount to a variable.', params: [{ name: 'target', type: 'target', default: 'score' }, { name: 'value', type: 'expr', default: '1' }] },
+  { type: 'move', label: 'Move by', help: 'Move by dx, dy pixels, stopped by solids.', params: [{ name: 'dx', type: 'expr', default: '0' }, { name: 'dy', type: 'expr', default: '0' }, { name: 'target', type: 'instance', default: 'self' }] },
+  { type: 'setPosition', label: 'Set position', help: 'Teleport to x, y (top-left of the sprite).', params: [{ name: 'x', type: 'expr', default: 'self.x' }, { name: 'y', type: 'expr', default: 'self.y' }, { name: 'target', type: 'instance', default: 'self' }] },
+  { type: 'setVelocity', label: 'Set velocity', help: 'Set speed in pixels per second (vy positive = down).', params: [{ name: 'vx', type: 'expr', default: 'self.vx' }, { name: 'vy', type: 'expr', default: 'self.vy' }, { name: 'target', type: 'instance', default: 'self' }] },
+  { type: 'jump', label: 'Jump / bounce', help: 'Launch upward (platformer). Strength in px/s; 0 = the behavior jump strength.', params: [{ name: 'strength', type: 'expr', default: '0' }, { name: 'target', type: 'instance', default: 'self' }] },
+  { type: 'spawn', label: 'Create instance', help: 'Create an instance of an object at x, y. Relative: x/y are offsets from self. Velocity optional.', params: [{ name: 'object', type: 'object', default: '' }, { name: 'x', type: 'expr', default: '0' }, { name: 'y', type: 'expr', default: '0' }, { name: 'relative', type: 'bool', default: true }, { name: 'vx', type: 'expr', default: '0' }, { name: 'vy', type: 'expr', default: '0' }] },
+  { type: 'destroy', label: 'Destroy', help: 'Remove an instance.', params: [{ name: 'target', type: 'instance', default: 'self' }] },
+  { type: 'playAnimation', label: 'Play animation', help: 'Switch to a sprite tag. Behaviors stop picking animations for `lock` seconds (0 = until it ends).', params: [{ name: 'animation', type: 'text', default: 'idle' }, { name: 'target', type: 'instance', default: 'self' }, { name: 'lock', type: 'number', default: 0 }] },
+  { type: 'flash', label: 'Blink', help: 'Blink an instance for N seconds (hurt feedback).', params: [{ name: 'seconds', type: 'number', default: 0.6 }, { name: 'target', type: 'instance', default: 'self' }] },
+  { type: 'gotoScene', label: 'Go to scene', help: 'Switch to another scene (global variables are kept).', params: [{ name: 'scene', type: 'scene', default: '' }] },
+  { type: 'restartScene', label: 'Restart scene', help: 'Restart the current scene.', params: [] },
+  { type: 'sound', label: 'Play sound', help: 'Play a built-in retro sound effect.', params: [{ name: 'sound', type: 'sound', default: 'coin' }, { name: 'volume', type: 'number', default: 0.5 }] },
+  { type: 'shake', label: 'Shake camera', help: 'Shake the screen.', params: [{ name: 'intensity', type: 'number', default: 3 }, { name: 'seconds', type: 'number', default: 0.3 }] },
+  { type: 'say', label: 'Show message', help: 'Show a centered message box for N seconds (0 = until the next message). Text is an expression.', params: [{ name: 'text', type: 'expr', default: '"Hello!"' }, { name: 'seconds', type: 'number', default: 2 }] },
+  { type: 'emit', label: 'Send message', help: 'Trigger "message received" events everywhere.', params: [{ name: 'message', type: 'text', default: 'win' }] },
+  { type: 'save', label: 'Save variable', help: 'Store a global variable in the browser (high scores). It is loaded back when the game starts.', params: [{ name: 'var', type: 'text', default: 'best' }] },
+  { type: 'log', label: 'Log', help: 'Write a value to the console (and to playtest reports).', params: [{ name: 'value', type: 'expr', default: '"here"' }] },
+];
+
+export const BEHAVIORS: StepSpec[] = [
+  { type: 'platformer', label: 'Platformer', help: 'Run with left/right (A/D), jump with up/W/space/Z. Gravity from the game settings. Picks idle/run/jump/fall animations when the sprite has those tags.', params: [{ name: 'speed', type: 'number', default: 100 }, { name: 'jump', type: 'number', default: 300 }, { name: 'acceleration', type: 'number', default: 1200 }, { name: 'controls', type: 'bool', default: true, label: 'player controls' }, { name: 'doubleJump', type: 'bool', default: false }] },
+  { type: 'topdown', label: 'Top-down', help: '8-direction movement with arrows/WASD. Picks walk_<dir>/idle_<dir> (or walk/idle) animations, matching Spritifer character rigs.', params: [{ name: 'speed', type: 'number', default: 80 }, { name: 'controls', type: 'bool', default: true, label: 'player controls' }, { name: 'diagonals', type: 'bool', default: true }] },
+  { type: 'solid', label: 'Solid', help: 'Blocks platformer, top-down, patrol and bullet movement (walls, platforms, crates).', params: [{ name: 'oneWay', type: 'bool', default: false, label: 'jump-through' }] },
+  { type: 'bullet', label: 'Bullet', help: 'Moves in a straight line at an angle (0 = right, 90 = down) or with its current velocity.', params: [{ name: 'speed', type: 'number', default: 200 }, { name: 'angle', type: 'number', default: 0 }, { name: 'useVelocity', type: 'bool', default: false, label: 'keep spawn velocity' }, { name: 'destroyOnSolid', type: 'bool', default: true }] },
+  { type: 'patrol', label: 'Patrol', help: 'Walks left and right, turning at walls (and ledges). Falls with gravity.', params: [{ name: 'speed', type: 'number', default: 40 }, { name: 'turnAtLedges', type: 'bool', default: true }, { name: 'gravity', type: 'bool', default: true }] },
+  { type: 'chase', label: 'Chase', help: 'Moves toward the nearest instance of an object within range.', params: [{ name: 'target', type: 'object', default: 'player' }, { name: 'speed', type: 'number', default: 50 }, { name: 'range', type: 'number', default: 160 }] },
+  { type: 'sine', label: 'Float (sine)', help: 'Bobs back and forth around its start position.', params: [{ name: 'axis', type: 'choice', options: ['y', 'x'], default: 'y' }, { name: 'amplitude', type: 'number', default: 4 }, { name: 'period', type: 'number', default: 1.5 }] },
+  { type: 'camera', label: 'Camera follows', help: 'The camera follows this instance, clamped to the scene.', params: [{ name: 'smoothing', type: 'number', default: 0.15 }, { name: 'offsetY', type: 'number', default: 0 }] },
+  { type: 'bounded', label: 'Stay in scene', help: 'Cannot leave the scene rectangle.', params: [] },
+  { type: 'lifetime', label: 'Lifetime', help: 'Destroyed after N seconds.', params: [{ name: 'seconds', type: 'number', default: 2 }] },
+  { type: 'wrap', label: 'Wrap around', help: 'Leaving one side of the scene re-enters from the other (Asteroids).', params: [] },
+];
+
+const byType = (list: StepSpec[]) => new Map(list.map((s) => [s.type, s]));
+export const TRIGGER_MAP = byType(TRIGGERS);
+export const CONDITION_MAP = byType(CONDITIONS);
+export const ACTION_MAP = byType(ACTIONS);
+export const BEHAVIOR_MAP = byType(BEHAVIORS);
+
+/** A step of the given type with default parameter values. */
+export function defaultStep(spec: StepSpec): EventStep {
+  const out: EventStep = { type: spec.type };
+  for (const p of spec.params) if (p.default !== undefined) out[p.name] = p.default;
+  return out;
+}
+
+/** Fills missing params with defaults. */
+export function withDefaults<T extends EventStep | Behavior>(step: T, spec: StepSpec | undefined): T {
+  if (!spec) return step;
+  const out = { ...step } as Record<string, Value>;
+  for (const p of spec.params) if (out[p.name] === undefined && p.default !== undefined) out[p.name] = p.default;
+  return out as T;
+}
+
+/** Human-readable one-liner of a step, used by the editor and MCP summaries. */
+export function describeStep(step: EventStep, spec: StepSpec | undefined): string {
+  if (!spec) return `${step.type}?`;
+  const all = spec.params.filter((p) => step[p.name] !== undefined && step[p.name] !== '').map((p) => `${p.name}=${JSON.stringify(step[p.name])}`);
+  return `${step.type}${all.length ? ' ' + all.join(' ') : ''}`;
+}
+
+export function describeEvent(e: GameEvent): string {
+  const t = describeStep(e.trigger, TRIGGER_MAP.get(e.trigger.type));
+  const c = e.conditions.map((s) => describeStep(s, CONDITION_MAP.get(s.type)));
+  const a = e.actions.map((s) => describeStep(s, ACTION_MAP.get(s.type)));
+  return `${e.disabled ? '(disabled) ' : ''}WHEN ${t}${c.length ? ' IF ' + c.join(' AND ') : ''} DO ${a.join('; ') || 'nothing'}${e.comment ? `  // ${e.comment}` : ''}`;
+}
+
+/** Markdown-ish reference of the whole vocabulary, for MCP clients. */
+export function catalogReference(): string {
+  const fmtList = (title: string, list: StepSpec[]) =>
+    `${title}:\n` +
+    list
+      .map((s) => `- ${s.type}${s.params.length ? ` (${s.params.map((p) => `${p.name}: ${p.type}${p.default !== undefined ? ` = ${JSON.stringify(p.default)}` : ''}`).join(', ')})` : ''}: ${s.help}${s.objectOnly ? ' [object sheets only]' : ''}`)
+      .join('\n');
+  return [
+    fmtList('TRIGGERS', TRIGGERS),
+    fmtList('CONDITIONS (all must be true)', CONDITIONS),
+    fmtList('ACTIONS (run in order)', ACTIONS),
+    fmtList('BEHAVIORS (on object types)', BEHAVIORS),
+    `KEYS: ${KEYS.join(', ')}`,
+    `SOUNDS: ${SOUNDS.join(', ')}`,
+    'EXPRESSIONS: numbers, "strings", true/false, + - * / %, == != < <= > >=, && || !, a ? b : c. ' +
+      'Names: globals (score), self.<field|property>, other.<...> (the instance from a collision/overlap), scene.<scene variable>, game.time (seconds since scene start), game.dt. ' +
+      'Instance fields: x, y, vx, vy, width, height, flipX, visible, opacity, angle, onGround, animation, object, text. ' +
+      'Functions: random(a,b), randint(a,b), floor, ceil, round, abs, sign, min, max, clamp(v,lo,hi), sqrt, sin(deg), cos(deg), atan2(y,x), dist(x1,y1,x2,y2), lerp(a,b,t), ' +
+      'count("object"), keyDown("key"), nearest("object", "x"|"y"), str(v), num(v).',
+  ].join('\n\n');
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+
+export interface Problem {
+  where: string;
+  message: string;
+}
+
+function checkSteps(where: string, steps: EventStep[], specs: Map<string, StepSpec>, ctx: { objects: Set<string>; scenes: Set<string>; object: boolean }, out: Problem[]): void {
+  steps.forEach((s, i) => {
+    const spec = specs.get(s.type);
+    const at = `${where}[${i}] ${s.type}`;
+    if (!spec) {
+      out.push({ where: at, message: `unknown type "${s.type}"` });
+      return;
+    }
+    if (spec.objectOnly && !ctx.object) out.push({ where: at, message: 'only works on object event sheets' });
+    for (const p of spec.params) {
+      const v = s[p.name];
+      if (v === undefined) continue;
+      if (p.type === 'expr') {
+        const err = checkExpr(v);
+        if (err) out.push({ where: `${at}.${p.name}`, message: err });
+      } else if (p.type === 'object' && (typeof v !== 'string' || !ctx.objects.has(v))) {
+        out.push({ where: `${at}.${p.name}`, message: `no object type "${v}"` });
+      } else if (p.type === 'objectOrAny' && v !== 'any' && (typeof v !== 'string' || !ctx.objects.has(v))) {
+        out.push({ where: `${at}.${p.name}`, message: `no object type "${v}"` });
+      } else if (p.type === 'scene' && (typeof v !== 'string' || !ctx.scenes.has(v))) {
+        out.push({ where: `${at}.${p.name}`, message: `no scene "${v}"` });
+      } else if (p.type === 'key' && !KEYS.includes(String(v))) {
+        out.push({ where: `${at}.${p.name}`, message: `unknown key "${v}"` });
+      } else if (p.type === 'sound' && !SOUNDS.includes(String(v))) {
+        out.push({ where: `${at}.${p.name}`, message: `unknown sound "${v}"` });
+      } else if (p.type === 'number' && typeof v !== 'number') {
+        out.push({ where: `${at}.${p.name}`, message: 'must be a number' });
+      }
+    }
+  });
+}
+
+function checkEvents(where: string, events: GameEvent[], ctx: { objects: Set<string>; scenes: Set<string>; object: boolean }, out: Problem[]): void {
+  events.forEach((e, i) => {
+    const w = `${where} event ${i}`;
+    checkSteps(`${w} trigger`, [e.trigger], TRIGGER_MAP, ctx, out);
+    checkSteps(`${w} conditions`, e.conditions, CONDITION_MAP, ctx, out);
+    checkSteps(`${w} actions`, e.actions, ACTION_MAP, ctx, out);
+  });
+}
+
+/** Static checks: unknown types, bad expressions, missing objects/scenes/sprites. */
+export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<string>): Problem[] {
+  const out: Problem[] = [];
+  const objects = new Set(game.objects.map((o) => o.name));
+  const sceneNames = new Set(scenes.map((s) => s.name));
+  if (!scenes.length) out.push({ where: 'game', message: 'no scenes yet' });
+  else if (!sceneNames.has(game.startScene)) out.push({ where: 'game.startScene', message: `no scene "${game.startScene}" (the first scene will be used)` });
+  for (const o of game.objects) {
+    if (o.sprite && !sprites.has(o.sprite)) out.push({ where: `object ${o.name}`, message: `sprite "${o.sprite}" not found` });
+    if (!o.sprite && o.text === undefined) out.push({ where: `object ${o.name}`, message: 'has neither a sprite nor text (it will be invisible)' });
+    o.behaviors.forEach((b, i) => {
+      const spec = BEHAVIOR_MAP.get(b.type);
+      if (!spec) out.push({ where: `object ${o.name} behavior ${i}`, message: `unknown behavior "${b.type}"` });
+      else if (b.type === 'chase' && !objects.has(String(b.target ?? 'player'))) out.push({ where: `object ${o.name} behavior chase`, message: `no object type "${b.target}"` });
+    });
+    if (o.text !== undefined) {
+      const err = checkExpr(o.text);
+      if (err) out.push({ where: `object ${o.name}.text`, message: err });
+    }
+    checkEvents(`object ${o.name}`, o.events, { objects, scenes: sceneNames, object: true }, out);
+  }
+  for (const s of scenes) {
+    if (s.tileset && !sprites.has(s.tileset)) out.push({ where: `scene ${s.name}`, message: `tileset sprite "${s.tileset}" not found` });
+    for (const b of s.backgrounds) if (!sprites.has(b.sprite)) out.push({ where: `scene ${s.name} background`, message: `sprite "${b.sprite}" not found` });
+    const missing = new Set(s.instances.filter((i) => !objects.has(i.object)).map((i) => i.object));
+    for (const m of missing) out.push({ where: `scene ${s.name}`, message: `instances of unknown object "${m}"` });
+    checkEvents(`scene ${s.name}`, s.events, { objects, scenes: sceneNames, object: false }, out);
+  }
+  return out;
+}

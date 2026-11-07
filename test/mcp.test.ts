@@ -64,10 +64,16 @@ describe('MCP server', () => {
     expect(read).toContain('.AA.');
     expect(read).toContain('content bounds'.slice(1)); // "ontent bounds"
 
-    const prev = await call('preview', { sprite: 'slime', pixel_grid: true, scale: 4 });
+    const prev = await call('preview', { sprite: 'slime', pixel_grid: true, scale: 4, rulers: false });
     const img = prev.content.find((c) => c.type === 'image')!;
     const png = decodePng(Buffer.from(img.data!, 'base64'));
     expect(png.width).toBe(32);
+
+    // Rulers (default) add a label margin on the left and top.
+    const ruled = await call('preview', { sprite: 'slime', scale: 4 });
+    const rpng = decodePng(Buffer.from(ruled.content.find((c) => c.type === 'image')!.data!, 'base64'));
+    expect(rpng.width).toBeGreaterThan(32);
+    expect(rpng.height).toBe(32 + 14);
   });
 
   it('animates: copies frames, shifts, tags, and exports a sheet', async () => {

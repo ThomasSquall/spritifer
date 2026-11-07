@@ -86,15 +86,15 @@ export class CanvasView {
     this.canvas.height = Math.max(1, Math.round(height * dpr));
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
-    if (!this.fitted && width > 0) {
-      this.fitted = true;
-      this.fit();
-    }
+    // Keep the sprite fitted to the viewport until the user zooms or pans by hand.
+    if (!this.userMoved && width > 0) this.fit();
     this.render();
   }
-  private fitted = false;
+  private userMoved = false;
 
+  /** Fits the sprite to the viewport; resumes auto-fitting on resize. */
   fit(): void {
+    this.userMoved = false;
     const { width, height } = this.el.getBoundingClientRect();
     const s = this.editor.sprite;
     const max = Math.min((width - 48) / s.width, (height - 48) / s.height);
@@ -112,6 +112,7 @@ export class CanvasView {
   }
 
   zoomBy(dir: 1 | -1, cx?: number, cy?: number): void {
+    this.userMoved = true;
     const { width, height } = this.el.getBoundingClientRect();
     const px = cx ?? width / 2;
     const py = cy ?? height / 2;
@@ -314,6 +315,7 @@ export class CanvasView {
     }
     this.canvas.setPointerCapture(e.pointerId);
     if (e.button === 1 || this.spaceDown) {
+      this.userMoved = true;
       this.drag = { kind: 'pan', sx: e.clientX, sy: e.clientY, ox: this.ox, oy: this.oy };
       this.canvas.style.cursor = 'grabbing';
       return;

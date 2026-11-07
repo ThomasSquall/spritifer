@@ -8,6 +8,9 @@ import { type SheetLayout, type SheetOptions, buildSpritesheet } from '../core/s
 import { encodePng } from './png.js';
 import { exportSpritesheet, previewPng, spriteFromPng } from './ops.js';
 import type { Workspace } from './store.js';
+import { createScene, normalizeGame, normalizeScene } from '../core/game/types.js';
+import { buildGameHtml, exportGame, loadGameBundle, loadRuntime, renderScenePreview } from './game.js';
+import { renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
 
 const WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
 
@@ -49,17 +52,27 @@ export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1
     sock.on('close', () => clients.delete(sock));
     sock.send(JSON.stringify({ type: 'hello', workspace: ws.dir }));
   });
-  const stopWatching = ws.watch((name) => {
+  const stopWatching = ws.watch((name, kind) => {
     let rev: string | null = null;
     let updatedBy: string | undefined;
     try {
-      const raw = ws.readRaw(name);
-      rev = raw.rev;
-      updatedBy = raw.updatedBy;
+      if (kind === 'sprite') {
+        const raw = ws.readRaw(name);
+        rev = raw.rev;
+        updatedBy = raw.updatedBy;
+      } else if (kind === 'scene') {
+        const sc = ws.loadScene(name);
+        rev = sc.rev;
+        updatedBy = sc.updatedBy;
+      } else {
+        const g = ws.loadGame();
+        rev = ws.hasGame() ? g.rev : null;
+        updatedBy = g.updatedBy;
+      }
     } catch {
       // Deleted.
     }
-    const msg = JSON.stringify({ type: 'sprite-changed', name, rev, updatedBy });
+    const msg = JSON.stringify({ type: `${kind}-changed`, name, rev, updatedBy });
     for (const c of clients) c.send(msg);
   });
 
@@ -103,6 +116,9 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
     return sendJson(res, 201, { name: sprite.name, rev: sprite.rev });
   }
 
+  if (parts[1] === 'game') return handleGame(ws, req, res, parts.slice(2), url);
+  if (parts[1] === 'scenes') return handleScenes(ws, req, res, parts.slice(2), url);
+
   if (parts[1] !== 'sprites') throw new HttpError(404, 'Not found');
   const name = parts[2];
 
@@ -125,6 +141,13 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
       const file = (await readJson(req)) as SpriteFile;
       if (file.name !== name) throw new HttpError(400, 'Name mismatch');
       deserializeSprite(file); // validate
+      // An editor tab running an older build doesn't know newer fields (rig, ramps, reference...).
+      // Keep whatever the client didn't send instead of silently dropping it.
+      if (ws.exists(name)) {
+        const prev = ws.readRaw(name) as unknown as Record<string, unknown>;
+        const incoming = file as unknown as Record<string, unknown>;
+        for (const [k, v] of Object.entries(prev)) if (!(k in incoming) && k !== 'updatedBy') incoming[k] = v;
+      }
       file.rev = newId();
       file.updatedBy = 'editor';
       ws.writeRaw(file);
@@ -189,6 +212,109 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
     return sendJson(res, 200, { files: results });
   }
 
+  throw new HttpError(404, 'Not found');
+}
+
+async function handleGame(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[], url: URL): Promise<void> {
+  const method = req.method ?? 'GET';
+  const sub = parts[0];
+  if (!sub) {
+    if (method === 'GET') return sendJson(res, 200, { ...ws.loadGame(), saved: ws.hasGame() });
+    if (method === 'PUT') {
+      const body = (await readJson(req)) as Record<string, unknown>;
+      delete body.saved;
+      const game = normalizeGame(body);
+      const rev = ws.saveGame(game, 'editor');
+      return sendJson(res, 200, { rev });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (sub === 'problems' && method === 'GET') return sendJson(res, 200, loadGameBundle(ws).problems);
+  if ((sub === 'play.html' || sub === 'export.html') && method === 'GET') {
+    const { bundle } = loadGameBundle(ws, { images: true });
+    if (!Object.keys(bundle.scenes).length) throw new HttpError(409, 'The game has no scenes yet');
+    const html = buildGameHtml(bundle, loadRuntime());
+    const headers: Record<string, string> = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
+    if (url.searchParams.has('download')) headers['content-disposition'] = `attachment; filename="${(bundle.game.title.replace(/[^A-Za-z0-9_-]+/g, '_') || 'game')}.html"`;
+    res.writeHead(200, headers);
+    res.end(html);
+    return;
+  }
+  if (sub === 'export' && method === 'POST') return sendJson(res, 200, exportGame(ws));
+  if (sub === 'objects' && parts[2] === 'rename' && method === 'POST') {
+    const body = (await readJson(req)) as { to: string };
+    const game = ws.loadGame();
+    const scenes = ws.listScenes().map((s) => ws.loadScene(s.name));
+    const changed = renameObjectRefs(game, scenes, parts[1], body.to);
+    ws.saveGame(game, 'editor');
+    for (const s of changed) ws.saveScene(s, 'editor');
+    return sendJson(res, 200, { ok: true });
+  }
+  throw new HttpError(404, 'Not found');
+}
+
+async function handleScenes(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[], url: URL): Promise<void> {
+  const method = req.method ?? 'GET';
+  const name = parts[0];
+  if (!name) {
+    if (method === 'GET') return sendJson(res, 200, ws.listScenes());
+    if (method === 'POST') {
+      const body = (await readJson(req)) as { name: string; cols?: number; rows?: number; tileSize?: number; tileset?: string };
+      if (ws.sceneExists(body.name)) throw new HttpError(409, `Scene "${body.name}" already exists`);
+      let tileSize = body.tileSize;
+      if (body.tileset && ws.exists(body.tileset)) tileSize = ws.load(body.tileset).grid?.width ?? tileSize;
+      const scene = createScene({ name: body.name, cols: body.cols, rows: body.rows, tileSize, tileset: body.tileset });
+      ws.saveScene(scene, 'editor');
+      const game = ws.loadGame();
+      if (!game.startScene || !ws.sceneExists(game.startScene)) {
+        game.startScene = scene.name;
+        ws.saveGame(game, 'editor');
+      }
+      return sendJson(res, 201, { name: scene.name, rev: scene.rev });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  const sub = parts[1];
+  if (!sub) {
+    if (method === 'GET') return sendJson(res, 200, ws.loadScene(name));
+    if (method === 'PUT') {
+      const scene = normalizeScene(await readJson(req));
+      if (scene.name !== name) throw new HttpError(400, 'Name mismatch');
+      const rev = ws.saveScene(scene, 'editor');
+      return sendJson(res, 200, { rev });
+    }
+    if (method === 'DELETE') {
+      ws.removeScene(name);
+      return sendJson(res, 200, { ok: true });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (sub === 'rename' && method === 'POST') {
+    const body = (await readJson(req)) as { to: string };
+    if (ws.sceneExists(body.to)) throw new HttpError(409, `Scene "${body.to}" already exists`);
+    const scene = ws.loadScene(name);
+    const game = ws.loadGame();
+    const others = ws.listScenes().filter((s) => s.name !== name).map((s) => ws.loadScene(s.name));
+    scene.name = body.to;
+    const changed = renameSceneRefs(game, [scene, ...others], name, body.to);
+    ws.saveScene(scene, 'editor');
+    ws.removeScene(name);
+    for (const s of changed) if (s !== scene) ws.saveScene(s, 'editor');
+    if (ws.hasGame() || game.startScene === body.to) ws.saveGame(game, 'editor');
+    return sendJson(res, 200, { name: body.to });
+  }
+  if (sub === 'duplicate' && method === 'POST') {
+    const body = (await readJson(req)) as { to: string };
+    if (ws.sceneExists(body.to)) throw new HttpError(409, `Scene "${body.to}" already exists`);
+    const scene = ws.loadScene(name);
+    scene.name = body.to;
+    ws.saveScene(scene, 'editor');
+    return sendJson(res, 201, { name: body.to });
+  }
+  if (sub === 'preview.png' && method === 'GET') {
+    const { png } = renderScenePreview(loadGameBundle(ws), name, { scale: num(url.searchParams.get('scale')), grid: url.searchParams.has('grid') });
+    return sendBuffer(res, png, 'image/png');
+  }
   throw new HttpError(404, 'Not found');
 }
 

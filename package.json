@@ -1,15 +1,16 @@
 {
   "name": "spritifer",
   "version": "0.1.0",
-  "description": "Pixel art & animation editor with spritesheet export and an MCP server so Claude can draw sprites pixel by pixel.",
+  "description": "All-in-one 2D game maker: pixel art & animation, scenes, objects, visual events, web export, and an MCP server so Claude can build games with you.",
   "type": "module",
   "license": "MIT",
   "bin": {
     "spritifer": "dist/server/cli.js"
   },
   "scripts": {
-    "build": "npm run build:web && npm run build:server",
+    "build": "npm run build:web && npm run build:runtime && npm run build:server",
     "build:web": "vite build",
+    "build:runtime": "vite build -c vite.runtime.config.ts",
     "build:server": "tsc -p tsconfig.server.json",
     "dev:web": "vite",
     "start": "node dist/server/cli.js serve",

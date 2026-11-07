@@ -20,6 +20,85 @@ export interface Frame {
   id: string;
   /** Display time in milliseconds. */
   duration: number;
+  /** Rig pose rendered into the rig layer of this frame (see core/rig.ts). */
+  pose?: Pose;
+}
+
+// ---------------------------------------------------------------------------
+// Rig (cut-out character animation). Logic lives in core/rig.ts.
+
+export type Facing = 'down' | 'left' | 'right' | 'up';
+export const FACINGS: Facing[] = ['down', 'left', 'right', 'up'];
+
+/** How one part looks from one facing (optionally a named variant, e.g. "blink"). */
+export interface PartView {
+  width: number;
+  height: number;
+  /** Base64 RGBA. */
+  pixels: string;
+  /** Joint pixel in part-local coordinates: the rotation center and attachment point. */
+  pivot: [number, number];
+  /** Where the pivot sits: canvas coordinates for root parts, offset from the parent's pivot for child parts. Variants inherit it. */
+  at?: [number, number];
+  /** Draw order for this facing (higher = in front). Variants inherit it. */
+  z?: number;
+}
+
+export interface RigPart {
+  name: string;
+  parent: string | null;
+  /** Keyed by facing ("down") or facing + variant ("down:blink"). Missing left/right views are mirrored from the other side. */
+  views: Record<string, PartView>;
+}
+
+export interface Rig {
+  /** Layer the poses are baked into. */
+  layer: string;
+  parts: RigPart[];
+}
+
+/** Per-part offset from the rest pose. dx/dy are screen pixels, rot is degrees clockwise around the pivot. */
+export interface PartPose {
+  dx?: number;
+  dy?: number;
+  rot?: number;
+  variant?: string;
+  hide?: boolean;
+  /** Overrides the view's draw order for this frame. */
+  z?: number;
+  /** Motion smear: degrees of rotation to trail behind (sign = direction the part came from). Draws the part's children (or the part itself if it has none) as a solid arc. */
+  smear?: number;
+  /** Smear color (default near-white). */
+  smearColor?: string;
+  /** Scale of this part's drawing around its pivot (squash & stretch). Default 1. */
+  sx?: number;
+  sy?: number;
+}
+
+/** Gesture skeleton used as a drawing guide (shown by previews, never exported). */
+export interface PoseGuide {
+  /** Named joints in canvas pixels, e.g. head, neck, pelvis, shoulder_f, hand_b, foot_f. */
+  joints: Record<string, [number, number]>;
+  /** Pairs of joint names to connect. */
+  bones: [string, string][];
+}
+
+/** A reference image shown next to / under the art in previews. Never exported. */
+export interface Reference {
+  width: number;
+  height: number;
+  /** Base64 RGBA, already cropped/scaled to canvas pixels. */
+  pixels: string;
+  /** Placement on the canvas. */
+  x: number;
+  y: number;
+  /** The cropped picture at (up to 4x) higher resolution, used to measure how much of each canvas pixel it covers. */
+  source?: { width: number; height: number; pixels: string };
+}
+
+export interface Pose {
+  facing: Facing;
+  parts: Record<string, PartPose>;
 }
 
 export type TagDirection = 'forward' | 'reverse' | 'pingpong';
@@ -49,6 +128,12 @@ export interface Sprite {
   tags: Tag[];
   /** Optional tile grid, used for tilesets / environments. */
   grid: TileGrid | null;
+  /** Cut-out rig for characters (parts + per-frame poses). */
+  rig: Rig | null;
+  /** Named color ramps, darkest first (e.g. skin: 4 shades). Referenced as "skin.2". */
+  ramps: Record<string, string[]>;
+  reference: Reference | null;
+  guide: PoseGuide | null;
   /** Pixel data keyed by `${layerId}/${frameId}`. Missing cels are fully transparent. */
   cels: Map<string, Uint8ClampedArray>;
   /** Changes on every save; lets clients detect remote edits. */
@@ -67,6 +152,10 @@ export interface SpriteFile {
   frames: Frame[];
   tags: Tag[];
   grid: TileGrid | null;
+  rig?: Rig | null;
+  ramps?: Record<string, string[]>;
+  reference?: Reference | null;
+  guide?: PoseGuide | null;
   /** Base64 encoded RGBA rows, keyed by `${layerId}/${frameId}`. */
   cels: Record<string, string>;
   rev: string;
@@ -127,6 +216,10 @@ export function createSprite(opts: CreateSpriteOptions): Sprite {
     frames: [{ id: newId(), duration: opts.frameDuration ?? 100 }],
     tags: [],
     grid: opts.grid ?? null,
+    rig: null,
+    ramps: {},
+    reference: null,
+    guide: null,
     cels: new Map(),
     rev: newId(),
   };
@@ -139,9 +232,13 @@ export function cloneSprite(s: Sprite): Sprite {
     ...s,
     palette: [...s.palette],
     layers: s.layers.map((l) => ({ ...l })),
-    frames: s.frames.map((f) => ({ ...f })),
+    frames: s.frames.map((f) => ({ ...f, ...(f.pose ? { pose: structuredClone(f.pose) } : {}) })),
     tags: s.tags.map((t) => ({ ...t })),
     grid: s.grid ? { ...s.grid } : null,
+    rig: s.rig ? structuredClone(s.rig) : null,
+    ramps: structuredClone(s.ramps),
+    reference: s.reference,
+    guide: s.guide ? structuredClone(s.guide) : null,
     cels,
   };
 }
@@ -171,6 +268,10 @@ export function serializeSprite(s: Sprite, updatedBy?: string): SpriteFile {
     frames: s.frames,
     tags: s.tags,
     grid: s.grid,
+    ...(s.rig ? { rig: s.rig } : {}),
+    ...(Object.keys(s.ramps).length ? { ramps: s.ramps } : {}),
+    ...(s.reference ? { reference: s.reference } : {}),
+    ...(s.guide ? { guide: s.guide } : {}),
     cels,
     rev: s.rev,
     ...(updatedBy ? { updatedBy } : {}),
@@ -196,6 +297,10 @@ export function deserializeSprite(file: SpriteFile): Sprite {
     frames: file.frames.map((f) => ({ ...f, duration: f.duration || 100 })),
     tags: file.tags ?? [],
     grid: file.grid ?? null,
+    rig: file.rig ?? null,
+    ramps: file.ramps ?? {},
+    reference: file.reference ?? null,
+    guide: file.guide ?? null,
     cels,
     rev: file.rev ?? newId(),
   };
@@ -284,6 +389,7 @@ export function mergeLayerDown(s: Sprite, layerId: string): void {
 export function addFrame(s: Sprite, index?: number, opts: { duration?: number; copyFrom?: number } = {}): Frame {
   const source = opts.copyFrom !== undefined ? resolveFrame(s, opts.copyFrom) : undefined;
   const frame: Frame = { id: newId(), duration: opts.duration ?? source?.duration ?? s.frames[s.frames.length - 1]?.duration ?? 100 };
+  if (source?.pose) frame.pose = structuredClone(source.pose);
   const at = index === undefined ? s.frames.length : Math.max(0, Math.min(index, s.frames.length));
   s.frames.splice(at, 0, frame);
   for (const t of s.tags) {
@@ -371,6 +477,11 @@ export function resizeCanvas(s: Sprite, width: number, height: number, anchor: A
   }
   s.width = width;
   s.height = height;
+  // Root rig parts are positioned in canvas coordinates: move them with the pixels.
+  for (const part of s.rig?.parts ?? []) {
+    if (part.parent) continue;
+    for (const v of Object.values(part.views)) if (v.at) v.at = [v.at[0] + ox, v.at[1] + oy];
+  }
 }
 
 // ---------------------------------------------------------------------------

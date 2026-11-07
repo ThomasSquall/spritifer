@@ -1,0 +1,325 @@
+{
+ "format": "spritifer-game",
+ "version": 1,
+ "title": "Coin Quest",
+ "width": 320,
+ "height": 180,
+ "zoom": "fit",
+ "background": "#41a6f6",
+ "startScene": "title",
+ "gravity": 900,
+ "touchControls": true,
+ "variables": {
+  "score": 0,
+  "best": 0
+ },
+ "objects": [
+  {
+   "name": "player",
+   "properties": {},
+   "behaviors": [
+    {
+     "type": "platformer",
+     "speed": 110,
+     "jump": 330
+    },
+    {
+     "type": "camera",
+     "smoothing": 0.12
+    }
+   ],
+   "events": [
+    {
+     "trigger": {
+      "type": "collision",
+      "with": "coin"
+     },
+     "conditions": [],
+     "actions": [
+      {
+       "type": "add",
+       "target": "score",
+       "value": "1"
+      },
+      {
+       "type": "sound",
+       "sound": "coin"
+      },
+      {
+       "type": "destroy",
+       "target": "other"
+      }
+     ]
+    },
+    {
+     "trigger": {
+      "type": "collision",
+      "with": "slime"
+     },
+     "conditions": [
+      {
+       "type": "expr",
+       "expr": "self.vy > 0 && self.y + 10 < other.y"
+      }
+     ],
+     "actions": [
+      {
+       "type": "destroy",
+       "target": "other"
+      },
+      {
+       "type": "jump",
+       "strength": "240"
+      },
+      {
+       "type": "sound",
+       "sound": "hit"
+      },
+      {
+       "type": "add",
+       "target": "score",
+       "value": "2"
+      }
+     ],
+     "comment": "stomp"
+    },
+    {
+     "trigger": {
+      "type": "collision",
+      "with": "slime"
+     },
+     "conditions": [
+      {
+       "type": "expr",
+       "expr": "!(self.vy > 0 && self.y + 10 < other.y)"
+      }
+     ],
+     "actions": [
+      {
+       "type": "emit",
+       "message": "dead"
+      }
+     ],
+     "comment": "touched from the side"
+    },
+    {
+     "trigger": {
+      "type": "collision",
+      "with": "spikes"
+     },
+     "conditions": [],
+     "actions": [
+      {
+       "type": "emit",
+       "message": "dead"
+      }
+     ]
+    },
+    {
+     "trigger": {
+      "type": "leftScene"
+     },
+     "conditions": [],
+     "actions": [
+      {
+       "type": "emit",
+       "message": "dead"
+      }
+     ]
+    },
+    {
+     "trigger": {
+      "type": "keyPressed",
+      "key": "up"
+     },
+     "conditions": [
+      {
+       "type": "onGround"
+      }
+     ],
+     "actions": [
+      {
+       "type": "sound",
+       "sound": "jump",
+       "volume": 0.3
+      }
+     ]
+    },
+    {
+     "trigger": {
+      "type": "message",
+      "message": "dead"
+     },
+     "conditions": [],
+     "actions": [
+      {
+       "type": "sound",
+       "sound": "hurt"
+      },
+      {
+       "type": "shake",
+       "intensity": 3,
+       "seconds": 0.25
+      },
+      {
+       "type": "set",
+       "target": "score",
+       "value": "0"
+      },
+      {
+       "type": "restartScene"
+      }
+     ]
+    }
+   ],
+   "sprite": "hero",
+   "animation": "idle",
+   "hitbox": {
+    "x": 4,
+    "y": 2,
+    "w": 8,
+    "h": 14
+   }
+  },
+  {
+   "name": "coin",
+   "properties": {},
+   "behaviors": [
+    {
+     "type": "sine",
+     "axis": "y",
+     "amplitude": 1.5,
+     "period": 1.4
+    }
+   ],
+   "events": [
+    {
+     "trigger": {
+      "type": "leftScene"
+     },
+     "conditions": [],
+     "actions": [
+      {
+       "type": "destroy",
+       "target": "self"
+      }
+     ]
+    }
+   ],
+   "sprite": "coin",
+   "animation": "spin"
+  },
+  {
+   "name": "slime",
+   "properties": {},
+   "behaviors": [
+    {
+     "type": "patrol",
+     "speed": 30,
+     "turnAtLedges": true
+    }
+   ],
+   "events": [],
+   "sprite": "slime",
+   "animation": "walk",
+   "hitbox": {
+    "x": 2,
+    "y": 3,
+    "w": 12,
+    "h": 9
+   }
+  },
+  {
+   "name": "spikes",
+   "properties": {},
+   "behaviors": [],
+   "events": [],
+   "sprite": "spikes",
+   "hitbox": {
+    "x": 1,
+    "y": 3,
+    "w": 14,
+    "h": 5
+   }
+  },
+  {
+   "name": "goal",
+   "properties": {},
+   "behaviors": [],
+   "events": [
+    {
+     "trigger": {
+      "type": "collision",
+      "with": "player"
+     },
+     "conditions": [],
+     "actions": [
+      {
+       "type": "sound",
+       "sound": "powerup"
+      },
+      {
+       "type": "gotoScene",
+       "scene": "win"
+      }
+     ]
+    }
+   ],
+   "sprite": "flag",
+   "hitbox": {
+    "x": 2,
+    "y": 0,
+    "w": 6,
+    "h": 32
+   }
+  },
+  {
+   "name": "hud",
+   "properties": {},
+   "behaviors": [],
+   "events": [],
+   "z": 100,
+   "text": "\"COINS \" + score + \"/\" + scene.total",
+   "textColor": "#ffcd75",
+   "hud": true
+  },
+  {
+   "name": "title_text",
+   "properties": {},
+   "behaviors": [],
+   "events": [],
+   "text": "\"COIN QUEST\"",
+   "textColor": "#ffcd75",
+   "textSize": 3,
+   "hud": true
+  },
+  {
+   "name": "subtitle",
+   "properties": {},
+   "behaviors": [
+    {
+     "type": "sine",
+     "axis": "y",
+     "amplitude": 1,
+     "period": 1
+    }
+   ],
+   "events": [],
+   "text": "\"PRESS SPACE TO START\"",
+   "textColor": "#f4f4f4",
+   "hud": true
+  },
+  {
+   "name": "win_text",
+   "properties": {},
+   "behaviors": [],
+   "events": [],
+   "text": "\"YOU WIN! COINS: \" + score + \"  BEST: \" + best",
+   "textColor": "#f4f4f4",
+   "textSize": 1,
+   "hud": true
+  }
+ ],
+ "rev": "cz3xf17u",
+ "updatedBy": "claude"
+}

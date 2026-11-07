@@ -9,7 +9,7 @@ import { createMcpServer } from './mcp.js';
 
 const DEFAULT_PORT = 7420;
 
-const HELP = `Spritifer — pixel art & animation editor with an MCP server
+const HELP = `Spritifer — 2D game maker: pixel art, animation, scenes, events and web export, with an MCP server
 
 Usage:
   spritifer serve [--workspace DIR] [--port N] [--host H]   Run the web editor
@@ -17,7 +17,7 @@ Usage:
   spritifer init  [--workspace DIR]                          Register the MCP server in ./.mcp.json for Claude Code
 
 Options:
-  --workspace DIR  Folder holding *.sprite.json files (default: $SPRITIFER_WORKSPACE or ./sprites)
+  --workspace DIR  Folder holding the project: *.sprite.json, *.scene.json, game.json (default: $SPRITIFER_WORKSPACE or ./sprites)
   --port N         Editor port (default: $SPRITIFER_PORT or ${DEFAULT_PORT})
 `;
 

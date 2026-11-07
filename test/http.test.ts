@@ -47,6 +47,19 @@ describe('editor HTTP API', () => {
     expect(Array.from(png.data.slice(0, 4))).toEqual([255, 0, 0, 255]);
   });
 
+  it('keeps fields an older editor build does not send (rig, ramps, reference)', async () => {
+    await api('/api/sprites', json({ name: 'kid', width: 2, height: 2 }));
+    const raw = ws.readRaw('kid');
+    ws.writeRaw({ ...raw, rig: { layer: raw.layers[0].id, parts: [] }, ramps: { skin: ['#000000', '#ffffff'] } });
+    const file = (await (await api('/api/sprites/kid')).json()) as Record<string, unknown>;
+    delete file.rig;
+    delete file.ramps;
+    expect((await api('/api/sprites/kid', json(file, 'PUT'))).status).toBe(200);
+    const after = ws.readRaw('kid');
+    expect(after.rig?.layer).toBe(raw.layers[0].id);
+    expect(after.ramps?.skin).toHaveLength(2);
+  });
+
   it('imports a spritesheet PNG sliced into frames', async () => {
     const img = { width: 8, height: 4, data: new Uint8ClampedArray(8 * 4 * 4).fill(200) };
     const res = await api('/api/import', json({ name: 'strip', png: encodePng(img).toString('base64'), frameWidth: 4, frameHeight: 4 }));

@@ -8,6 +8,7 @@ export interface SpriteSummary {
   frames: number;
   layers: number;
   tags: string[];
+  grid: { width: number; height: number } | null;
   updatedAt: number;
   rev: string;
 }
@@ -48,7 +49,7 @@ export const api = {
 };
 
 export interface ChangeEvent {
-  type: 'sprite-changed';
+  type: 'sprite-changed' | 'scene-changed' | 'game-changed';
   name: string;
   rev: string | null;
   updatedBy?: string;
@@ -65,7 +66,7 @@ export function connectLive(onChange: (e: ChangeEvent) => void, onStatus: (conne
     };
     sock.onmessage = (m) => {
       const msg = JSON.parse(String(m.data));
-      if (msg.type === 'sprite-changed') onChange(msg);
+      if (typeof msg.type === 'string' && msg.type.endsWith('-changed')) onChange(msg);
     };
     sock.onclose = () => {
       onStatus(false);

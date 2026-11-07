@@ -54,7 +54,7 @@ Model:
 - Scenes (create_scene) are tile maps (cols x rows, tileSize from the tileset sprite's grid) with tile layers (solid layers collide) and placed instances. Scenes have their own event sheet and variables.
 - Events: WHEN trigger IF conditions DO actions. Call game_reference for the full vocabulary (triggers, conditions, actions, behaviors, keys, sounds, expression syntax).
 - Dialogues (write_dialogue, dialogue_reference) are plain-text conversations: speakers, choices, conditions, variables, commands, jumps. NPCs: ONE object type with the behavior "dialogue" (+ solid), placed many times, each instance with its own name, optional sprite override and props { dialogue: "<name>" }. Never create one object type or script per NPC.
-- Scripts (write_script, script_reference) are JavaScript files in scripts/ (use folders: scripts/enemies/Patrol.js, scripts/ui/Hud.js, scripts/managers/GameManager.js) for logic events can't express well. Write COMPONENTS, Unity-style: ONE class per file named like the file (export default class Patrol extends Behaviour), public fields = inspector params, lifecycle awake/start/update/lateUpdate/onCollisionEnter/Stay/Exit/onInteract/onDraw/onDestroy, this.getComponent('Health') / findComponent('GameManager') to talk to other scripts, import for shared helpers. Attach them to object types ({ type: "script", name: "Patrol", speed: 60 } in behaviors), override params per placed instance (instances components: { Patrol: { speed: 80 } }), or attach managers to scenes (update_scene components) and to the whole game (set_game components). Never put several behaviours in one file. For common mechanics first check component_library (Health, Damage, Shooter, Collectible, Door, Checkpoint, Respawn, Spawner, Countdown) and add them with add_library_component.
+- Scripts (write_script, script_reference) are JavaScript files in scripts/ (use folders: scripts/enemies/Patrol.js, scripts/ui/Hud.js, scripts/managers/GameManager.js) for logic events can't express well. Write COMPONENTS, Unity-style: ONE class per file named like the file (export default class Patrol extends Behaviour), public fields = inspector params, lifecycle awake/start/update/lateUpdate/onCollisionEnter/Stay/Exit/onInteract/onDraw/onDestroy, this.getComponent('Health') / findComponent('GameManager') to talk to other scripts, import for shared helpers. Attach them to object types ({ type: "script", name: "Patrol", speed: 60 } in behaviors), override params per placed instance (instances components: { Patrol: { speed: 80 } }), or attach managers to scenes (update_scene components) and to the whole game (set_game components). Never put several behaviours in one file. For common mechanics first check component_library (Health, Damage, Shooter, Collectible, Door, Checkpoint, Respawn, Roam, ChasePath, Spawner, Countdown) and add them with add_library_component.
 - RPGs: top-down player (topdown + camera, sprite tags walk_<dir>/idle_<dir>), scene y_sort and persistent (towns remember chests/positions after battles), solid tile layers for walls, NPCs and chests via dialogues (~ self.opened = true), an intro via a scene event (start → dialogue), battles in a scene driven by a scene component (class Battle extends Behaviour { async start() {...} } attached to the battle scene).
 - Projects: list_projects / open_project / create_project switch between games; each project folder has its own sprites, scenes, scripts and game.json.
 
@@ -100,6 +100,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
     const lines = [
       `Object "${o.name}": ${o.sprite ? `sprite ${o.sprite}${o.animation ? ` (animation ${o.animation})` : ''}` : 'no sprite'}${o.text !== undefined ? `, text ${JSON.stringify(o.text)}${o.hud ? ' (HUD)' : ''}` : ''}${o.hitbox ? `, hitbox ${o.hitbox.x},${o.hitbox.y} ${o.hitbox.w}x${o.hitbox.h}` : ''}${o.z ? `, z ${o.z}` : ''}`,
     ];
+    if (o.extends) lines.push(`  variant of ${o.extends} (only the differences are listed)`);
     if (o.tags?.length) lines.push(`  tags: ${o.tags.join(', ')}`);
     if (o.behaviors.length) lines.push(`  behaviors: ${o.behaviors.map((b) => describeStep(b, BEHAVIOR_MAP.get(b.type))).join('; ')}`);
     if (Object.keys(o.properties).length) lines.push(`  properties: ${Object.entries(o.properties).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')}`);
@@ -219,6 +220,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       text_color: z.string().optional(),
       text_size: z.number().int().min(1).max(8).optional(),
       hud: z.boolean().optional().describe('Draw in screen space (ignores the camera)'),
+      extends: z.string().nullable().optional().describe('Make it a VARIANT of another object type (like a Unity prefab variant): it inherits sprite, hitbox, properties, tags, components (params can be overridden by listing the same component with only the changed params) and events, and stores only what differs. null = standalone again. Queries and events on the parent type (find("slime"), "collides with slime", count) include its variants.'),
       tags: z.array(z.string()).optional().describe('Group tags for scripts (self.hasTag, findWithTag, raycast/overlap filters, countTag()), e.g. ["enemy"]. Replaces the list.'),
       properties: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       behaviors: z.array(stepSchema).optional().describe('e.g. [{type:"platformer", speed:100, jump:300}, {type:"camera"}]'),
@@ -259,6 +261,14 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           const t = normalizeTags(a.tags);
           if (t) o.tags = t;
           else delete o.tags;
+        }
+        if (a.extends !== undefined) {
+          if (a.extends === null || a.extends === '') delete o.extends;
+          else {
+            if (!g.objects.some((x) => x.name === a.extends)) throw new Error(`No object type "${a.extends}" to base the variant on`);
+            if (a.extends === o.name) throw new Error('An object type cannot extend itself');
+            o.extends = a.extends;
+          }
         }
         if (a.hud !== undefined) {
           if (a.hud) o.hud = true;
@@ -821,7 +831,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
     },
   );
 
-  tool('component_library', 'Ready-made components you can add to the project instead of writing them: Health, Damage, Shooter, Collectible, Door, Checkpoint, Respawn, Spawner, Countdown (what each does, how to use it). Prefer them for common mechanics.', {}, () =>
+  tool('component_library', 'Ready-made components you can add to the project instead of writing them: Health, Damage, Shooter, Collectible, Door, Checkpoint, Respawn, Roam, ChasePath, Spawner, Countdown (what each does, how to use it). Prefer them for common mechanics.', {}, () =>
     text(LIBRARY.map((c) => `- ${c.name} (scripts/${c.folder}/${c.name}.js)${c.requires ? ` [needs ${c.requires.join(', ')}]` : ''}: ${c.summary}\n    ${c.usage}`).join('\n')), { readOnlyHint: true });
 
   tool(

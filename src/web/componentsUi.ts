@@ -25,10 +25,11 @@ export function scriptLink(info: ComponentInfo | undefined): HTMLElement | null 
 }
 
 /** Header + doc + param inputs for one component entry ({ type: "script", name, ...params }). */
-export function componentCard(b: Behavior, ctx: SheetContext, changed: () => void, opts: { remove?: () => void; moveUp?: () => void } = {}): HTMLElement {
+export function componentCard(b: Behavior, ctx: SheetContext, changed: () => void, opts: { remove?: () => void; moveUp?: () => void; base?: Behavior } = {}): HTMLElement {
   const name = String(b.name ?? '');
   const info = state.component(name);
-  const enabled = b.enabled !== false;
+  const base = opts.base;
+  const enabled = (b.enabled ?? base?.enabled) !== false;
   const en = h('input', { type: 'checkbox', checked: enabled, title: 'Enabled', onchange: () => { if (en.checked) delete b.enabled; else b.enabled = false; changed(); } });
   const body = h('div', { class: 'step-editor comp-params' });
   if (!info) body.append(h('p', { class: 'danger-text small' }, name ? `No component "${name}" in the scripts. Create scripts/${name}.js (export default class ${name} extends Behaviour).` : 'Pick a component.'));
@@ -39,7 +40,8 @@ export function componentCard(b: Behavior, ctx: SheetContext, changed: () => voi
       body.append(paramInput({ name: k, type: typeof v === 'number' ? 'number' : typeof v === 'boolean' ? 'bool' : 'text' }, v, (x) => { b[k] = x; changed(); }, ctx));
     }
   } else {
-    for (const p of info.params) body.append(paramInput(paramSpec(p), b[p.name], (v) => { if (v === p.default) delete b[p.name]; else b[p.name] = v; changed(); }, ctx));
+    // A variant's entry stores only what differs from the parent (base).
+    for (const p of info.params) body.append(paramInput(paramSpec(p), b[p.name] ?? base?.[p.name], (v) => { if (v === (base?.[p.name] ?? p.default)) delete b[p.name]; else b[p.name] = v; changed(); }, ctx));
     if (!info.params.length) body.append(h('p', { class: 'muted small' }, 'No params. Public fields of the class (speed = 40) show up here.'));
   }
   const unknown = info && !info.legacy ? Object.keys(paramsOf(b)).filter((k) => k !== 'enabled' && !info.params.some((p) => p.name === k)) : [];
@@ -49,6 +51,7 @@ export function componentCard(b: Behavior, ctx: SheetContext, changed: () => voi
       h('span', { class: 'comp-icon' }, '◆'),
       h('strong', {}, name || '?'),
       info?.legacy ? h('span', { class: 'badge muted-badge' }, 'legacy') : null,
+      base ? h('span', { class: 'badge muted-badge', title: 'Inherited from the parent type; empty params keep its values' }, 'override') : null,
       h('span', { class: 'spacer' }),
       scriptLink(info),
       opts.moveUp ? iconButton('up', 'Move up', opts.moveUp, { class: 'icon-btn tiny' }) : null,

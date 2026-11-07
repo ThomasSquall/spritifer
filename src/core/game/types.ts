@@ -51,6 +51,8 @@ export interface Hitbox {
 /** A reusable kind of thing in the game: player, enemy, coin, door, score label... */
 export interface ObjectType {
   name: string;
+  /** Variant of another object type: inherits everything and stores only what it changes. */
+  extends?: string;
   /** Sprite drawn for instances (a sprite in the workspace). Text objects can omit it. */
   sprite?: string;
   /** Default animation (sprite tag). Empty = all frames. */
@@ -263,6 +265,7 @@ export function normalizeObject(v: unknown): ObjectType {
   if (o.hud === true) obj.hud = true;
   const tags = normalizeTags(o.tags);
   if (tags) obj.tags = tags;
+  if (typeof o.extends === 'string' && o.extends && o.extends !== obj.name) obj.extends = o.extends;
   return obj;
 }
 

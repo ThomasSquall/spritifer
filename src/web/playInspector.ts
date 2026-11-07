@@ -98,7 +98,7 @@ export function createPlayInspector(send: (msg: Record<string, unknown>) => void
       section('globals', 'Global variables', Object.keys(v.globals).length, () => rows(v.globals, (k, x) => edit({ kind: 'global', key: k, value: x }))),
       section('scene', `Scene ${v.scene}`, null, () => [
         ...rows(v.sceneVars, (k, x) => edit({ kind: 'sceneVar', key: k, value: x })),
-        ...rows({ 'camera.x': v.camera.x, 'camera.y': v.camera.y }, (k, x) => edit({ kind: 'camera', key: k === 'camera.x' ? 'x' : 'y', value: Number(x) })),
+        ...rows({ 'camera.x': v.camera.x, 'camera.y': v.camera.y, 'camera.zoom': v.camera.zoom }, (k, x) => edit({ kind: 'camera', key: k.slice(7) as 'x' | 'y' | 'zoom', value: Number(x) })),
         ...comps(v.sceneComponents, 'scene'),
       ]),
       v.gameComponents.length ? section('game', 'Global components', v.gameComponents.length, () => comps(v.gameComponents, 'game')) : null,

@@ -55,7 +55,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   let tileset: LoadedAsset | undefined;
   /** Loaded sprites by sprite name (object sprites and per-instance overrides). */
   const assets = new Map<string, LoadedAsset>();
-  const spriteOf = (i: Instance) => i.sprite ?? state.object(i.object)?.sprite;
+  const spriteOf = (i: Instance) => i.sprite ?? state.effective(i.object)?.sprite;
   const undoStack: string[] = [];
   const redoStack: string[] = [];
   let saveTimer = 0;
@@ -219,7 +219,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     const spr = spriteOf(i);
     const a = spr ? assets.get(spr) : undefined;
     if (!a || !a.frames.length) return null;
-    const obj = state.object(i.object);
+    const obj = state.effective(i.object);
     const tag = a.tags.find((t) => t.name === (i.animation ?? obj?.animation));
     return { a, f: a.frames[tag?.from ?? 0] ?? a.frames[0] };
   };
@@ -227,7 +227,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const instanceBox = (i: Instance) => {
     const fr = instanceFrame(i);
     if (fr) return { x: i.x, y: i.y, w: fr.a.width, h: fr.a.height };
-    const obj = state.object(i.object);
+    const obj = state.effective(i.object);
     if (obj?.text !== undefined) {
       const sz = textSize(previewText(obj.text, obj, scene.variables).text || ' ', obj.textSize ?? 1);
       return { x: i.x, y: i.y, w: sz.w, h: sz.h };
@@ -267,7 +267,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       } });
     });
     scene.instances.forEach((inst, k) => {
-      const obj = state.object(inst.object);
+      const obj = state.effective(inst.object);
       const sortKey = scene.ySort ? 1000 + (() => { const b = instanceBox(inst); return b.y + b.h; })() + k / 10000 : 1000 + k;
       items.push({ z: obj?.z ?? 0, o: sortKey, d: () => {
         const fr = instanceFrame(inst);
@@ -443,7 +443,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   };
   const placeAt = (wx: number, wy: number, free: boolean) => {
     if (!placeObject) return toast('Pick an object type on the right first', 'error');
-    const po = state.object(placeObject);
+    const po = state.effective(placeObject);
     const a = po?.sprite ? assets.get(po.sprite) : undefined;
     const w = a?.width ?? ts();
     const hh = a?.height ?? ts();
@@ -863,7 +863,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       if (!list.length) rows.append(h('p', { class: 'muted small' }, scene.instances.length ? 'Nothing matches.' : 'No instances yet: place objects from the “Add” tab.'));
       for (const inst of list) {
         const spr = state.sprite(spriteOf(inst));
-        const obj = state.object(inst.object);
+        const obj = state.effective(inst.object);
         const talk = inst.props?.dialogue;
         rows.append(h('div', {
           class: `hier-row${inst.id === selectedId ? ' active' : ''}`,
@@ -923,7 +923,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       inspectorBox.append(h('p', { class: 'muted small' }, 'Click an instance in the Hierarchy or on the map (move tool, V) to see its properties. Delete removes it, Ctrl+D duplicates, arrows nudge.'));
       return;
     }
-    const obj = state.object(inst.object);
+    const obj = state.effective(inst.object);
     const edit = (fn: () => void) => { snapshot(); fn(); changed(); };
     const num = (label: string, get: () => number, set: (v: number) => void) => {
       const inp = h('input', { type: 'number', class: 'num', value: String(get()), onchange: () => edit(() => set(Number(inp.value) || 0)) });

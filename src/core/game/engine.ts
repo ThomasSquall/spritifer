@@ -10,6 +10,7 @@ import { measureText } from './font.js';
 import type { Behavior, ComponentOverrides, EventStep, GameBundle, GameEvent, GameProject, Hitbox, ObjectType, Scene, SpriteAsset, Value } from './types.js';
 import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, fieldsOf, wrapText } from './script.js';
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
+import { resolveObjectTypes } from './variants.js';
 
 export const STEP = 1 / 60;
 
@@ -233,7 +234,14 @@ export class World {
   /** Seconds since the game started (does not reset with scenes). */
   clock = 0;
   frame = 0;
-  camera = { x: 0, y: 0 };
+  /** Top-left of the view in world pixels; zoom > 1 shows less of the world, bigger. */
+  camera = { x: 0, y: 0, zoom: 1 };
+  /** Scripts: limit the camera to a rectangle (a room) instead of the scene. */
+  cameraBounds: Rect | null = null;
+  /** Scripts: the instance the camera follows (undefined = the one with the Camera behavior, null = none). */
+  cameraTarget: Actor | null | undefined = undefined;
+  /** Smoothed look-ahead offset of the camera (px). */
+  private lookX = 0;
   /** Screen shake, timed with `clock` (keeps running while dialogs pause the scene, so it always ends). */
   shake = { until: 0, intensity: 0, duration: 0 };
   message: { text: string; until: number } | null = null;
@@ -248,6 +256,12 @@ export class World {
   private rngState: number;
   private depth = 0;
   private objectMap = new Map<string, ObjectType>();
+  private lineage = new Map<string, string[]>();
+
+  /** Is the instance of this object type, or of a variant of it? */
+  isA(a: Actor, objectName: string): boolean {
+    return a.type.name === objectName || (this.lineage.get(a.type.name)?.includes(objectName) ?? false);
+  }
   private errors = new Set<string>();
   private solidLayers: number[][] = [];
   private started = false;
@@ -278,7 +292,11 @@ export class World {
     this.game = bundle.game;
     this.opts = opts;
     this.rngState = (opts.seed ?? 12345) >>> 0;
-    for (const o of this.game.objects) this.objectMap.set(o.name, o);
+    // Variants are resolved once: the engine runs the effective types.
+    const resolved = resolveObjectTypes(this.game.objects);
+    this.objectMap = resolved.types;
+    this.lineage = resolved.lineage;
+    for (const e of resolved.errors) this.log(`ERROR object ${e.object}: ${e.message}`);
     this.globals = { ...this.game.variables };
     // Saved variables override the initial values.
     if (opts.storage) {
@@ -369,7 +387,10 @@ export class World {
     this.sceneTimers.clear();
     this.message = null;
     this.shake = { until: 0, intensity: 0, duration: 0 };
-    this.camera = { x: 0, y: 0 };
+    this.camera = { x: 0, y: 0, zoom: 1 };
+    this.cameraBounds = null;
+    this.cameraTarget = undefined;
+    this.lookX = 0;
     this.solidLayers = scene.layers.filter((l) => l.solid).map((l) => l.tiles);
     this.scripts?.resetScene();
     for (const inst of scene.instances) {
@@ -945,7 +966,7 @@ export class World {
   matchesFilter(a: Actor, f: QueryFilter): boolean {
     if (a.destroyed || a.type.hud) return false;
     if (f.ignore && f.ignore.includes(a)) return false;
-    if (f.object && a.type.name !== f.object) return false;
+    if (f.object && !this.isA(a, f.object)) return false;
     if (f.tag && !a.tags.has(f.tag)) return false;
     return true;
   }
@@ -1060,6 +1081,133 @@ export class World {
       if (ok) consider(t0, nx, ny, a);
     }
     return best;
+  }
+
+  /**
+   * A* over the tile grid from one world point to another, around solid tiles and solid instances.
+   * Returns waypoints (tile centers, the last one the exact target) or null when unreachable;
+   * with `partial` it goes as close as it can instead.
+   */
+  findPath(x1: number, y1: number, x2: number, y2: number, opts: { diagonal?: boolean; partial?: boolean; ignore?: Actor[]; maxNodes?: number } = {}): { x: number; y: number }[] | null {
+    const ts = this.tileSize;
+    const cols = this.scene.cols;
+    const rows = this.scene.rows;
+    const sx = Math.floor(x1 / ts);
+    const sy = Math.floor(y1 / ts);
+    let gx = Math.floor(x2 / ts);
+    let gy = Math.floor(y2 / ts);
+    const inside = (x: number, y: number) => x >= 0 && y >= 0 && x < cols && y < rows;
+    if (!inside(sx, sy)) return null;
+    // Blocked cells: solid tiles + cells covered by solid instances (not jump-through ones).
+    const blocked = new Uint8Array(cols * rows);
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) if (this.solidAtTile(x, y)) blocked[y * cols + x] = 1;
+    for (const o of this.actors) {
+      if (o.destroyed || opts.ignore?.includes(o)) continue;
+      const sb = o.behavior('solid');
+      if (!sb || sb.oneWay === true) continue;
+      const b = o.box();
+      for (let ty = Math.max(0, Math.floor(b.y / ts)); ty <= Math.min(rows - 1, Math.floor((b.y + b.h - 0.01) / ts)); ty++) {
+        for (let tx = Math.max(0, Math.floor(b.x / ts)); tx <= Math.min(cols - 1, Math.floor((b.x + b.w - 0.01) / ts)); tx++) blocked[ty * cols + tx] = 1;
+      }
+    }
+    const free = (x: number, y: number) => inside(x, y) && !blocked[y * cols + x];
+    const reachableGoal = free(gx, gy);
+    if (!reachableGoal && !opts.partial) return null;
+    if (!inside(gx, gy)) {
+      gx = Math.max(0, Math.min(cols - 1, gx));
+      gy = Math.max(0, Math.min(rows - 1, gy));
+    }
+    const start = sy * cols + sx;
+    const goal = gy * cols + gx;
+    const diag = opts.diagonal !== false;
+    const h = (i: number) => {
+      const dx = Math.abs((i % cols) - gx);
+      const dy = Math.abs(Math.floor(i / cols) - gy);
+      return diag ? Math.max(dx, dy) + (Math.SQRT2 - 1) * Math.min(dx, dy) : dx + dy;
+    };
+    const g = new Float64Array(cols * rows).fill(Infinity);
+    const from = new Int32Array(cols * rows).fill(-1);
+    const closed = new Uint8Array(cols * rows);
+    g[start] = 0;
+    // Binary heap of [f, index].
+    const heap: [number, number][] = [[h(start), start]];
+    const push = (f: number, i: number) => {
+      heap.push([f, i]);
+      let k = heap.length - 1;
+      while (k > 0) {
+        const p = (k - 1) >> 1;
+        if (heap[p][0] <= heap[k][0]) break;
+        [heap[p], heap[k]] = [heap[k], heap[p]];
+        k = p;
+      }
+    };
+    const pop = (): [number, number] => {
+      const top = heap[0];
+      const last = heap.pop()!;
+      if (heap.length) {
+        heap[0] = last;
+        let k = 0;
+        for (;;) {
+          const l = 2 * k + 1;
+          const r = l + 1;
+          let m = k;
+          if (l < heap.length && heap[l][0] < heap[m][0]) m = l;
+          if (r < heap.length && heap[r][0] < heap[m][0]) m = r;
+          if (m === k) break;
+          [heap[m], heap[k]] = [heap[k], heap[m]];
+          k = m;
+        }
+      }
+      return top;
+    };
+    let best = start;
+    let found = false;
+    const limit = opts.maxNodes ?? 20000;
+    for (let n = 0; heap.length && n < limit; n++) {
+      const [, cur] = pop();
+      if (closed[cur]) continue;
+      closed[cur] = 1;
+      if (cur === goal) {
+        found = true;
+        best = cur;
+        break;
+      }
+      if (h(cur) < h(best)) best = cur;
+      const cx = cur % cols;
+      const cy = Math.floor(cur / cols);
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          if (dx && dy && (!diag || !free(cx + dx, cy) || !free(cx, cy + dy))) continue; // no corner cutting
+          const nx = cx + dx;
+          const ny = cy + dy;
+          if (!free(nx, ny) && !(nx === sx && ny === sy)) continue;
+          const ni = ny * cols + nx;
+          const cost = g[cur] + (dx && dy ? Math.SQRT2 : 1);
+          if (cost < g[ni]) {
+            g[ni] = cost;
+            from[ni] = cur;
+            push(cost + h(ni), ni);
+          }
+        }
+      }
+    }
+    if (!found && !opts.partial) return null;
+    const cells: number[] = [];
+    for (let i = best; i !== -1 && i !== start; i = from[i]) cells.push(i);
+    cells.reverse();
+    const pts = cells.map((i) => ({ x: (i % cols) * ts + ts / 2, y: Math.floor(i / cols) * ts + ts / 2 }));
+    if (found && reachableGoal) {
+      if (pts.length) pts[pts.length - 1] = { x: x2, y: y2 };
+      else pts.push({ x: x2, y: y2 });
+    }
+    // Drop waypoints in the middle of straight runs.
+    return pts.filter((p, i) => {
+      if (i === 0 || i === pts.length - 1) return true;
+      const a = pts[i - 1];
+      const b = pts[i + 1];
+      return (p.x - a.x) * (b.y - p.y) !== (p.y - a.y) * (b.x - p.x);
+    });
   }
 
   /** Nearest instance to a point matching the filter (within maxDistance). */
@@ -1378,25 +1526,56 @@ export class World {
     }
   }
 
+  /** Visible world size (the screen divided by the zoom). */
+  get viewWidth(): number {
+    return this.game.width / this.zoom;
+  }
+  get viewHeight(): number {
+    return this.game.height / this.zoom;
+  }
+  get zoom(): number {
+    const z = Number(this.camera.zoom);
+    return Number.isFinite(z) && z > 0 ? Math.max(0.25, Math.min(8, z)) : 1;
+  }
+
   private updateCamera(snap: boolean): void {
-    const vw = this.game.width;
-    const vh = this.game.height;
-    const followed = this.actors.find((a) => !a.destroyed && a.behavior('camera'));
+    const auto = this.actors.find((a) => !a.destroyed && a.behavior('camera'));
+    if (snap && auto) {
+      const z = toNum(auto.behavior('camera')!.zoom ?? 1);
+      if (z > 0) this.camera.zoom = z;
+    }
+    const vw = this.viewWidth;
+    const vh = this.viewHeight;
+    const followed = this.cameraTarget === undefined ? auto : this.cameraTarget && !this.cameraTarget.destroyed ? this.cameraTarget : undefined;
     let tx = this.camera.x;
     let ty = this.camera.y;
     if (followed) {
-      const cb = followed.behavior('camera')!;
+      const cb = followed.behavior('camera') ?? ({} as Behavior);
       const b = followed.box();
-      tx = b.x + b.w / 2 - vw / 2;
-      ty = b.y + b.h / 2 - vh / 2 + toNum(cb.offsetY);
-      const s = snap ? 1 : Math.min(1, Math.max(0.01, 1 - toNum(cb.smoothing)));
+      // Look ahead in the direction of movement (smoothed so turning doesn't jerk the view).
+      const ahead = toNum(cb.lookAhead ?? 0);
+      const dir = Math.abs(followed.vx) > 5 ? Math.sign(followed.vx) : followed.flipX ? -1 : ahead ? Math.sign(this.lookX) || 1 : 0;
+      this.lookX = snap ? dir * ahead : this.lookX + (dir * ahead - this.lookX) * 0.06;
+      const fx = b.x + b.w / 2 + this.lookX;
+      const fy = b.y + b.h / 2 + toNum(cb.offsetY ?? 0);
+      // Dead zone: the target moves freely inside a box around the view center.
+      let cx = this.camera.x + vw / 2;
+      let cy = this.camera.y + vh / 2;
+      const dzx = snap ? 0 : Math.max(0, toNum(cb.deadZoneX ?? 0));
+      const dzy = snap ? 0 : Math.max(0, toNum(cb.deadZoneY ?? 0));
+      if (fx > cx + dzx) cx = fx - dzx;
+      else if (fx < cx - dzx) cx = fx + dzx;
+      if (fy > cy + dzy) cy = fy - dzy;
+      else if (fy < cy - dzy) cy = fy + dzy;
+      tx = cx - vw / 2;
+      ty = cy - vh / 2;
+      const s = snap ? 1 : Math.min(1, Math.max(0.01, 1 - toNum(cb.smoothing ?? 0)));
       tx = this.camera.x + (tx - this.camera.x) * s;
       ty = this.camera.y + (ty - this.camera.y) * s;
     }
-    const W = this.widthPx;
-    const H = this.heightPx;
-    this.camera.x = W <= vw ? (W - vw) / 2 : Math.max(0, Math.min(W - vw, tx));
-    this.camera.y = H <= vh ? (H - vh) / 2 : Math.max(0, Math.min(H - vh, ty));
+    const r = this.cameraBounds ?? { x: 0, y: 0, w: this.widthPx, h: this.heightPx };
+    this.camera.x = r.w <= vw ? r.x + (r.w - vw) / 2 : Math.max(r.x, Math.min(r.x + r.w - vw, tx));
+    this.camera.y = r.h <= vh ? r.y + (r.h - vh) / 2 : Math.max(r.y, Math.min(r.y + r.h - vh, ty));
   }
 
   // ------------------------------------------------------------------ events
@@ -1416,7 +1595,7 @@ export class World {
   }
 
   private matchesWith(o: Actor, w: Value | undefined): boolean {
-    return w === undefined || w === 'any' || o.type.name === w;
+    return w === undefined || w === 'any' || this.isA(o, String(w));
   }
 
   private keyTrigger(set: Set<string>, key: Value | undefined): boolean {
@@ -1426,8 +1605,8 @@ export class World {
 
   private clickHits(a: Actor): boolean {
     for (const [cx, cy] of this.input.clicks) {
-      const wx = a.type.hud ? cx : cx + this.camera.x;
-      const wy = a.type.hud ? cy : cy + this.camera.y;
+      const wx = a.type.hud ? cx : cx / this.zoom + this.camera.x;
+      const wy = a.type.hud ? cy : cy / this.zoom + this.camera.y;
       const b = a.box();
       if (wx >= b.x && wx < b.x + b.w && wy >= b.y && wy < b.y + b.h) return true;
     }
@@ -1773,8 +1952,8 @@ export class World {
         case 'frame': return this.frame;
         case 'width': return this.game.width;
         case 'height': return this.game.height;
-        case 'mouseX': return this.input.pointer ? this.input.pointer[0] + this.camera.x : 0;
-        case 'mouseY': return this.input.pointer ? this.input.pointer[1] + this.camera.y : 0;
+        case 'mouseX': return this.input.pointer ? this.input.pointer[0] / this.zoom + this.camera.x : 0;
+        case 'mouseY': return this.input.pointer ? this.input.pointer[1] / this.zoom + this.camera.y : 0;
         default: return undefined;
       }
     }
@@ -1812,7 +1991,7 @@ export class World {
     let best: Actor | undefined;
     let bd = Infinity;
     for (const o of this.actors) {
-      if (o === from || o.destroyed || o.type.name !== objectName) continue;
+      if (o === from || o.destroyed || !this.isA(o, objectName)) continue;
       const d = Math.hypot(o.x - from.x, o.y - from.y);
       if (d < bd) {
         bd = d;
@@ -1829,10 +2008,10 @@ export class World {
         const m = MATH_FUNCTIONS[name];
         if (m) return m(args.map(toNum), () => this.random());
         switch (name) {
-          case 'count': return this.actors.filter((a) => !a.destroyed && a.type.name === String(args[0])).length;
+          case 'count': return this.actors.filter((a) => !a.destroyed && this.isA(a, String(args[0]))).length;
           case 'hasSave': return this.hasSave(String(args[0] ?? 'auto'));
           case 'countTag': return this.actors.filter((a) => !a.destroyed && a.tags.has(String(args[0]))).length;
-          case 'exists': return this.actors.some((a) => !a.destroyed && a.type.name === String(args[0]));
+          case 'exists': return this.actors.some((a) => !a.destroyed && this.isA(a, String(args[0])));
           case 'keyDown': return this.input.down.has(String(args[0]));
           case 'keyPressed': return this.input.pressed.has(String(args[0]));
           case 'nearest': {
@@ -1891,6 +2070,10 @@ export function renderWorld(w: World, r: Renderer): void {
   const vw = w.game.width;
   const vh = w.game.height;
   r.clear(scene.background || w.game.background);
+  const zoom = w.zoom;
+  // Screen position of a world coordinate (round after zooming so zoomed pixels stay aligned).
+  const zx = (v: number) => Math.round(v * zoom);
+  const img = (k = 1) => ({ flipX: false, opacity: 1, angle: 0, ...(zoom * k !== 1 ? { scale: zoom * k } : {}) });
   let camX = w.camera.x;
   let camY = w.camera.y;
   if (w.clock < w.shake.until) {
@@ -1899,20 +2082,22 @@ export function renderWorld(w: World, r: Renderer): void {
     camX += (Math.random() * 2 - 1) * k;
     camY += (Math.random() * 2 - 1) * k;
   }
-  camX = Math.round(camX);
-  camY = Math.round(camY);
+  // Snap to the zoomed pixel grid.
+  camX = Math.round(camX * zoom) / zoom;
+  camY = Math.round(camY * zoom) / zoom;
 
   for (const bg of scene.backgrounds) {
     const asset = w.bundle.sprites[bg.sprite];
     if (!asset || !asset.frames.length) continue;
     const f = asset.frames[0];
-    const ox = Math.round(-camX * bg.parallax);
-    const oy = Math.round(bg.y - camY * bg.parallax);
+    const fw = f.w * zoom;
+    const ox = zx(-camX * bg.parallax);
+    const oy = zx(bg.y - camY * bg.parallax);
     if (bg.repeatX) {
-      let start = ox % f.w;
-      if (start > 0) start -= f.w;
-      for (let x = start; x < vw; x += f.w) r.image(bg.sprite, f.x, f.y, f.w, f.h, x, oy, { flipX: false, opacity: 1, angle: 0 });
-    } else r.image(bg.sprite, f.x, f.y, f.w, f.h, ox, oy, { flipX: false, opacity: 1, angle: 0 });
+      let start = ox % fw;
+      if (start > 0) start -= fw;
+      for (let x = start; x < vw; x += fw) r.image(bg.sprite, f.x, f.y, f.w, f.h, Math.round(x), oy, img());
+    } else r.image(bg.sprite, f.x, f.y, f.w, f.h, ox, oy, img());
   }
 
   type Item = { z: number; order: number; draw: () => void };
@@ -1929,19 +2114,19 @@ export function renderWorld(w: World, r: Renderer): void {
       z: layer.z ?? li - 10,
       order: li,
       draw: () => {
-        const lx = Math.round(camX * par);
-        const ly = Math.round(camY * par);
+        const lx = camX * par;
+        const ly = camY * par;
         const x0 = Math.max(0, Math.floor(lx / ts));
         const y0 = Math.max(0, Math.floor(ly / ts));
-        const x1 = Math.min(scene.cols - 1, Math.floor((lx + vw) / ts));
-        const y1 = Math.min(scene.rows - 1, Math.floor((ly + vh) / ts));
+        const x1 = Math.min(scene.cols - 1, Math.floor((lx + vw / zoom) / ts));
+        const y1 = Math.min(scene.rows - 1, Math.floor((ly + vh / zoom) / ts));
         for (let ty = y0; ty <= y1; ty++) {
           for (let tx = x0; tx <= x1; tx++) {
             const t = layer.tiles[ty * scene.cols + tx];
             if (t < 0) continue;
             const sx = f0.x + (t % tcols) * grid.width;
             const sy = f0.y + Math.floor(t / tcols) * grid.height;
-            r.image(tileset.name, sx, sy, grid.width, grid.height, tx * ts - lx, ty * ts - ly, { flipX: false, opacity: 1, angle: 0 });
+            r.image(tileset.name, sx, sy, grid.width, grid.height, zx(tx * ts - lx), zx(ty * ts - ly), img((ts / grid.width) || 1));
           }
         }
       },
@@ -1956,13 +2141,13 @@ export function renderWorld(w: World, r: Renderer): void {
     }
     // y-sort: within the same z, instances lower on screen are drawn in front (top-down / RPG depth).
     const order = scene.ySort ? 1000 + a.box().y + a.box().h + i / 10000 : 1000 + i;
-    items.push({ z: a.z, order, draw: () => drawActor(w, r, a, camX, camY) });
+    items.push({ z: a.z, order, draw: () => drawActor(w, r, a, camX, camY, zoom) });
   });
   items.sort((p, q) => p.z - q.z || p.order - q.order);
   for (const it of items) it.draw();
   hud.sort((p, q) => p.z - q.z);
   for (const a of hud) drawActor(w, r, a, 0, 0);
-  w.scripts.draw(r, camX, camY);
+  w.scripts.draw(r, camX, camY, zoom);
 
   if (w.message && w.clock < w.message.until) {
     const m = measureText(w.message.text);
@@ -2038,18 +2223,18 @@ function drawDialog(w: World, r: Renderer): void {
   }
 }
 
-function drawActor(w: World, r: Renderer, a: Actor, camX: number, camY: number): void {
+function drawActor(w: World, r: Renderer, a: Actor, camX: number, camY: number, zoom = 1): void {
   if (!a.visible || a.destroyed) return;
   if (a.flashUntil > w.clock && Math.floor(w.clock * 12) % 2 === 0) return;
-  const x = Math.round(a.x - camX);
-  const y = Math.round(a.y - camY);
+  const x = Math.round((a.x - camX) * zoom);
+  const y = Math.round((a.y - camY) * zoom);
   if (a.asset && a.asset.frames.length) {
     const f = a.asset.frames[a.frameIndex()] ?? a.asset.frames[0];
-    if (x + f.w < -8 || y + f.h < -8 || x > w.game.width + 8 || y > w.game.height + 8) return;
-    r.image(a.asset.name, f.x, f.y, f.w, f.h, x, y, { flipX: a.flipX, opacity: a.opacity, angle: a.angle });
+    if (x + f.w * zoom < -8 || y + f.h * zoom < -8 || x > w.game.width + 8 || y > w.game.height + 8) return;
+    r.image(a.asset.name, f.x, f.y, f.w, f.h, x, y, { flipX: a.flipX, opacity: a.opacity, angle: a.angle, ...(zoom !== 1 ? { scale: zoom } : {}) });
   }
   if (a.type.text !== undefined && a.textOverride) {
-    const s = a.type.textSize ?? 1;
+    const s = Math.max(1, Math.round((a.type.textSize ?? 1) * zoom));
     const color = a.type.textColor ?? '#ffffff';
     // 1px drop shadow keeps HUD text readable on any background.
     r.text(a.textOverride, x + s, y + s, '#000000', s);

@@ -350,9 +350,10 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       ctx.lineWidth = 1;
       for (const a of world.actors) {
         const b = a.box();
-        const ox = a.type.hud ? 0 : Math.round(world.camera.x);
-        const oy = a.type.hud ? 0 : Math.round(world.camera.y);
-        ctx.strokeRect(Math.round(b.x - ox) + 0.5, Math.round(b.y - oy) + 0.5, Math.max(0, b.w - 1), Math.max(0, b.h - 1));
+        const z = a.type.hud ? 1 : world.zoom;
+        const ox = a.type.hud ? 0 : world.camera.x;
+        const oy = a.type.hud ? 0 : world.camera.y;
+        ctx.strokeRect(Math.round((b.x - ox) * z) + 0.5, Math.round((b.y - oy) * z) + 0.5, Math.max(0, b.w * z - 1), Math.max(0, b.h * z - 1));
       }
       ctx.globalAlpha = 1;
     }

@@ -5,6 +5,7 @@
 
 import { checkExpr } from './expr.js';
 import type { Behavior, EventStep, GameEvent, GameProject, Scene, Value } from './types.js';
+import { resolveObjectTypes } from './variants.js';
 
 export type ParamType =
   | 'expr' // expression, evaluated at run time
@@ -121,7 +122,7 @@ export const BEHAVIORS: StepSpec[] = [
   { type: 'patrol', label: 'Patrol', help: 'Walks left and right, turning at walls (and ledges). Falls with gravity.', params: [{ name: 'speed', type: 'number', default: 40 }, { name: 'turnAtLedges', type: 'bool', default: true }, { name: 'gravity', type: 'bool', default: true }] },
   { type: 'chase', label: 'Chase', help: 'Moves toward the nearest instance of an object within range.', params: [{ name: 'target', type: 'object', default: 'player' }, { name: 'speed', type: 'number', default: 50 }, { name: 'range', type: 'number', default: 160 }] },
   { type: 'sine', label: 'Float (sine)', help: 'Bobs back and forth around its start position.', params: [{ name: 'axis', type: 'choice', options: ['y', 'x'], default: 'y' }, { name: 'amplitude', type: 'number', default: 4 }, { name: 'period', type: 'number', default: 1.5 }] },
-  { type: 'camera', label: 'Camera follows', help: 'The camera follows this instance, clamped to the scene.', params: [{ name: 'smoothing', type: 'number', default: 0.15 }, { name: 'offsetY', type: 'number', default: 0 }] },
+  { type: 'camera', label: 'Camera follows', help: 'The camera follows this instance, clamped to the scene (or to camera.setBounds from scripts). Dead zone: the instance moves freely in a box around the center. Look ahead: the view shifts toward where it is going. Zoom 2 = twice as big.', params: [{ name: 'smoothing', type: 'number', default: 0.15 }, { name: 'offsetY', type: 'number', default: 0 }, { name: 'deadZoneX', type: 'number', default: 0, label: 'dead zone x', min: 0 }, { name: 'deadZoneY', type: 'number', default: 0, label: 'dead zone y', min: 0 }, { name: 'lookAhead', type: 'number', default: 0, label: 'look ahead', min: 0 }, { name: 'zoom', type: 'number', default: 1, min: 0.25, max: 8 }] },
   { type: 'bounded', label: 'Stay in scene', help: 'Cannot leave the scene rectangle.', params: [] },
   { type: 'lifetime', label: 'Lifetime', help: 'Destroyed after N seconds.', params: [{ name: 'seconds', type: 'number', default: 2 }] },
   { type: 'dialogue', label: 'Talks (dialogue)', help: 'The player talks to it by pressing action next to it. Plays the dialogue set on each placed instance (property "dialogue" in the scene inspector), or this default. One NPC type, many characters.', params: [{ name: 'dialogue', type: 'dialogue', default: '' }] },
@@ -293,14 +294,17 @@ function checkEvents(where: string, events: GameEvent[], ctx: { objects: Set<str
 export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<string>, scripts?: ScriptShape, dialogues?: { nodes: string[]; errors: { file: string; line: number; message: string }[] }): Problem[] {
   const out: Problem[] = [];
   for (const e of dialogues?.errors ?? []) out.push({ where: `dialogues/${e.file}.dialogue line ${e.line}`, message: e.message });
-  const talkers = new Set(game.objects.filter((o) => o.behaviors.some((b) => b.type === 'dialogue')).map((o) => o.name));
+  const resolved = resolveObjectTypes(game.objects);
+  for (const e of resolved.errors) out.push({ where: `object ${e.object}`, message: e.message });
+  const eff = (name: string) => resolved.types.get(name);
+  const talkers = new Set([...resolved.types.values()].filter((o) => o.behaviors.some((b) => b.type === 'dialogue')).map((o) => o.name));
   if (dialogues) {
     for (const s of scenes) {
       for (const i of s.instances) {
         const d = i.props?.dialogue;
         if (typeof d === 'string' && d && !dialogues.nodes.includes(d)) out.push({ where: `scene ${s.name} instance ${i.name ?? i.object}`, message: `no dialogue "${d}"` });
         if (i.sprite && !sprites.has(i.sprite)) out.push({ where: `scene ${s.name} instance ${i.name ?? i.object}`, message: `sprite "${i.sprite}" not found` });
-        if (talkers.has(i.object) && !d && !game.objects.find((o) => o.name === i.object)?.behaviors.find((b) => b.type === 'dialogue')?.dialogue) {
+        if (talkers.has(i.object) && !d && !eff(i.object)?.behaviors.find((b) => b.type === 'dialogue')?.dialogue) {
           out.push({ where: `scene ${s.name} instance ${i.name ?? i.object}`, message: 'talks but has no dialogue (set its "dialogue" property)' });
         }
       }
@@ -325,8 +329,9 @@ export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<st
   if (!scenes.length) out.push({ where: 'game', message: 'no scenes yet' });
   else if (!sceneNames.has(game.startScene)) out.push({ where: 'game.startScene', message: `no scene "${game.startScene}" (the first scene will be used)` });
   for (const o of game.objects) {
+    const full = eff(o.name) ?? o;
     if (o.sprite && !sprites.has(o.sprite)) out.push({ where: `object ${o.name}`, message: `sprite "${o.sprite}" not found` });
-    if (!o.sprite && o.text === undefined) out.push({ where: `object ${o.name}`, message: 'has neither a sprite nor text (it will be invisible)' });
+    if (!full.sprite && full.text === undefined) out.push({ where: `object ${o.name}`, message: 'has neither a sprite nor text (it will be invisible)' });
     o.behaviors.forEach((b, i) => {
       const spec = BEHAVIOR_MAP.get(b.type);
       if (!spec) out.push({ where: `object ${o.name} behavior ${i}`, message: `unknown behavior "${b.type}"` });

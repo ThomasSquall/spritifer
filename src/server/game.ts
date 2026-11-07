@@ -265,7 +265,7 @@ export function renderScenePreview(loaded: LoadedGame, sceneName: string, opts: 
   const H = scene.rows * scene.tileSize;
   const game: GameProject = { ...loaded.bundle.game, width: W, height: H };
   const world = new World({ ...loaded.bundle, game, scripts: {} }, { scene: sceneName });
-  world.camera = { x: 0, y: 0 };
+  world.camera = { x: 0, y: 0, zoom: 1 };
   world.updateTexts();
   const r = new BitmapRenderer(W, H, loaded.sheets);
   renderWorld(world, r);
@@ -276,8 +276,8 @@ export function renderScenePreview(loaded: LoadedGame, sceneName: string, opts: 
   // Starting viewport (where the camera begins).
   const start = new World({ ...loaded.bundle, scripts: {} }, { scene: sceneName });
   start.step();
-  const vw = loaded.bundle.game.width;
-  const vh = loaded.bundle.game.height;
+  const vw = Math.round(start.viewWidth);
+  const vh = Math.round(start.viewHeight);
   const cx = Math.round(start.camera.x);
   const cy = Math.round(start.camera.y);
   r.rect(cx, cy, vw, 1, '#feae34', 0.9);

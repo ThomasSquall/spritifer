@@ -527,6 +527,104 @@ export default class Countdown extends Behaviour {
 }
 `;
 
+const ROAM = `/**
+ * Walks to random reachable spots around where it started, around walls, pausing in between
+ * (villagers, animals). Stops when the player talks to it and while dialogs are open.
+ */
+export default class Roam extends Behaviour {
+  radius = 64
+  speed = 30
+  pauseMin = 1
+  pauseMax = 3
+  diagonal = false
+
+  static params = {
+    radius: { min: 0, help: 'How far from home it wanders (px)' },
+    speed: { min: 1 },
+    pauseMin: { min: 0, step: 0.5, help: 'Seconds standing still between walks' },
+    pauseMax: { min: 0, step: 0.5 },
+  }
+
+  _homeX = 0
+  _homeY = 0
+
+  start() {
+    this._homeX = this.self.centerX
+    this._homeY = this.self.centerY
+    this._loop()
+  }
+
+  async _loop() {
+    for (;;) {
+      await this.wait(random(this.pauseMin, Math.max(this.pauseMin, this.pauseMax)))
+      await this.waitUntil(() => this.enabled && !game.dialogOpen)
+      const x = this._homeX + random(-this.radius, this.radius)
+      const y = this._homeY + random(-this.radius, this.radius)
+      await this.self.pathTo(x, y, this.speed, { diagonal: this.diagonal })
+    }
+  }
+
+  /** @param {Instance} player */
+  onInteract(player) {
+    this.self.stopMoving()
+  }
+
+  onDisable() {
+    this.self.stopMoving()
+  }
+}
+`;
+
+const CHASE_PATH = `/**
+ * Chases a target around walls (pathfinding) once it comes within range, and gives up when it gets
+ * far enough away. Pair it with Damage to hurt on contact.
+ */
+export default class ChasePath extends Behaviour {
+  target = 'player'
+  range = 120
+  giveUpRange = 220
+  speed = 45
+  repath = 0.4
+  diagonal = true
+
+  static params = {
+    target: { type: 'object', help: 'What it chases (variants included)' },
+    range: { min: 0, help: 'Starts chasing within this distance (px)' },
+    giveUpRange: { min: 0, help: 'Stops chasing beyond this distance' },
+    speed: { min: 1 },
+    repath: { min: 0.1, step: 0.1, help: 'Seconds between path updates' },
+  }
+
+  _chasing = false
+
+  start() {
+    this.every(this.repath, () => this.think())
+  }
+
+  think() {
+    if (game.dialogOpen) return
+    const t = findNearest(this.self, { object: this.target })
+    if (!t) return
+    const d = this.self.distanceTo(t)
+    if (!this._chasing && d > this.range) return
+    if (this._chasing && d > this.giveUpRange) {
+      this._chasing = false
+      this.self.stopMoving()
+      this.emit('lostTarget', { object: this.self.object })
+      return
+    }
+    if (!this._chasing) this.emit('spotted', { object: this.self.object })
+    this._chasing = true
+    this.self.pathTo(t.centerX, t.centerY, this.speed, { diagonal: this.diagonal, maxSteps: 2 })
+  }
+
+  onDisable() {
+    this._chasing = false
+    this.self.stopMoving()
+  }
+}
+`;
+
 export const LIBRARY: LibraryComponent[] = [
   { name: 'Health', folder: 'combat', summary: 'Hit points with invincibility, sounds, death and an optional HP bar.', usage: 'Put it on the player and on enemies. Damage, bullets and scripts call getComponent("Health").damage(n).', code: HEALTH },
   { name: 'Damage', folder: 'combat', summary: 'Hurts what it touches (spikes, enemies, bullets), with knockback.', requires: ['Health'], usage: 'Put it on hazards and enemies; the victim needs Health. On bullets turn on destroyOnHit.', code: DAMAGE },
@@ -535,6 +633,8 @@ export const LIBRARY: LibraryComponent[] = [
   { name: 'Door', folder: 'world', summary: 'Goes to another scene or door, with fade and arrival point.', usage: 'Name each door instance; set scene + entry (the name of the door you arrive at).', code: DOOR },
   { name: 'Checkpoint', folder: 'world', summary: 'Touching it saves where the player respawns.', usage: 'Place it in levels; works with Respawn on the player.', code: CHECKPOINT },
   { name: 'Respawn', folder: 'player', summary: 'At 0 HP: back at the last checkpoint, with lives and game over.', requires: ['Health'], usage: 'Put it on the player together with Health.', code: RESPAWN },
+  { name: 'Roam', folder: 'ai', summary: 'Wanders to random spots around its home, around walls, with pauses.', usage: 'Put it on villagers and animals (top-down). It stops while dialogs are open.', code: ROAM },
+  { name: 'ChasePath', folder: 'ai', summary: 'Chases a target around walls with pathfinding; gives up when far.', usage: 'Put it on enemies in top-down games; add Damage to hurt on contact.', code: CHASE_PATH },
   { name: 'Spawner', folder: 'level', summary: 'Spawns an object every few seconds, up to a maximum.', usage: 'Put it on an invisible marker object, or on a scene with offsetX/offsetY.', code: SPAWNER },
   { name: 'Countdown', folder: 'level', summary: 'Level timer: counts down, shows it, then restarts or changes scene.', usage: 'Put it on a scene.', code: COUNTDOWN },
 ];

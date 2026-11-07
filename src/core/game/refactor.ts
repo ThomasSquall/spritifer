@@ -48,6 +48,7 @@ export function renameObjectRefs(game: GameProject, scenes: Scene[], from: strin
   obj.name = to;
   const types: ParamType[] = ['object', 'objectOrAny'];
   for (const o of game.objects) {
+    if (o.extends === from) o.extends = to;
     renameInEvents(o.events, types, from, to);
     for (const b of o.behaviors) if (b.type === 'chase' && b.target === from) b.target = to;
   }

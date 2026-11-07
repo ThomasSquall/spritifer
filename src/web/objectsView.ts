@@ -1,7 +1,8 @@
 /** Objects page: the game's object types (player, enemies, pickups, HUD...) with behaviors, properties and events. */
 
 import { BEHAVIORS, BEHAVIOR_MAP, defaultStep } from '../core/game/catalog.js';
-import { GAME_NAME_RE, type ObjectType, type Value, normalizeObject, normalizeTags } from '../core/game/types.js';
+import { type Behavior, GAME_NAME_RE, type ObjectType, type Value, normalizeObject, normalizeTags } from '../core/game/types.js';
+import { behaviorKey } from '../core/game/variants.js';
 import { api } from './api.js';
 import { type SheetContext, paramInput, renderEventSheet } from './eventSheet.js';
 import { gameApi } from './gameApi.js';
@@ -78,11 +79,11 @@ export function renderObjects(root: HTMLElement, selected: string | null, go: (n
     const g = state.game!;
     list.append(h('div', { class: 'side-title' }, `Object types (${g.objects.length})`));
     for (const o of g.objects) {
-      const s = state.sprite(o.sprite);
+      const s = state.sprite(state.effective(o.name)?.sprite ?? o.sprite);
       list.append(h('a', { class: `obj-item${o.name === selected ? ' active' : ''}`, href: `#/objects/${encodeURIComponent(o.name)}` },
         h('span', { class: 'obj-thumb checker' }, s ? h('img', { src: api.previewUrl(s.name, s.rev, 2), alt: '' }) : o.text !== undefined ? h('span', { class: 'txt-badge' }, 'Aa') : null),
         h('span', { class: 'obj-item-name' }, o.name),
-        h('span', { class: 'obj-item-tags muted' }, o.behaviors.map((b) => b.type).join(', ')),
+        h('span', { class: 'obj-item-tags muted' }, o.extends ? `↳ variant of ${o.extends}` : o.behaviors.map((b) => (b.type === 'script' ? String(b.name) : b.type)).join(', ')),
       ));
     }
     list.append(h('div', { class: 'side-title' }, 'New from template'));
@@ -125,6 +126,10 @@ export function renderObjects(root: HTMLElement, selected: string | null, go: (n
 function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLElement {
   const g = state.game!;
   const changed = () => state.change();
+  /** The parent type with what it inherits itself (variants). */
+  const parent = obj.extends ? state.effective(obj.extends) : undefined;
+  const variants = state.resolved.lineage;
+  const descendants = new Set([...variants].filter(([, line]) => line.includes(obj.name)).map(([n]) => n));
   const el = h('div', { class: 'obj-editor' });
   let animations: string[] = [];
 
@@ -161,6 +166,15 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
     nameIn,
     usage,
     h('span', { class: 'spacer' }),
+    obj.extends ? h('a', { class: 'small variant-link', href: `#/objects/${encodeURIComponent(obj.extends)}` }, `↳ variant of ${obj.extends}`) : null,
+    h('button', { class: 'small', title: 'A new type based on this one: it inherits everything and keeps only what you change (like a Unity prefab variant)', onclick: async () => {
+      const name = await promptText('New variant', `Name of the variant of ${obj.name} (e.g. red_${obj.name}, ${obj.name}_boss)`, uniqueName(`${obj.name}_variant`));
+      if (!name) return;
+      if (!GAME_NAME_RE.test(name) || state.object(name)) return toast(state.object(name) ? `"${name}" already exists` : 'Invalid name', 'error');
+      g.objects.push(normalizeObject({ name, extends: obj.name }));
+      changed();
+      go(name);
+    } }, icon('copy', 14), 'Variant'),
     h('button', { class: 'small', onclick: () => {
       const copy = normalizeObject(JSON.parse(JSON.stringify(obj)));
       copy.name = uniqueName(obj.name + '_copy');
@@ -192,21 +206,22 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
     c.imageSmoothingEnabled = false;
     c.clearRect(0, 0, preview.width, preview.height);
     if (assetImg) c.drawImage(assetImg.img, assetImg.frame.x, assetImg.frame.y, assetImg.frame.w, assetImg.frame.h, 0, 0, preview.width, preview.height);
-    const hb = obj.hitbox ?? { x: 0, y: 0, w: frameSize.w, h: frameSize.h };
+    const hb = obj.hitbox ?? parent?.hitbox ?? { x: 0, y: 0, w: frameSize.w, h: frameSize.h };
     c.strokeStyle = '#ff004d';
     c.lineWidth = 2;
     c.strokeRect(hb.x * scale + 1, hb.y * scale + 1, hb.w * scale - 2, hb.h * scale - 2);
   };
 
   const loadSprite = async () => {
-    const a = await state.asset(obj.sprite);
+    const a = await state.asset(obj.sprite ?? parent?.sprite);
     clear(animSel);
     animSel.append(h('option', { value: '' }, 'all frames'));
     animations = a?.tags.map((t) => t.name) ?? [];
+    if (parent) animSel.firstElementChild!.textContent = `— inherit (${parent.animation ?? 'all frames'}) —`;
     for (const t of animations) animSel.append(h('option', { value: t, selected: t === obj.animation }, t));
     if (a) {
       frameSize = { w: a.width, h: a.height };
-      const tag = a.tags.find((t) => t.name === obj.animation);
+      const tag = a.tags.find((t) => t.name === (obj.animation ?? parent?.animation));
       assetImg = { img: a.img, frame: a.frames[tag?.from ?? 0] ?? a.frames[0] };
     } else {
       assetImg = null;
@@ -220,7 +235,7 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
     else delete obj.sprite;
     changed();
     void loadSprite();
-  } }, h('option', { value: '' }, '— none —'), ...state.sprites.map((s) => h('option', { value: s.name, selected: s.name === obj.sprite }, `${s.name} (${s.width}×${s.height})`)));
+  } }, h('option', { value: '' }, parent ? `— inherit (${parent.sprite ?? 'none'}) —` : '— none —'), ...state.sprites.map((s) => h('option', { value: s.name, selected: s.name === obj.sprite }, `${s.name} (${s.width}×${s.height})`)));
   if (obj.sprite && !state.sprite(obj.sprite)) spriteSel.prepend(h('option', { value: obj.sprite, selected: true }, `${obj.sprite} (missing)`));
   animSel.addEventListener('change', () => {
     if (animSel.value) obj.animation = animSel.value;
@@ -288,6 +303,13 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
       h('div', { class: 'appearance' },
         h('div', { class: 'preview-box checker' }, preview),
         h('div', { class: 'form' },
+          h('label', { title: 'A variant inherits sprite, hitbox, properties, tags, components and events, and keeps only what you change' }, 'Based on', h('select', { onchange: (e: Event) => {
+            const v = (e.target as HTMLSelectElement).value;
+            if (v) obj.extends = v;
+            else delete obj.extends;
+            changed();
+            go(obj.name);
+          } }, h('option', { value: '' }, '— nothing (standalone type) —'), ...g.objects.filter((o) => o !== obj && !descendants.has(o.name)).map((o) => h('option', { value: o.name, selected: o.name === obj.extends }, o.name)))),
           h('label', {}, 'Sprite', spriteSel),
           h('label', {}, 'Default animation', animSel),
           h('label', { class: 'inline' }, hbAuto, 'Hitbox = whole frame'),
@@ -298,14 +320,15 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
       h('label', { class: 'inline text-toggle' }, textToggle, 'Text object (score, label, timer)'),
       textBox,
     ),
-    propertiesCard(obj, changed, () => refreshEvents()),
-    behaviorsCard(obj, changed),
+    propertiesCard(obj, changed, () => refreshEvents(), parent),
+    behaviorsCard(obj, changed, parent),
   ));
 
   // ---------------------------------------------------------------- events
   const sheet = h('div', { class: 'event-sheet' });
   el.append(h('div', { class: 'card events-card' },
     h('h3', {}, 'Events ', h('span', { class: 'muted small' }, '— when something happens to an instance of ', h('b', {}, obj.name), ', check the conditions and run the actions. ', h('code', {}, 'self'), ' is this instance, ', h('code', {}, 'other'), ' the one it collided with.')),
+    parent?.events.length ? h('p', { class: 'muted small' }, `${parent.events.length} event${parent.events.length === 1 ? '' : 's'} inherited from `, h('a', { href: `#/objects/${encodeURIComponent(obj.extends!)}` }, obj.extends!), ' run first; the ones below are added.') : null,
     sheet,
   ));
   const refreshEvents = renderEventSheet(sheet, () => obj.events, () => sheetContext(obj, animations), changed);
@@ -313,19 +336,25 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
   return el;
 }
 
-function propertiesCard(obj: ObjectType, changed: () => void, onKeys: () => void): HTMLElement {
+function propertiesCard(obj: ObjectType, changed: () => void, onKeys: () => void, parent?: ObjectType): HTMLElement {
   const body = h('div', { class: 'props' });
   const parse = (s: string): Value => (s === 'true' ? true : s === 'false' ? false : s.trim() !== '' && Number.isFinite(Number(s)) ? Number(s) : s);
   const render = () => {
     clear(body);
+    // Inherited properties: shown with the parent's value, overridable.
+    for (const [k, v] of Object.entries(parent?.properties ?? {})) {
+      if (k in obj.properties) continue;
+      body.append(h('div', { class: 'prop-row inherited', title: `Inherited from ${obj.extends}` }, h('code', {}, `self.${k}`), h('span', { class: 'muted small' }, `${JSON.stringify(v)} (inherited)`),
+        iconButton('pencil', 'Override for this variant', () => { obj.properties[k] = v; changed(); render(); }, { class: 'icon-btn tiny' })));
+    }
     for (const [k, v] of Object.entries(obj.properties)) {
       const valIn = h('input', { type: 'text', value: String(v), spellcheck: false, oninput: () => { obj.properties[k] = parse(valIn.value); changed(); } });
       body.append(h('div', { class: 'prop-row' }, h('code', {}, `self.${k}`), valIn, iconButton('close', 'Remove', () => { delete obj.properties[k]; changed(); render(); onKeys(); }, { class: 'icon-btn tiny' })));
     }
-    if (!Object.keys(obj.properties).length) body.append(h('p', { class: 'muted small' }, 'Instance variables, e.g. hp = 3, speed = 50. Read and change them in events as self.hp.'));
+    if (!Object.keys(obj.properties).length && !Object.keys(parent?.properties ?? {}).length) body.append(h('p', { class: 'muted small' }, 'Instance variables, e.g. hp = 3, speed = 50. Read and change them in events as self.hp.'));
   };
   render();
-  const tagsIn = h('input', { type: 'text', value: (obj.tags ?? []).join(', '), placeholder: 'enemy, pickup…', spellcheck: false, onchange: () => {
+  const tagsIn = h('input', { type: 'text', value: (obj.tags ?? []).join(', '), placeholder: parent?.tags?.length ? `+ ${parent.tags.join(', ')} (inherited)` : 'enemy, pickup…', spellcheck: false, onchange: () => {
     const t = normalizeTags(tagsIn.value);
     if (t) obj.tags = t;
     else delete obj.tags;
@@ -348,22 +377,33 @@ function propertiesCard(obj: ObjectType, changed: () => void, onKeys: () => void
   );
 }
 
-function behaviorsCard(obj: ObjectType, changed: () => void): HTMLElement {
+function behaviorsCard(obj: ObjectType, changed: () => void, parent?: ObjectType): HTMLElement {
   const body = h('div', { class: 'behaviors' });
   const ctx = () => sheetContext(obj, []);
+  const inheritedOf = (b: Behavior) => parent?.behaviors.find((x) => behaviorKey(x) === behaviorKey(b));
   const render = () => {
     clear(body);
+    // Inherited components the variant doesn't change: listed, with Override.
+    for (const pb of parent?.behaviors ?? []) {
+      if (obj.behaviors.some((b) => behaviorKey(b) === behaviorKey(pb))) continue;
+      const label = pb.type === 'script' ? String(pb.name) : (BEHAVIOR_MAP.get(pb.type)?.label ?? pb.type);
+      body.append(h('div', { class: 'behavior inherited-row' },
+        h('div', { class: 'behavior-head' }, pb.type === 'script' ? h('span', { class: 'comp-icon' }, '◆') : null, h('strong', {}, label), h('span', { class: 'badge muted-badge' }, `from ${obj.extends}`), h('span', { class: 'spacer' }),
+          h('button', { class: 'small ghost', title: 'Change its params for this variant', onclick: () => { obj.behaviors.push(pb.type === 'script' ? { type: 'script', name: String(pb.name) } : { type: pb.type }); changed(); render(); } }, 'Override')),
+      ));
+    }
     obj.behaviors.forEach((b, i) => {
       const remove = () => { obj.behaviors.splice(i, 1); changed(); render(); };
+      const base = inheritedOf(b);
       if (b.type === 'script') {
-        body.append(componentCard(b, ctx(), changed, { remove, moveUp: i > 0 ? () => { obj.behaviors.splice(i - 1, 0, ...obj.behaviors.splice(i, 1)); changed(); render(); } : undefined }));
+        body.append(componentCard(b, ctx(), changed, { remove, base, moveUp: i > 0 ? () => { obj.behaviors.splice(i - 1, 0, ...obj.behaviors.splice(i, 1)); changed(); render(); } : undefined }));
         return;
       }
       const spec = BEHAVIOR_MAP.get(b.type);
       body.append(h('div', { class: 'behavior' },
-        h('div', { class: 'behavior-head' }, h('strong', {}, spec?.label ?? b.type), h('span', { class: 'badge muted-badge' }, 'built-in'), h('span', { class: 'spacer' }), iconButton('close', 'Remove behavior', remove, { class: 'icon-btn tiny' })),
+        h('div', { class: 'behavior-head' }, h('strong', {}, spec?.label ?? b.type), h('span', { class: 'badge muted-badge' }, base ? 'override' : 'built-in'), h('span', { class: 'spacer' }), iconButton('close', base ? 'Remove override (back to the inherited one)' : 'Remove behavior', remove, { class: 'icon-btn tiny' })),
         h('p', { class: 'muted small' }, spec?.help ?? 'Unknown behavior'),
-        h('div', { class: 'step-editor' }, ...(spec?.params ?? []).map((p) => paramInput(p, b[p.name], (v) => { b[p.name] = v; changed(); }, ctx()))),
+        h('div', { class: 'step-editor' }, ...(spec?.params ?? []).map((p) => paramInput(p, b[p.name] ?? base?.[p.name], (v) => { if (base && v === base[p.name]) delete b[p.name]; else b[p.name] = v; changed(); }, ctx()))),
       ));
     });
     if (!obj.behaviors.length) body.append(h('p', { class: 'muted small' }, 'Components give an object its logic: built-in movement (platformer, top-down, patrol, bullet, solid…) or your own script components (scripts/…/Name.js). Run in this order every frame.'));
@@ -373,7 +413,7 @@ function behaviorsCard(obj: ObjectType, changed: () => void): HTMLElement {
     const spec = BEHAVIOR_MAP.get(addBuiltIn.value);
     addBuiltIn.value = '';
     if (!spec) return;
-    if (obj.behaviors.some((b) => b.type === spec.type)) return toast(`Already has ${spec.label}`, 'error');
+    if (obj.behaviors.some((b) => b.type === spec.type) || parent?.behaviors.some((b) => b.type === spec.type)) return toast(`Already has ${spec.label}`, 'error');
     obj.behaviors.push(defaultStep(spec));
     changed();
     render();

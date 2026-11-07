@@ -32,7 +32,13 @@ Oltre a quanto richiesto (un behaviour per file, cartelle, ciclo di vita, parame
 - **5. Tag e query fisiche**: tag su tipi di oggetto e istanze, `hasTag`, `findWithTag`, `raycast`, `overlapBox`, `overlapCircle`, `findNearest`, `isSolidAt`, `countTag()` nelle espressioni.
 - **8. Salvataggi a slot**: `saveGame` / `loadGame` / `hasSave` / `listSaves` / `deleteSave`, le azioni evento *Save game* / *Load game* e `hasSave()` nelle espressioni.
 
-Restano: zoom e dead-zone della camera (7), mappatura delle azioni (9), pathfinding (10), varianti di tipo (11), musica e audio importato (12).
+## Fatto nel quarto giro
+
+- **7. Camera**: zoom, dead zone, look ahead, limiti per stanza (`camera.setBounds`) e `camera.follow`.
+- **10. Pathfinding**: `findPath`, `self.pathTo`, `self.stopMoving`, più i componenti di libreria `Roam` e `ChasePath`.
+- **11. Varianti di tipo**: `extends`, con ereditarietà di sprite, hitbox, proprietà, tag, componenti (override dei parametri) ed eventi; query e collisioni sul tipo padre includono le varianti.
+
+Restano: mappatura delle azioni (9), musica e audio importato (12). Idee nuove: particelle, widget per l'interfaccia (pulsanti, liste), eventi legati ai frame delle animazioni.
 
 ## Prossimi passi consigliati (in ordine)
 

@@ -106,6 +106,9 @@ export const HANDLE_MEMBERS: ApiEntry[] = [
   method('flash', 'flash(seconds?: number): void', 'Blinks (hit feedback).'),
   method('moveTo', 'moveTo(x: number, y: number, speed?: number): Promise<void>', 'Walks there (walk_<dir> animations, stops at walls). await it in cutscenes.'),
   method('moveBy', 'moveBy(dx: number, dy: number, speed?: number): Promise<void>', 'Walks by an offset.'),
+  method('pathTo', 'pathTo(x: number, y: number, speed?: number, opts?: { diagonal?: boolean; maxSteps?: number }): Promise<boolean>', 'Walks there AROUND walls and solid instances (A* on the tiles); its hitbox center ends at x, y. true = arrived. A new pathTo or stopMoving() cancels the previous one. maxSteps: only the first waypoints (chasing: call again every half second).'),
+  method('stopMoving', 'stopMoving(): void', 'Cancels moveTo / moveBy / pathTo.'),
+  method('isA', 'isA(object: ObjectName): boolean', 'Is it this object type or a variant of it?', "isA('$0')"),
   method('say', 'say(text: string, opts?: { choices?: string[]; portrait?: string }): Promise<number>', 'Dialog box with this instance as the speaker.'),
   method('face', "face(dir: 'up' | 'down' | 'left' | 'right'): void", 'Turns (idle_<dir> animation).', "face('$0')"),
   method('distanceTo', 'distanceTo(other: Instance): number', 'Distance in pixels.'),
@@ -143,9 +146,20 @@ export const GAME_MEMBERS: ApiEntry[] = [
   prop('height', 'readonly height: number', 'Screen height.'),
   prop('time', 'readonly time: number', 'Seconds since the scene started.'),
   prop('clock', 'readonly clock: number', 'Seconds since the game started.'),
+  prop('dialogOpen', 'readonly dialogOpen: boolean', 'A dialog box is open (the game is paused).'),
 ];
 
-export const CAMERA_MEMBERS: ApiEntry[] = [prop('x', 'x: number', 'Camera left.'), prop('y', 'y: number', 'Camera top.')];
+export const CAMERA_MEMBERS: ApiEntry[] = [
+  prop('x', 'x: number', 'Left of the view (world px).'),
+  prop('y', 'y: number', 'Top of the view (world px).'),
+  prop('zoom', 'zoom: number', '1 = normal, 2 = twice as big (shows half the world). Tween it for smooth zooms.'),
+  prop('width', 'readonly width: number', 'Visible world width (screen / zoom).'),
+  prop('height', 'readonly height: number', 'Visible world height.'),
+  method('follow', 'follow(target: Instance | null | undefined): void', 'Follow another instance (null: stop; undefined: back to the Camera behavior).'),
+  method('setBounds', 'setBounds(x: number, y: number, w: number, h: number): void', 'Keep the view inside a rectangle (a room) instead of the whole scene.'),
+  method('clearBounds', 'clearBounds(): void', 'Back to the scene bounds.'),
+  method('toWorld', 'toWorld(screenX: number, screenY: number): { x: number; y: number }', 'Screen pixel → world position.'),
+];
 
 export const GLOBALS: ApiEntry[] = [
   { name: 'Behaviour', kind: 'class', ts: 'class Behaviour', doc: 'Base class of components: export default class Patrol extends Behaviour { speed = 40; update(dt) {...} }' },
@@ -158,7 +172,7 @@ export const GLOBALS: ApiEntry[] = [
   val('vars', 'vars: GameVars', 'Global variables (declared in the Game tab), kept across scenes: vars.score += 1'),
   ns('scene', 'scene: SceneInfo', 'Current scene: scene.name, scene.width, scene.height, scene.vars'),
   ns('game', 'game: GameInfo', 'game.title, game.width, game.height, game.time, game.clock'),
-  ns('camera', 'camera: { x: number; y: number }', 'Camera position (set it to move the view).'),
+  ns('camera', 'camera: CameraApi', 'The view: camera.x / y / zoom, follow(), setBounds(), toWorld(). Dead zone and look-ahead are params of the Camera behavior.'),
   fn('find', 'find(object?: ObjectName): Instance[]', 'All instances (of an object type).', "find('$0')"),
   fn('findOne', 'findOne(object: ObjectName): Instance | undefined', 'First instance of an object type.', "findOne('$0')"),
   fn('player', 'player(): Instance | undefined', 'The player (instance with platformer/topdown controls).'),
@@ -168,6 +182,7 @@ export const GLOBALS: ApiEntry[] = [
   fn('overlapBox', 'overlapBox(x: number, y: number, w: number, h: number, filter?: QueryFilter): Instance[]', 'Instances whose hitbox overlaps a rectangle (world pixels): area attacks, sensors.'),
   fn('overlapCircle', 'overlapCircle(x: number, y: number, radius: number, filter?: QueryFilter): Instance[]', 'Instances whose hitbox touches a circle: explosions, auras.'),
   fn('raycast', 'raycast(x1: number, y1: number, x2: number, y2: number, filter?: QueryFilter & { solids?: boolean; instances?: boolean }): RayHit | null', 'First thing on the segment: solid tiles and solid instances, plus instances matching { tag, object } (or any with instances: true). null = clear. Line of sight: raycast(me.centerX, me.centerY, p.centerX, p.centerY, { object: "player", ignore: me })?.instance === p'),
+  fn('findPath', 'findPath(x1: number, y1: number, x2: number, y2: number, opts?: { diagonal?: boolean; partial?: boolean }): { x: number; y: number }[] | null', 'Waypoints from one point to another around solid tiles and instances (null = no way; partial: as close as possible).'),
   fn('isSolidAt', 'isSolidAt(x: number, y: number): boolean', 'A solid tile or solid instance at a world point (ledge checks, placement).'),
   fn('findComponent', 'findComponent<T = any>(type: ComponentName): T | null', 'First component of a type anywhere (game, scene or instances).', "findComponent('$0')"),
   fn('findComponents', 'findComponents<T = any>(type: ComponentName): T[]', 'Every component of a type.', "findComponents('$0')"),
@@ -301,6 +316,11 @@ ${list(GLOBALS.filter((g) => g.kind !== 'class'))}
 UI (onDraw(ui), screen pixels, 4x6 pixel font)
 ${list(UI_MEMBERS, 'ui.')}
 
+PATHS, CAMERA, VARIANTS
+- await self.pathTo(x, y, speed, { diagonal, maxSteps }) walks around walls (A* on tiles); self.stopMoving(); findPath(x1, y1, x2, y2) → waypoints | null
+- camera.zoom = 2, camera.follow(boss), camera.setBounds(x, y, w, h) / clearBounds(), camera.toWorld(sx, sy); Camera behavior params: deadZoneX/Y, lookAhead, zoom
+- Object type variants (set_object extends: "slime"): inherit everything; find("slime"), count, "collides with slime" include variants; self.isA("slime")
+
 TAGS, QUERIES, SAVES
 - Object types (and placed instances) have group tags: self.hasTag('enemy'), findWithTag('pickup'), countTag("enemy") in expressions
 - raycast(x1, y1, x2, y2, { tag, object, ignore, solids, instances }) → { x, y, distance, normalX, normalY, instance, tile } | null
@@ -388,6 +408,10 @@ ${members(SCENE_MEMBERS)}
 
 interface GameInfo {
 ${members(GAME_MEMBERS)}
+}
+
+interface CameraApi {
+${members(CAMERA_MEMBERS)}
 }
 
 interface Ui {

@@ -39,7 +39,7 @@ export interface WorldView {
   time: number;
   clock: number;
   frame: number;
-  camera: { x: number; y: number };
+  camera: { x: number; y: number; zoom: number };
   controlsLocked: boolean;
   dialog: string | null;
   globals: Record<string, Value>;
@@ -67,7 +67,7 @@ export function inspectWorld(w: World): WorldView {
     time: r2(w.time),
     clock: r2(w.clock),
     frame: w.frame,
-    camera: { x: r2(w.camera.x), y: r2(w.camera.y) },
+    camera: { x: r2(w.camera.x), y: r2(w.camera.y), zoom: w.zoom },
     controlsLocked: w.controlsLocked,
     dialog: w.scripts.dialog ? `${w.scripts.dialog.speaker ? w.scripts.dialog.speaker + ': ' : ''}${w.scripts.dialog.text}` : null,
     globals: visibleVars(w.globals),
@@ -99,7 +99,7 @@ export function inspectWorld(w: World): WorldView {
 /** One change made in the inspector. */
 export type WorldEdit =
   | { kind: 'global' | 'sceneVar'; key: string; value: Value }
-  | { kind: 'camera'; key: 'x' | 'y'; value: number }
+  | { kind: 'camera'; key: 'x' | 'y' | 'zoom'; value: number }
   | { kind: 'actor'; id: number; key: string; value: Value }
   | { kind: 'actorVar'; id: number; key: string; value: Value }
   | { kind: 'component'; scope: 'game' | 'scene' | 'object'; id?: number; index: number; key: string; value: Value };

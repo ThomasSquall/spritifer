@@ -507,7 +507,7 @@ const FN_ARG: Record<string, keyof typeof STRING_ARGS> = {
   find: 'object', findOne: 'object', spawn: 'object', count: 'object',
   goto: 'scene', onSceneStart: 'scene',
   sound: 'sound', dialogue: 'dialogue', sprite: 'sprite', key: 'key', pressed: 'key', sendMessage: 'method',
-  findWithTag: 'tag', hasTag: 'tag', addTag: 'tag', removeTag: 'tag',
+  findWithTag: 'tag', hasTag: 'tag', addTag: 'tag', removeTag: 'tag', isA: 'object',
   saveGame: 'slot', loadGame: 'slot', hasSave: 'slot', deleteSave: 'slot',
 };
 

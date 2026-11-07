@@ -964,6 +964,43 @@ export class ScriptHost {
     } as import('./engine.js').QueryFilter;
   }
 
+  // ------------------------------------------------------------------ paths
+
+  private pathTokens = new WeakMap<Actor, number>();
+
+  /** Cancels moveTo/pathTo movements of an instance (their promises resolve). */
+  stopMoving(a: Actor): void {
+    this.pathTokens.set(a, (this.pathTokens.get(a) ?? 0) + 1);
+    const mine = this.movers.filter((m) => m.actor === a);
+    if (!mine.length) return;
+    this.movers = this.movers.filter((m) => m.actor !== a);
+    for (const m of mine) m.resolve();
+  }
+
+  /**
+   * Walks an instance along a path around walls to a point (its hitbox center goes there).
+   * Resolves true on arrival, false if there is no way, it got stuck, or another pathTo/stopMoving took over.
+   */
+  async pathTo(a: Actor, x: number, y: number, speed: number, opts: { diagonal?: boolean; maxSteps?: number }): Promise<boolean> {
+    this.stopMoving(a);
+    const token = this.pathTokens.get(a) ?? 0;
+    const b = a.box();
+    const path = this.world.findPath(b.x + b.w / 2, b.y + b.h / 2, x, y, { diagonal: opts.diagonal, partial: true, ignore: [a] });
+    if (!path || !path.length) return false;
+    const steps = opts.maxSteps && opts.maxSteps > 0 ? path.slice(0, opts.maxSteps) : path;
+    for (const p of steps) {
+      if (a.destroyed || this.pathTokens.get(a) !== token) return false;
+      const hb = a.hitbox();
+      const tx = p.x - (hb.x + hb.w / 2);
+      const ty = p.y - (hb.y + hb.h / 2);
+      await new Promise<void>((resolve) => this.movers.push({ actor: a, x: tx, y: ty, speed, stuck: 0, resolve }));
+      if (a.destroyed || this.pathTokens.get(a) !== token) return false;
+      if (Math.hypot(a.x - tx, a.y - ty) > 2) return false; // blocked on the way
+    }
+    const end = a.box();
+    return steps.length === path.length && Math.hypot(end.x + end.w / 2 - x, end.y + end.h / 2 - y) < this.world.tileSize;
+  }
+
   // ------------------------------------------------------------------ handles
 
   handle(a: Actor): Handle;
@@ -997,6 +1034,9 @@ export class ScriptHost {
         if (a.hasTag(idle)) w.setAnim(a, idle);
       },
       has: (tag: string) => a.hasTag(tag),
+      isA: (object: string) => w.isA(a, String(object)),
+      pathTo: (x: number, y: number, speed = 60, opts: { diagonal?: boolean; maxSteps?: number } = {}) => this.pathTo(a, Number(x), Number(y), Number(speed) || 60, opts ?? {}),
+      stopMoving: () => this.stopMoving(a),
       hasTag: (tag: string) => a.tags.has(String(tag)),
       addTag: (tag: string) => void a.tags.add(String(tag)),
       removeTag: (tag: string) => void a.tags.delete(String(tag)),
@@ -1179,7 +1219,7 @@ export class ScriptHost {
 
   // ------------------------------------------------------------------ drawing
 
-  draw(r: Renderer, camX: number, camY: number): void {
+  draw(r: Renderer, camX: number, camY: number, zoom = 1): void {
     const drawers = this.all().filter((c) => this.has(c, 'onDraw'));
     if (!this.drawHooks.length && !drawers.length) return;
     const w = this.world;
@@ -1228,7 +1268,7 @@ export class ScriptHost {
         const m = measureText(String(text));
         return { width: m.width * size, height: m.height * size };
       },
-      toScreen: (x, y) => ({ x: Math.round(x - camX), y: Math.round(y - camY) }),
+      toScreen: (x, y) => ({ x: Math.round((x - camX) * zoom), y: Math.round((y - camY) * zoom) }),
     };
     // Instances first (health bars), then scene and game components (HUD on top), then plain onDraw hooks.
     const order = (c: Behaviour) => { const st = stateOf(c)!; return st.actor ? 0 : st.scope === 'scene' ? 1 : 2; };
@@ -1240,6 +1280,7 @@ export class ScriptHost {
 
   private api(): Record<string, unknown> {
     const w = this.world;
+    const host = this;
     const register = <T>(list: T[], item: T) => {
       list.push(item);
     };
@@ -1254,7 +1295,7 @@ export class ScriptHost {
         ownKeys: () => Reflect.ownKeys(target()),
         getOwnPropertyDescriptor: (_t, p) => (typeof p === 'string' && p in target() ? { enumerable: true, configurable: true, value: target()[p], writable: true } : undefined),
       });
-    const all = (name?: string) => w.actors.filter((a) => !a.destroyed && (!name || a.type.name === name));
+    const all = (name?: string) => w.actors.filter((a) => !a.destroyed && (!name || w.isA(a, String(name))));
     return {
       // registration
       // components
@@ -1303,12 +1344,29 @@ export class ScriptHost {
         get height() { return w.game.height; },
         get time() { return w.time; },
         get clock() { return w.clock; },
+        get dialogOpen() { return !!host.dialog; },
       },
       camera: {
         get x() { return w.camera.x; },
-        set x(v: number) { w.camera.x = v; },
+        set x(v: number) { w.camera.x = Number(v) || 0; },
         get y() { return w.camera.y; },
-        set y(v: number) { w.camera.y = v; },
+        set y(v: number) { w.camera.y = Number(v) || 0; },
+        get zoom() { return w.zoom; },
+        set zoom(v: number) { w.camera.zoom = Number(v) || 1; },
+        get width() { return w.viewWidth; },
+        get height() { return w.viewHeight; },
+        /** Follow another instance (null: stop following; undefined: back to the Camera behavior). */
+        follow: (h: Handle | null | undefined) => {
+          w.cameraTarget = h === undefined ? undefined : h ? h.__actor : null;
+        },
+        setBounds: (x: number, y: number, ww: number, hh: number) => {
+          w.cameraBounds = { x: Number(x) || 0, y: Number(y) || 0, w: Math.max(1, Number(ww) || 0), h: Math.max(1, Number(hh) || 0) };
+        },
+        clearBounds: () => {
+          w.cameraBounds = null;
+        },
+        /** Screen pixel → world position (mouse, taps). */
+        toWorld: (sx: number, sy: number) => ({ x: Number(sx) / w.zoom + w.camera.x, y: Number(sy) / w.zoom + w.camera.y }),
       },
       // instances
       find: (name?: string) => all(name).map((a) => this.handle(a)),
@@ -1333,6 +1391,7 @@ export class ScriptHost {
         const hit = w.raycast(Number(x1), Number(y1), Number(x2), Number(y2), { ...this.filter(f), solids: o.solids, instances: o.instances });
         return hit ? { x: hit.x, y: hit.y, distance: hit.distance, normalX: hit.normalX, normalY: hit.normalY, tile: hit.tile, instance: this.handle(hit.actor ?? undefined) ?? null } : null;
       },
+      findPath: (x1: number, y1: number, x2: number, y2: number, opts: { diagonal?: boolean; partial?: boolean } = {}) => w.findPath(Number(x1), Number(y1), Number(x2), Number(y2), opts ?? {}),
       player: () => this.handle(w.actors.find((a) => !a.destroyed && a.behaviors.some((b) => (b.type === 'platformer' || b.type === 'topdown') && b.controls !== false))),
       spawn: (name: string, x: number, y: number, props: Record<string, Value> = {}) => {
         const a = w.spawn(name, x, y);

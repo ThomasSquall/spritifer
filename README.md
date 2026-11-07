@@ -138,6 +138,27 @@ export default class Patrol extends Behaviour {
 - `await this.tween(this.self, { y: this.self.y - 12, opacity: 0 }, 0.4, 'outQuad')` anima qualsiasi campo numerico: istanze, camera, componenti. Easing disponibili: `linear`, `inQuad`, `outQuad`, `inOutQuad`, `inCubic`, `outCubic`, `inOutCubic`, `inOutSine`, `outBack`, `outElastic`, `outBounce`.
 - `goto('dungeon', { fade: 0.4 })` e `restart({ fade: 0.3 })` fanno una dissolvenza in nero (o del colore scelto). Anche le azioni evento *Go to scene* e *Restart scene* hanno il campo *fade*.
 
+**Varianti di tipo.** Come i *prefab variant* di Unity: dalla pagina di un oggetto, **Variant** crea un tipo basato su quello (oppure si sceglie *Based on*).
+
+- La variante eredita sprite, hitbox, proprietà, tag, componenti ed eventi, e salva solo quello che cambia. Per esempio `red_slime` con un altro sprite e `Health.max = 6`.
+- I componenti ereditati compaiono con **Override**, che permette di cambiarne solo alcuni parametri.
+- Le query sul tipo padre includono le varianti: `find('slime')`, `count("slime")`, "collides with slime", il behavior *Chase*. `self.isA('slime')` dice se un'istanza è di quel tipo o di una sua variante.
+
+**Pathfinding.** `await this.self.pathTo(x, y, speed)` fa camminare l'istanza aggirando muri e oggetti solidi (A* sui tile, senza tagliare gli angoli) e restituisce `true` all'arrivo. Il resto dell'API:
+
+- `self.stopMoving()` interrompe il movimento;
+- `findPath(x1, y1, x2, y2)` restituisce i punti di passaggio, o `null` se non c'è strada.
+
+In libreria ci sono anche `ai/Roam` (girovaga intorno a casa, si ferma durante i dialoghi) e `ai/ChasePath` (insegue il bersaglio aggirando i muri e rinuncia quando è lontano).
+
+**Camera.** Il behavior *Camera follows* ha anche:
+
+- **dead zone**: il bersaglio si muove libero in un riquadro al centro;
+- **look ahead**: la visuale si sposta verso dove va il bersaglio;
+- **zoom**.
+
+Dagli script: `camera.zoom = 2` (anche con `tween`), `camera.follow(boss)`, `camera.setBounds(x, y, w, h)` per tenere la visuale dentro una stanza, `camera.toWorld(sx, sy)`. HUD e interfaccia non vengono ingranditi.
+
 **Tag e query fisiche.** I tipi di oggetto hanno dei **tag** di gruppo (campo *Tags* nella card Properties, es. `enemy, pickup`); le singole istanze possono aggiungerne altri dall'inspector della scena.
 
 - Dagli script: `self.hasTag('enemy')`, `findWithTag('pickup')`, `addTag` / `removeTag`. Nelle espressioni degli eventi: `countTag("enemy")`.

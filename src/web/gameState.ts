@@ -2,6 +2,7 @@
 
 import type { GameProject, ObjectType } from '../core/game/types.js';
 import type { ComponentInfo, ScriptInfo } from '../core/game/script.js';
+import { type ResolvedTypes, resolveObjectTypes } from '../core/game/variants.js';
 import { api, type SpriteSummary } from './api.js';
 import { type LoadedAsset, type SceneSummary, gameApi, loadAsset } from './gameApi.js';
 import { toast } from './dom.js';
@@ -51,7 +52,26 @@ class GameState {
   }
 
   emit(): void {
+    this.resolvedCache = null;
     for (const l of [...this.listeners]) l();
+  }
+
+  private resolvedCache: ResolvedTypes | null = null;
+
+  /** Object types with what variants inherit (sprite, hitbox, components...). */
+  get resolved(): ResolvedTypes {
+    if (!this.resolvedCache || this.resolvedFor !== this.game) {
+      this.resolvedCache = resolveObjectTypes(this.game?.objects ?? []);
+      this.resolvedFor = this.game;
+    }
+    return this.resolvedCache;
+  }
+
+  private resolvedFor: GameProject | null = null;
+
+  /** The effective type of an object (a variant merged with its parent). */
+  effective(name: string): ObjectType | undefined {
+    return this.resolved.types.get(name);
   }
 
   component(name: string): ComponentInfo | undefined {

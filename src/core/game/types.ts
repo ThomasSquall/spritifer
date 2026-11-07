@@ -66,6 +66,8 @@ export interface ObjectType {
   textSize?: number;
   /** Drawn in screen space, ignoring the camera (HUD). */
   hud?: boolean;
+  /** Group tags ("enemy", "pickup") for scripts: self.hasTag(), findWithTag(), raycast/overlap filters. */
+  tags?: string[];
   /** Instance variables with their default values (self.hp, self.speed...). */
   properties: Record<string, Value>;
   behaviors: Behavior[];
@@ -101,6 +103,8 @@ export interface Instance {
   flipX?: boolean;
   /** Component param overrides by component name; a name the object type doesn't have adds that component. */
   components?: ComponentOverrides;
+  /** Extra tags for this instance (added to the object type's). */
+  tags?: string[];
 }
 
 export interface SceneBackground {
@@ -194,6 +198,13 @@ function vars(v: unknown): Record<string, Value> {
   return out;
 }
 
+/** Tags: identifiers, unique, from an array or a comma-separated string. */
+export function normalizeTags(v: unknown): string[] | undefined {
+  const list = Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : [];
+  const out = [...new Set(list.map((t) => String(t).trim()).filter((t) => GAME_NAME_RE.test(t)))];
+  return out.length ? out : undefined;
+}
+
 function overrides(v: unknown): ComponentOverrides | undefined {
   if (!v || typeof v !== 'object') return undefined;
   const out: ComponentOverrides = {};
@@ -250,6 +261,8 @@ export function normalizeObject(v: unknown): ObjectType {
   if (typeof o.textColor === 'string') obj.textColor = o.textColor;
   if (typeof o.textSize === 'number') obj.textSize = Math.max(1, Math.round(o.textSize));
   if (o.hud === true) obj.hud = true;
+  const tags = normalizeTags(o.tags);
+  if (tags) obj.tags = tags;
   return obj;
 }
 
@@ -305,6 +318,8 @@ export function normalizeScene(v: unknown): Scene {
     if (typeof I.animation === 'string' && I.animation) inst.animation = I.animation;
     const comps = overrides(I.components);
     if (comps) inst.components = comps;
+    const itags = normalizeTags(I.tags);
+    if (itags) inst.tags = itags;
     return inst;
   });
   const backgrounds: SceneBackground[] = (Array.isArray(o.backgrounds) ? o.backgrounds : []).map((b: unknown) => {

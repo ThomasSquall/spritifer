@@ -1,6 +1,7 @@
 /** Play overlay (the real exported game in an iframe, with a log console) and the export dialog. */
 
 import { gameApi } from './gameApi.js';
+import { createPlayInspector } from './playInspector.js';
 import { state } from './gameState.js';
 import { h, icon, iconButton, linkScriptRefs, modal, toast } from './dom.js';
 
@@ -45,6 +46,18 @@ export async function openPlay(scene?: string): Promise<void> {
   open = true;
   let debug = false;
   const logs = h('div', { class: 'play-logs' });
+  const sendToGame = (msg: Record<string, unknown>) => frame.contentWindow?.postMessage({ source: 'spritifer-editor', ...msg }, '*');
+  const inspector = createPlayInspector(sendToGame);
+  inspector.setVisible(false);
+  const showTab = (tab: 'log' | 'inspector') => {
+    logs.hidden = tab !== 'log';
+    inspector.setVisible(tab === 'inspector');
+    logTab.classList.toggle('active', tab === 'log');
+    inspTab.classList.toggle('active', tab === 'inspector');
+  };
+  const logTab = h('button', { class: 'right-tab active', onclick: () => showTab('log') }, 'Log');
+  const inspTab = h('button', { class: 'right-tab', title: 'Pause, step and edit the running game', onclick: () => showTab('inspector') }, 'Inspector');
+  const side = h('div', { class: 'play-side' }, h('div', { class: 'right-tabs' }, logTab, inspTab), logs, inspector.el);
   const frame = h('iframe', { class: 'play-frame', src: gameApi.playUrl(scene), allow: 'autoplay; fullscreen; gamepad', title: 'Game' });
   const errCount = h('span', { class: 'play-errcount' });
   let errors = 0;
@@ -59,7 +72,8 @@ export async function openPlay(scene?: string): Promise<void> {
     logs.scrollTop = logs.scrollHeight;
   };
   const onMsg = (e: MessageEvent) => {
-    const d = e.data as { source?: string; type?: string; message?: string };
+    const d = e.data as { source?: string; type?: string; message?: string; data?: unknown };
+    if (e.source === frame.contentWindow && d?.source === 'spritifer-game' && d.type === 'inspect' && d.data) inspector.update(d.data as Parameters<typeof inspector.update>[0]);
     if (e.source !== frame.contentWindow || d?.source !== 'spritifer-game') return;
     if (d.type === 'log' && d.message) addLog(d.message);
     if (d.type === 'ready') frame.focus();
@@ -73,6 +87,7 @@ export async function openPlay(scene?: string): Promise<void> {
   };
   const close = () => {
     playFrame = null;
+    inspector.destroy();
     window.removeEventListener('message', onMsg);
     document.removeEventListener('keydown', onKey, true);
     overlay.remove();
@@ -99,7 +114,7 @@ export async function openPlay(scene?: string): Promise<void> {
       h('button', { class: 'small', onclick: () => window.open(gameApi.playUrl(scene), '_blank') }, 'New tab'),
       iconButton('close', 'Close (Esc)', close),
     ),
-    h('div', { class: 'play-body' }, frame, logs),
+    h('div', { class: 'play-body' }, frame, side),
   );
   document.body.append(overlay);
   playFrame = frame;

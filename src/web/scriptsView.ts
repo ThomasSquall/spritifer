@@ -117,6 +117,7 @@ export function completionContext(path: string, scripts: string[]): CompleteCont
     keys: KEYS.filter((k) => k !== 'any'),
     variables: g?.variables ?? {},
     properties: [...properties],
+    tags: [...new Set((g?.objects ?? []).flatMap((o) => o.tags ?? []))].sort(),
   };
 }
 

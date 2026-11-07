@@ -106,6 +106,8 @@ export const ACTIONS: StepSpec[] = [
   { type: 'callMethod', label: 'Call component method', help: 'Call a method of a script component: on self/other (empty component = every component with that method), or on scene/game components from a scene sheet. It receives (arg, other).', params: [{ name: 'target', type: 'instance', default: 'self' }, { name: 'component', type: 'scriptBehavior', default: '', optional: true }, { name: 'method', type: 'text', default: '' }, { name: 'arg', type: 'expr', default: '', optional: true }] },
   { type: 'dialogue', label: 'Start dialogue', help: 'Play a dialogue written in the Dialogues tab (lines, choices, conditions). "self" in the dialogue is this instance.', params: [{ name: 'dialogue', type: 'dialogue', default: '' }] },
   { type: 'talk', label: 'Show one line', help: 'Open an RPG dialog box (typewriter text, waits for the player). The game pauses while it is open. For conversations with choices use a script.', params: [{ name: 'text', type: 'expr', default: '"Hello!"' }, { name: 'speaker', type: 'text', default: '', optional: true }] },
+  { type: 'saveGame', label: 'Save game (slot)', help: 'Save everything in a slot: variables, the current scene with its instances, remembered scenes. Use hasSave("slot") in conditions.', params: [{ name: 'slot', type: 'text', default: 'auto' }] },
+  { type: 'loadGame', label: 'Load game (slot)', help: 'Load a slot saved with "Save game" (at the end of the frame). Nothing happens if the slot is empty.', params: [{ name: 'slot', type: 'text', default: 'auto' }] },
   { type: 'lockControls', label: 'Lock player controls', help: 'Stop (or give back) player control, for cutscenes.', params: [{ name: 'locked', type: 'bool', default: true }] },
   { type: 'save', label: 'Save variable', help: 'Store a global variable in the browser (high scores). It is loaded back when the game starts.', params: [{ name: 'var', type: 'text', default: 'best' }] },
   { type: 'log', label: 'Log', help: 'Write a value to the console (and to playtest reports).', params: [{ name: 'value', type: 'expr', default: '"here"' }] },
@@ -185,7 +187,7 @@ export function catalogReference(): string {
       'Names: globals (score), self.<field|property>, other.<...> (the instance from a collision/overlap), scene.<scene variable>, game.time (seconds since scene start), game.dt. ' +
       'Instance fields: x, y, vx, vy, width, height, flipX, visible, opacity, angle, onGround, animation, object, text. ' +
       'Functions: random(a,b), randint(a,b), floor, ceil, round, abs, sign, min, max, clamp(v,lo,hi), sqrt, sin(deg), cos(deg), atan2(y,x), dist(x1,y1,x2,y2), lerp(a,b,t), ' +
-      'count("object"), keyDown("key"), nearest("object", "x"|"y"), str(v), num(v).',
+      'count("object"), countTag("enemy"), hasSave("slot"), keyDown("key"), nearest("object", "x"|"y"), str(v), num(v).',
   ].join('\n\n');
 }
 

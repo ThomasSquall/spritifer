@@ -951,6 +951,19 @@ export class ScriptHost {
     this.world.log(`ERROR ${msg}`);
   }
 
+  /** { tag, object, ignore } from a script (ignore: a handle or a list of handles). */
+  private filter(f: unknown): import('./engine.js').QueryFilter {
+    if (!f || typeof f !== 'object') return {};
+    const o = f as { tag?: unknown; object?: unknown; ignore?: unknown; maxDistance?: unknown };
+    const ign = o.ignore === undefined ? [] : Array.isArray(o.ignore) ? o.ignore : [o.ignore];
+    return {
+      ...(typeof o.tag === 'string' && o.tag ? { tag: o.tag } : {}),
+      ...(typeof o.object === 'string' && o.object ? { object: o.object } : {}),
+      ...(ign.length ? { ignore: ign.map((h) => (h as Handle)?.__actor).filter(Boolean) as Actor[] } : {}),
+      ...(typeof o.maxDistance === 'number' ? { maxDistance: o.maxDistance } : {}),
+    } as import('./engine.js').QueryFilter;
+  }
+
   // ------------------------------------------------------------------ handles
 
   handle(a: Actor): Handle;
@@ -984,6 +997,9 @@ export class ScriptHost {
         if (a.hasTag(idle)) w.setAnim(a, idle);
       },
       has: (tag: string) => a.hasTag(tag),
+      hasTag: (tag: string) => a.tags.has(String(tag)),
+      addTag: (tag: string) => void a.tags.add(String(tag)),
+      removeTag: (tag: string) => void a.tags.delete(String(tag)),
       getComponent: (type: unknown) => this.componentsOf(a, type)[0] ?? null,
       getComponents: (type?: unknown) => this.componentsOf(a, type),
       addComponent: (type: unknown, params: Record<string, Value> = {}) => this.add('object', a, type, params),
@@ -1011,6 +1027,7 @@ export class ScriptHost {
           case 'height': return a.box().h;
           case 'centerX': { const b = a.box(); return b.x + b.w / 2; }
           case 'centerY': { const b = a.box(); return b.y + b.h / 2; }
+          case 'tags': return [...a.tags];
           case 'vars': return a.vars;
           case 'text': return a.textOverride ?? '';
           case 'toJSON': return () => ({ object: a.type.name, id: a.id, x: a.x, y: a.y });
@@ -1296,6 +1313,26 @@ export class ScriptHost {
       // instances
       find: (name?: string) => all(name).map((a) => this.handle(a)),
       findOne: (name: string) => this.handle(all(name)[0]),
+      // tags and physics queries
+      findWithTag: (tag: string) => w.actors.filter((a) => !a.destroyed && a.tags.has(String(tag))).map((a) => this.handle(a)),
+      isSolidAt: (x: number, y: number) => w.isSolidAt(Number(x), Number(y)),
+      overlapBox: (x: number, y: number, ww: number, hh: number, f?: unknown) => w.overlapRect({ x: Number(x), y: Number(y), w: Number(ww), h: Number(hh) }, this.filter(f)).map((a) => this.handle(a)),
+      overlapCircle: (x: number, y: number, r: number, f?: unknown) => w.overlapCircle(Number(x), Number(y), Number(r), this.filter(f)).map((a) => this.handle(a)),
+      findNearest: (x: number | Handle, y?: number | Record<string, unknown>, f?: unknown) => {
+        // findNearest(self, { tag }) or findNearest(x, y, { tag })
+        if (x && typeof x === 'object') {
+          const from = (x as Handle).__actor;
+          const b = from.box();
+          const flt = this.filter(y);
+          return this.handle(w.findNearest(b.x + b.w / 2, b.y + b.h / 2, { ...flt, ignore: [...(flt.ignore ?? []), from] })) ?? null;
+        }
+        return this.handle(w.findNearest(Number(x), Number(y), this.filter(f))) ?? null;
+      },
+      raycast: (x1: number, y1: number, x2: number, y2: number, f?: unknown) => {
+        const o = (f && typeof f === 'object' ? f : {}) as { solids?: boolean; instances?: boolean };
+        const hit = w.raycast(Number(x1), Number(y1), Number(x2), Number(y2), { ...this.filter(f), solids: o.solids, instances: o.instances });
+        return hit ? { x: hit.x, y: hit.y, distance: hit.distance, normalX: hit.normalX, normalY: hit.normalY, tile: hit.tile, instance: this.handle(hit.actor ?? undefined) ?? null } : null;
+      },
       player: () => this.handle(w.actors.find((a) => !a.destroyed && a.behaviors.some((b) => (b.type === 'platformer' || b.type === 'topdown') && b.controls !== false))),
       spawn: (name: string, x: number, y: number, props: Record<string, Value> = {}) => {
         const a = w.spawn(name, x, y);
@@ -1315,6 +1352,11 @@ export class ScriptHost {
       random: (a = 0, b = 1) => a + w.random() * (b - a),
       randint: (a: number, b: number) => Math.floor(a + w.random() * (Math.floor(b) - Math.ceil(a) + 1)),
       pick: <T>(list: T[]) => list[Math.floor(w.random() * list.length)],
+      saveGame: (slot = 'auto') => w.saveGame(String(slot)),
+      loadGame: (slot = 'auto') => w.loadGame(String(slot)),
+      hasSave: (slot = 'auto') => w.hasSave(String(slot)),
+      deleteSave: (slot: string) => w.deleteSave(String(slot)),
+      listSaves: () => w.listSaves(),
       save: (key: string, value: unknown) => w.opts.storage?.set(`script:${key}`, JSON.stringify(value)),
       load: (key: string, fallback: unknown = null) => {
         const raw = w.opts.storage?.get(`script:${key}`);

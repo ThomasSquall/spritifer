@@ -2,6 +2,7 @@
 
 import type { GameBundle } from '../core/game/types.js';
 import { mountPlayer } from './player.js';
+import { type WorldEdit, editWorld, inspectWorld } from '../core/game/debug.js';
 
 declare global {
   interface Window {
@@ -31,14 +32,36 @@ if (!bundle) {
   })
   playing.then(() => post('ready', bundle.game.title)).catch((err: unknown) => post('log', `ERROR ${(err as Error).message}`));
 
-  // Hot reload from the editor (Play overlay): new script sources replace the running code, state stays.
+  // Messages from the editor's Play overlay: hot reload, and the live inspector (pause, step, inspect, edit).
   if (inFrame) {
     window.addEventListener('message', (e: MessageEvent) => {
-      const d = e.data as { source?: string; type?: string; scripts?: Record<string, string> };
-      if (e.source !== window.parent || d?.source !== 'spritifer-editor' || d.type !== 'scripts' || !d.scripts) return;
+      const d = e.data as { source?: string; type?: string; scripts?: Record<string, string>; on?: boolean; edit?: WorldEdit };
+      if (e.source !== window.parent || d?.source !== 'spritifer-editor') return;
       void playing.then((player) => {
-        bundle.scripts = d.scripts;
-        player.world.scripts.hotReload(d.scripts!);
+        switch (d.type) {
+          case 'scripts':
+            if (!d.scripts) return;
+            bundle.scripts = d.scripts;
+            player.world.scripts.hotReload(d.scripts);
+            return;
+          case 'pause':
+            player.paused = !!d.on;
+            break;
+          case 'step':
+            player.stepOnce();
+            break;
+          case 'edit':
+            if (d.edit) editWorld(player.world, d.edit);
+            break;
+          case 'inspect':
+            break;
+          default:
+            return;
+        }
+        // Every inspector message gets the fresh state back (after a step: on the next frame).
+        const reply = () => window.parent.postMessage({ source: 'spritifer-game', type: 'inspect', data: { ...inspectWorld(player.world), paused: player.paused } }, '*');
+        if (d.type === 'step') requestAnimationFrame(() => requestAnimationFrame(reply));
+        else reply();
       });
     });
   }

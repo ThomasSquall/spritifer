@@ -1,7 +1,7 @@
 /** Objects page: the game's object types (player, enemies, pickups, HUD...) with behaviors, properties and events. */
 
 import { BEHAVIORS, BEHAVIOR_MAP, defaultStep } from '../core/game/catalog.js';
-import { GAME_NAME_RE, type ObjectType, type Value, normalizeObject } from '../core/game/types.js';
+import { GAME_NAME_RE, type ObjectType, type Value, normalizeObject, normalizeTags } from '../core/game/types.js';
 import { api } from './api.js';
 import { type SheetContext, paramInput, renderEventSheet } from './eventSheet.js';
 import { gameApi } from './gameApi.js';
@@ -325,8 +325,16 @@ function propertiesCard(obj: ObjectType, changed: () => void, onKeys: () => void
     if (!Object.keys(obj.properties).length) body.append(h('p', { class: 'muted small' }, 'Instance variables, e.g. hp = 3, speed = 50. Read and change them in events as self.hp.'));
   };
   render();
+  const tagsIn = h('input', { type: 'text', value: (obj.tags ?? []).join(', '), placeholder: 'enemy, pickup…', spellcheck: false, onchange: () => {
+    const t = normalizeTags(tagsIn.value);
+    if (t) obj.tags = t;
+    else delete obj.tags;
+    tagsIn.value = (obj.tags ?? []).join(', ');
+    changed();
+  } });
   return h('div', { class: 'card' },
     h('h3', {}, 'Properties'),
+    h('label', { class: 'tags-in', title: 'Group tags for scripts: self.hasTag("enemy"), findWithTag("enemy"), raycast/overlap filters, countTag("enemy") in expressions' }, h('span', { class: 'muted small' }, 'Tags'), tagsIn),
     body,
     h('button', { class: 'small', onclick: async () => {
       const name = await promptText('New property', 'Name (e.g. hp)', '');

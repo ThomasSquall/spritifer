@@ -138,6 +138,27 @@ export default class Patrol extends Behaviour {
 - `await this.tween(this.self, { y: this.self.y - 12, opacity: 0 }, 0.4, 'outQuad')` anima qualsiasi campo numerico: istanze, camera, componenti. Easing disponibili: `linear`, `inQuad`, `outQuad`, `inOutQuad`, `inCubic`, `outCubic`, `inOutCubic`, `inOutSine`, `outBack`, `outElastic`, `outBounce`.
 - `goto('dungeon', { fade: 0.4 })` e `restart({ fade: 0.3 })` fanno una dissolvenza in nero (o del colore scelto). Anche le azioni evento *Go to scene* e *Restart scene* hanno il campo *fade*.
 
+**Tag e query fisiche.** I tipi di oggetto hanno dei **tag** di gruppo (campo *Tags* nella card Properties, es. `enemy, pickup`); le singole istanze possono aggiungerne altri dall'inspector della scena.
+
+- Dagli script: `self.hasTag('enemy')`, `findWithTag('pickup')`, `addTag` / `removeTag`. Nelle espressioni degli eventi: `countTag("enemy")`.
+- `raycast(x1, y1, x2, y2, { tag, object, ignore })` restituisce il primo tile solido, oggetto solido o istanza filtrata lungo il segmento, oppure `null`. Serve per la linea di vista (`raycast(me.centerX, me.centerY, p.centerX, p.centerY, { object: 'player', ignore: me })?.instance === p`) e per sparare.
+- `overlapBox(x, y, w, h, filtro)` e `overlapCircle(x, y, r, filtro)` servono per attacchi ad area ed esplosioni.
+- `findNearest(this.self, { tag: 'enemy', maxDistance: 80 })` trova l'istanza più vicina, `isSolidAt(x, y)` dice se in quel punto c'è qualcosa di solido.
+
+**Salvataggi a slot.** `saveGame('slot1')` salva tutto:
+
+- variabili globali e di scena;
+- la scena corrente con le sue istanze (posizioni, proprietà, campi dei componenti, quelle distrutte);
+- le scene con memoria;
+- i componenti globali.
+
+Il resto dell'API: `loadGame('slot1')`, `hasSave('slot1')` (per un pulsante "Continua"), `listSaves()`, `deleteSave()`. Negli eventi ci sono le azioni **Save game** / **Load game** e la condizione `hasSave("slot1")`. Le istanze create a runtime con `spawn` non vengono salvate.
+
+**Inspector dal vivo.** Nel Play, la scheda **Inspector** accanto al Log permette di:
+
+- mettere in pausa e avanzare di un frame alla volta;
+- vedere e modificare mentre il gioco gira variabili globali e di scena, camera, componenti di scena e globali e ogni istanza (posizione, velocità, visibilità, proprietà, campi dei componenti, *enabled*).
+
 **Errori e hot reload.** Gli errori degli script indicano file e riga (`(at scripts/enemies/Patrol.js:12)`). Nei log del Play, nella scheda Scripts e nei controlli del gioco sono link che aprono lo script a quella riga. Con **Hot reload** attivo nel Play, quando salvi uno script il gioco in esecuzione usa subito il nuovo codice: i componenti mantengono i loro campi e anche i campi statici (`GameManager.instance`) vengono conservati.
 
 **Autocompletamento.** L'editor suggerisce mentre scrivi (o con **Ctrl+Spazio**): i membri di `this` (parametri, campi e metodi della classe, API di `Behaviour`), delle istanze (`this.self.`, `other.`, `findOne('…').`), dei componenti ottenuti con `getComponent('Nome').`, i nomi dentro le stringhe (`getComponent('`, `goto('`, `sound('`, `findOne('`, percorsi di `import`), le variabili `vars.`, `ui.` e gli hook del ciclo di vita come snippet; sotto l'editor mostra la firma della funzione che stai chiamando. Il progetto contiene anche `scripts/jsconfig.json` e `scripts/spritifer.d.ts` (generati), così **VS Code e JetBrains** completano l'API, i nomi del progetto e i tipi restituiti da `getComponent`.
@@ -231,7 +252,7 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Gioco | `game_reference` (vocabolario completo di trigger, condizioni, azioni, comportamenti ed espressioni), `get_game`, `set_game`, `set_object`, `delete_object`, `set_events` |
 | Scene | `create_scene`, `get_scene` (anche la mappa come griglia di caratteri), `update_scene`, `delete_scene`, `set_tile_layer`, `paint_tiles` (righe + legenda come `draw_pixels`, o rettangoli), `place_instances`, `update_instances`, `tileset_preview` (indici dei tile) |
 | Dialoghi | `dialogue_reference`, `list_dialogues`, `read_dialogue`, `write_dialogue` (controllato prima di salvare), `edit_dialogue`, `delete_dialogue`; `place_instances` / `update_instances` con nome, sprite e `props.dialogue` per istanza |
-| Script | `component_library` / `add_library_component` (componenti pronti), `script_reference` (componenti, ciclo di vita, API completa con esempio), `list_scripts` (cartelle, componenti con parametri/hook/metodi), `read_script`, `write_script` (percorsi con cartelle, controllo della sintassi), `edit_script`, `move_script` (sposta/rinomina file e cartelle aggiornando i riferimenti), `delete_script`; `place_instances`/`update_instances` (`components`), `update_scene` e `set_game` (`components`) attaccano i componenti |
+| Script | `set_object` / `place_instances` / `update_instances` con `tags`; `component_library` / `add_library_component` (componenti pronti), `script_reference` (componenti, ciclo di vita, API completa con esempio), `list_scripts` (cartelle, componenti con parametri/hook/metodi), `read_script`, `write_script` (percorsi con cartelle, controllo della sintassi), `edit_script`, `move_script` (sposta/rinomina file e cartelle aggiornando i riferimenti), `delete_script`; `place_instances`/`update_instances` (`components`), `update_scene` e `set_game` (`components`) attaccano i componenti |
 | Progetti | `list_projects`, `open_project`, `create_project` (vuoto, platformer, rpg) |
 | Verifica ed export del gioco | `validate_game`, `preview_scene`, `playtest` (gioco headless con input scriptati e risposte ai menu: log, dialoghi, stato, screenshot), `export_game` (HTML unico per il web), `undo_game_change` |
 | Altro | `undo`, `editor_url` |

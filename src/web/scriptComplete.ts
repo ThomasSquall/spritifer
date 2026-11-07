@@ -56,6 +56,8 @@ export interface CompleteContext {
   variables: Record<string, Value>;
   /** Property names of object types (instance handle fields). */
   properties: string[];
+  /** Group tags of object types. */
+  tags?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -496,6 +498,8 @@ const STRING_ARGS: Record<string, (c: CompleteContext) => CompletionItem[]> = {
   key: (c) => c.keys.map((o) => plain(o, 'value', 'key')),
   method: (c) => [...new Set(c.components.flatMap((x) => x.methods))].map((m) => plain(m, 'method', 'component method')),
   type: () => PARAM_TYPES.map((t) => plain(t, 'value', 'param type')),
+  tag: (c) => (c.tags ?? []).map((t) => plain(t, 'value', 'tag')),
+  slot: () => ['auto', 'slot1', 'slot2', 'slot3'].map((t) => plain(t, 'value', 'save slot')),
 };
 
 const FN_ARG: Record<string, keyof typeof STRING_ARGS> = {
@@ -503,6 +507,8 @@ const FN_ARG: Record<string, keyof typeof STRING_ARGS> = {
   find: 'object', findOne: 'object', spawn: 'object', count: 'object',
   goto: 'scene', onSceneStart: 'scene',
   sound: 'sound', dialogue: 'dialogue', sprite: 'sprite', key: 'key', pressed: 'key', sendMessage: 'method',
+  findWithTag: 'tag', hasTag: 'tag', addTag: 'tag', removeTag: 'tag',
+  saveGame: 'slot', loadGame: 'slot', hasSave: 'slot', deleteSave: 'slot',
 };
 
 // ---------------------------------------------------------------------------
@@ -572,6 +578,8 @@ export function complete(src: string, pos: number, ctx: CompleteContext, explici
     let items: CompletionItem[] = [];
     if (/\b(?:from|import)\s*$/.test(head)) items = importItems(ctx, prefix);
     else if (/\btype\s*:\s*$/.test(head)) items = STRING_ARGS.type(ctx);
+    else if (/\btag\s*:\s*$/.test(head)) items = STRING_ARGS.tag(ctx);
+    else if (/\bobject\s*:\s*$/.test(head)) items = STRING_ARGS.object(ctx);
     else {
       const call = /([\w$]+)\s*\(\s*$/.exec(head);
       const kind = call ? FN_ARG[call[1]] : undefined;

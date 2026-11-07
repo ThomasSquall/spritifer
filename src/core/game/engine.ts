@@ -119,7 +119,11 @@ export class Actor {
     this.z = type.z ?? 0;
     this.createdAt = now;
     this.anim = type.animation ?? '';
+    this.tags = new Set(type.tags ?? []);
   }
+
+  /** Group tags of the object type (+ the instance's own). */
+  tags: Set<string>;
 
   behavior(type: string): Behavior | undefined {
     return this.behaviors.find((b) => b.type === type);
@@ -175,6 +179,43 @@ export class Actor {
   }
 }
 
+type MemoryEntry = { destroyed?: boolean; x?: number; y?: number; vars?: Record<string, Value>; flipX?: boolean; facing?: Actor['facing']; anim?: string; comps?: Record<string, Record<string, Value>> };
+
+export interface SaveSummary {
+  slot: string;
+  scene: string;
+  savedAt: number;
+  title: string;
+}
+
+export interface SaveData extends SaveSummary {
+  format: 'spritifer-save';
+  version: 1;
+  globals: Record<string, Value>;
+  sceneVars: Record<string, Value>;
+  memory: Record<string, Record<string, MemoryEntry>>;
+  current: Record<string, MemoryEntry>;
+  gameComponents: { name: string; fields: Record<string, Value> }[];
+}
+
+export interface QueryFilter {
+  tag?: string;
+  object?: string;
+  ignore?: Actor[];
+}
+
+export interface RayHit {
+  /** 0..1 along the segment. */
+  t: number;
+  x: number;
+  y: number;
+  distance: number;
+  normalX: number;
+  normalY: number;
+  actor: Actor | null;
+  tile: boolean;
+}
+
 interface ExecCtx {
   self?: Actor;
   other?: Actor;
@@ -212,7 +253,13 @@ export class World {
   private started = false;
   private gameStarted = false;
   /** Per persistent scene: what happened to each placed instance. */
-  private memory = new Map<string, Map<string, { destroyed?: boolean; x?: number; y?: number; vars?: Record<string, Value>; flipX?: boolean; facing?: Actor['facing']; anim?: string; comps?: Record<string, Record<string, Value>> }>>();
+  private memory = new Map<string, Map<string, MemoryEntry>>();
+  /** Instance states to use for the next loadScene (a loaded save), whatever the scene's persistence. */
+  private forcedMemory: Map<string, MemoryEntry> | null = null;
+  /** A save to apply at the end of the frame. */
+  private pendingLoad: SaveData | null = null;
+  /** Saves when there is no storage (headless playtests). */
+  private saveStore = new Map<string, string>();
   /** Components of the current scene (managers, level logic). */
   sceneComponents: Behaviour[] = [];
   /** Global components: created when the game starts, kept across scenes. */
@@ -300,17 +347,9 @@ export class World {
     // Leaving a persistent scene: remember where everything is.
     const prev = this.scene;
     if (prev && this.started) this.scripts.invokeAll(this.gameComponents, 'onSceneEnd', prev.name);
-    if (prev?.persistent && prev.name !== name) {
+    if (prev?.persistent && prev.name !== name && !this.forcedMemory) {
       const mem = this.memory.get(prev.name) ?? new Map();
-      for (const a of this.actors) {
-        if (!a.sceneId || a.destroyed) continue;
-        const comps: Record<string, Record<string, Value>> = {};
-        for (const c of a.components) {
-          const st = componentState(c);
-          if (st) comps[st.name] = fieldsOf(c);
-        }
-        mem.set(a.sceneId, { x: a.x, y: a.y, vars: { ...a.vars }, flipX: a.flipX, facing: a.facing, anim: a.anim, ...(a.components.length ? { comps } : {}) });
-      }
+      for (const [id, e] of this.currentState(false)) mem.set(id, e);
       this.memory.set(prev.name, mem);
     }
     // The old scene's components are gone (their pending waits stop).
@@ -319,9 +358,10 @@ export class World {
       for (const a of this.actors) this.scripts.drop(a.components);
     }
     this.sceneComponents = [];
-    if (this.resetPending || prev?.name === name) this.memory.delete(name);
+    if ((this.resetPending || prev?.name === name) && !this.forcedMemory) this.memory.delete(name);
     this.resetPending = false;
-    const remembered = scene.persistent ? this.memory.get(name) : undefined;
+    const remembered = this.forcedMemory ?? (scene.persistent ? this.memory.get(name) : undefined);
+    this.forcedMemory = null;
     this.scene = scene;
     this.actors = [];
     this.sceneVars = { ...scene.variables };
@@ -343,6 +383,7 @@ export class World {
       if (inst.animation) a.anim = inst.animation;
       if (inst.props) Object.assign(a.vars, inst.props);
       if (inst.flipX) a.flipX = true;
+      for (const t of inst.tags ?? []) a.tags.add(t);
       a.componentConfig = inst.components;
       if (mem) {
         a.componentRestore = mem.comps;
@@ -360,6 +401,127 @@ export class World {
     }
     this.started = false;
     this.log(`scene "${name}" started`);
+  }
+
+  /** State of the placed instances of the current scene (destroyed ones too when asked). */
+  private currentState(withDestroyed: boolean): Map<string, MemoryEntry> {
+    const out = new Map<string, MemoryEntry>();
+    for (const a of this.actors) {
+      if (!a.sceneId || a.destroyed) continue;
+      const comps: Record<string, Record<string, Value>> = {};
+      for (const c of a.components) {
+        const st = componentState(c);
+        if (st) comps[st.name] = fieldsOf(c);
+      }
+      out.set(a.sceneId, { x: a.x, y: a.y, vars: { ...a.vars }, flipX: a.flipX, facing: a.facing, anim: a.anim, ...(a.components.length ? { comps } : {}) });
+    }
+    if (withDestroyed) for (const i of this.scene.instances) if (!out.has(i.id)) out.set(i.id, { destroyed: true });
+    return out;
+  }
+
+  // ------------------------------------------------------------------ save slots
+
+  private saveKey(slot: string): string {
+    return `save:${slot}`;
+  }
+
+  private store(key: string, value: string | null): void {
+    if (value === null) this.saveStore.delete(key);
+    else this.saveStore.set(key, value);
+    this.opts.storage?.set(key, value ?? '');
+  }
+
+  private fetch(key: string): string | null {
+    const v = this.opts.storage ? this.opts.storage.get(key) : (this.saveStore.get(key) ?? null);
+    return v ? v : null;
+  }
+
+  private slotIndex(): string[] {
+    try {
+      const v = JSON.parse(this.fetch('save:index') ?? '[]');
+      return Array.isArray(v) ? v.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Saves the whole game in a slot: global and scene variables, the current scene with its placed instances
+   * (positions, properties, component fields, destroyed ones), the memory of persistent scenes, global components.
+   */
+  saveGame(slot = 'auto'): SaveSummary {
+    const name = String(slot || 'auto');
+    const memory: Record<string, Record<string, MemoryEntry>> = {};
+    for (const [scene, m] of this.memory) memory[scene] = Object.fromEntries(m);
+    const data: SaveData = {
+      format: 'spritifer-save',
+      version: 1,
+      slot: name,
+      title: this.game.title,
+      savedAt: Date.now(),
+      scene: this.scene.name,
+      globals: { ...this.globals },
+      sceneVars: { ...this.sceneVars },
+      memory,
+      current: Object.fromEntries(this.currentState(true)),
+      gameComponents: this.gameComponents.map((c) => ({ name: componentState(c)?.name ?? '', fields: fieldsOf(c) })),
+    };
+    this.store(this.saveKey(name), JSON.stringify(data));
+    const index = this.slotIndex().filter((x) => x !== name);
+    this.store('save:index', JSON.stringify([...index, name]));
+    this.log(`game saved in slot "${name}" (${this.scene.name})`);
+    return { slot: name, scene: data.scene, savedAt: data.savedAt, title: data.title };
+  }
+
+  readSave(slot: string): SaveData | null {
+    const raw = this.fetch(this.saveKey(String(slot || 'auto')));
+    if (!raw) return null;
+    try {
+      const d = JSON.parse(raw) as SaveData;
+      return d && d.format === 'spritifer-save' && this.bundle.scenes[d.scene] ? d : null;
+    } catch {
+      return null;
+    }
+  }
+
+  hasSave(slot = 'auto'): boolean {
+    return !!this.readSave(slot);
+  }
+
+  listSaves(): SaveSummary[] {
+    return this.slotIndex()
+      .map((s) => this.readSave(s))
+      .filter((d): d is SaveData => !!d)
+      .map((d) => ({ slot: d.slot, scene: d.scene, savedAt: d.savedAt, title: d.title }));
+  }
+
+  deleteSave(slot: string): void {
+    const name = String(slot || 'auto');
+    this.store(this.saveKey(name), null);
+    this.store('save:index', JSON.stringify(this.slotIndex().filter((x) => x !== name)));
+  }
+
+  /** Loads a slot at the end of this frame. Returns false when the slot is empty. */
+  loadGame(slot = 'auto'): boolean {
+    const d = this.readSave(slot);
+    if (!d) return false;
+    this.pendingLoad = d;
+    return true;
+  }
+
+  private applyLoad(d: SaveData): void {
+    this.fade = { phase: 'none', t: 0, dur: 0, color: '#000000', scene: null, restart: false };
+    this.globals = { ...this.game.variables, ...d.globals };
+    this.memory = new Map(Object.entries(d.memory ?? {}).map(([k, v]) => [k, new Map(Object.entries(v))]));
+    d.gameComponents?.forEach((g, i) => {
+      const c = this.gameComponents[i];
+      if (c && componentState(c)?.name === g.name) Object.assign(c, g.fields);
+    });
+    this.controlsLocked = false;
+    this.forcedMemory = new Map(Object.entries(d.current ?? {}));
+    this.loadScene(d.scene);
+    this.sceneVars = { ...this.scene.variables, ...d.sceneVars };
+    this.log(`game loaded from slot "${d.slot}"`);
   }
 
   private makeActor(type: ObjectType, x: number, y: number, spriteOverride?: string): Actor {
@@ -711,6 +873,13 @@ export class World {
   }
 
   private applyPendingScene(): void {
+    if (this.pendingLoad) {
+      const d = this.pendingLoad;
+      this.pendingLoad = null;
+      this.pendingScene = null;
+      this.applyLoad(d);
+      return;
+    }
     if (this.pendingScene) {
       const s = this.pendingScene;
       this.pendingScene = null;
@@ -768,6 +937,145 @@ export class World {
         }
       }
     }
+  }
+
+  // ------------------------------------------------------------------ queries (scripts)
+
+  /** Does an instance match a query filter? */
+  matchesFilter(a: Actor, f: QueryFilter): boolean {
+    if (a.destroyed || a.type.hud) return false;
+    if (f.ignore && f.ignore.includes(a)) return false;
+    if (f.object && a.type.name !== f.object) return false;
+    if (f.tag && !a.tags.has(f.tag)) return false;
+    return true;
+  }
+
+  /** Solid at a world point: a solid tile, or a solid instance (not jump-through ones). */
+  isSolidAt(x: number, y: number): boolean {
+    const ts = this.tileSize;
+    if (this.solidAtTile(Math.floor(x / ts), Math.floor(y / ts))) return true;
+    return this.actors.some((o) => {
+      if (o.destroyed) return false;
+      const s = o.behavior('solid');
+      if (!s || s.oneWay === true) return false;
+      const b = o.box();
+      return x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
+    });
+  }
+
+  /** Instances whose hitbox overlaps a rectangle. */
+  overlapRect(r: Rect, f: QueryFilter = {}): Actor[] {
+    return this.actors.filter((a) => this.matchesFilter(a, f) && overlap(r, a.box()));
+  }
+
+  /** Instances whose hitbox touches a circle. */
+  overlapCircle(cx: number, cy: number, radius: number, f: QueryFilter = {}): Actor[] {
+    return this.actors.filter((a) => {
+      if (!this.matchesFilter(a, f)) return false;
+      const b = a.box();
+      const nx = Math.max(b.x, Math.min(cx, b.x + b.w));
+      const ny = Math.max(b.y, Math.min(cy, b.y + b.h));
+      return (nx - cx) ** 2 + (ny - cy) ** 2 <= radius * radius;
+    });
+  }
+
+  /**
+   * First thing along the segment (x1,y1)→(x2,y2): solid tiles and solid instances (unless solids is false),
+   * and instances matching the filter (tag/object, or any with instances: true).
+   */
+  raycast(x1: number, y1: number, x2: number, y2: number, f: QueryFilter & { solids?: boolean; instances?: boolean } = {}): RayHit | null {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    if (!(len > 0)) return null;
+    let best: RayHit | null = null;
+    const consider = (t: number, nx: number, ny: number, actor: Actor | null) => {
+      if (t < 0 || t > 1 || (best && t >= best.t)) return;
+      best = { t, x: x1 + dx * t, y: y1 + dy * t, distance: len * t, normalX: nx, normalY: ny, actor, tile: !actor };
+    };
+    const solids = f.solids !== false;
+    if (solids) {
+      // Tiles: walk the grid cells the segment crosses (DDA).
+      const ts = this.tileSize;
+      let tx = Math.floor(x1 / ts);
+      let ty = Math.floor(y1 / ts);
+      const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+      const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+      const tDeltaX = stepX ? ts / Math.abs(dx) : Infinity;
+      const tDeltaY = stepY ? ts / Math.abs(dy) : Infinity;
+      let tMaxX = stepX > 0 ? ((tx + 1) * ts - x1) / dx : stepX < 0 ? (tx * ts - x1) / dx : Infinity;
+      let tMaxY = stepY > 0 ? ((ty + 1) * ts - y1) / dy : stepY < 0 ? (ty * ts - y1) / dy : Infinity;
+      let t = 0;
+      let nx = 0;
+      let ny = 0;
+      for (let i = 0; i < 4096 && t <= 1; i++) {
+        if (this.solidAtTile(tx, ty)) {
+          consider(t, nx, ny, null);
+          break;
+        }
+        if (tMaxX < tMaxY) {
+          t = tMaxX;
+          tMaxX += tDeltaX;
+          tx += stepX;
+          nx = -stepX;
+          ny = 0;
+        } else {
+          t = tMaxY;
+          tMaxY += tDeltaY;
+          ty += stepY;
+          nx = 0;
+          ny = -stepY;
+        }
+      }
+    }
+    const anyInstance = f.instances === true || !!f.tag || !!f.object;
+    for (const a of this.actors) {
+      if (a.destroyed || a.type.hud || (f.ignore && f.ignore.includes(a))) continue;
+      const solid = solids && !!a.behavior('solid') && a.behavior('solid')!.oneWay !== true;
+      if (!solid && !(anyInstance && this.matchesFilter(a, f))) continue;
+      // Segment vs box (slabs).
+      const b = a.box();
+      let t0 = 0;
+      let t1 = 1;
+      let nx = 0;
+      let ny = 0;
+      let ok = true;
+      for (const [p, d, lo, hi, axis] of [[x1, dx, b.x, b.x + b.w, 0], [y1, dy, b.y, b.y + b.h, 1]] as const) {
+        if (d === 0) {
+          if (p < lo || p > hi) ok = false;
+          continue;
+        }
+        let ta = (lo - p) / d;
+        let tb = (hi - p) / d;
+        const sign = ta > tb ? 1 : -1;
+        if (ta > tb) [ta, tb] = [tb, ta];
+        if (ta > t0) {
+          t0 = ta;
+          nx = axis === 0 ? sign : 0;
+          ny = axis === 1 ? sign : 0;
+        }
+        t1 = Math.min(t1, tb);
+        if (t0 > t1) ok = false;
+      }
+      if (ok) consider(t0, nx, ny, a);
+    }
+    return best;
+  }
+
+  /** Nearest instance to a point matching the filter (within maxDistance). */
+  findNearest(x: number, y: number, f: QueryFilter & { maxDistance?: number } = {}): Actor | undefined {
+    let best: Actor | undefined;
+    let bd = f.maxDistance ?? Infinity;
+    for (const a of this.actors) {
+      if (!this.matchesFilter(a, f)) continue;
+      const b = a.box();
+      const d = Math.hypot(b.x + b.w / 2 - x, b.y + b.h / 2 - y);
+      if (d <= bd) {
+        bd = d;
+        best = a;
+      }
+    }
+    return best;
   }
 
   // ------------------------------------------------------------------ collisions
@@ -1379,6 +1687,12 @@ export class World {
       case 'talk':
         void this.scripts.openDialog(fmt(this.eval(s.text, ctx)), { speaker: String(s.speaker ?? '') });
         return;
+      case 'saveGame':
+        this.saveGame(String(s.slot || 'auto'));
+        return;
+      case 'loadGame':
+        if (!this.loadGame(String(s.slot || 'auto'))) this.log(`no save in slot "${s.slot || 'auto'}"`);
+        return;
       case 'lockControls':
         this.controlsLocked = s.locked !== false;
         return;
@@ -1516,6 +1830,8 @@ export class World {
         if (m) return m(args.map(toNum), () => this.random());
         switch (name) {
           case 'count': return this.actors.filter((a) => !a.destroyed && a.type.name === String(args[0])).length;
+          case 'hasSave': return this.hasSave(String(args[0] ?? 'auto'));
+          case 'countTag': return this.actors.filter((a) => !a.destroyed && a.tags.has(String(args[0]))).length;
           case 'exists': return this.actors.some((a) => !a.destroyed && a.type.name === String(args[0]));
           case 'keyDown': return this.input.down.has(String(args[0]));
           case 'keyPressed': return this.input.pressed.has(String(args[0]));

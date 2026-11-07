@@ -20,6 +20,7 @@ const ctx = (path = 'enemies/Patrol'): CompleteContext => ({
   keys: ['left', 'action'],
   variables: { score: 0, hp: 20 },
   properties: ['dialogue', 'gold'],
+  tags: ['enemy', 'pickup'],
 });
 
 /** Completes at the "|" marker. */
@@ -58,6 +59,10 @@ describe('script autocompletion', () => {
     expect(labels("import Health from './|'")).toEqual(['./Health', '../utils/math']);
     expect(labels("static params = {\n  target: '|'")).toContain('object');
     expect(labels("emit('playerHit', 1)\nthis.on('pl|')")).toEqual(['playerHit']);
+    expect(labels("findWithTag('|')")).toEqual(['enemy', 'pickup']);
+    expect(labels("raycast(0, 0, 1, 1, { tag: 'en|' })")).toEqual(['enemy']);
+    expect(labels("raycast(0, 0, 1, 1, { object: '|' })")).toEqual(['player', 'slime']);
+    expect(labels('findN|')).toContain('findNearest');
     const r = at("goto('to|wn')");
     expect(r).toMatchObject({ from: 6, to: 10 });
   });

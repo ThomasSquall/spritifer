@@ -17,6 +17,7 @@ import {
   normalizeEvents,
   normalizeComponents,
   normalizeGame,
+  normalizeTags,
   normalizeObject,
   normalizeScene,
   resizeScene,
@@ -99,6 +100,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
     const lines = [
       `Object "${o.name}": ${o.sprite ? `sprite ${o.sprite}${o.animation ? ` (animation ${o.animation})` : ''}` : 'no sprite'}${o.text !== undefined ? `, text ${JSON.stringify(o.text)}${o.hud ? ' (HUD)' : ''}` : ''}${o.hitbox ? `, hitbox ${o.hitbox.x},${o.hitbox.y} ${o.hitbox.w}x${o.hitbox.h}` : ''}${o.z ? `, z ${o.z}` : ''}`,
     ];
+    if (o.tags?.length) lines.push(`  tags: ${o.tags.join(', ')}`);
     if (o.behaviors.length) lines.push(`  behaviors: ${o.behaviors.map((b) => describeStep(b, BEHAVIOR_MAP.get(b.type))).join('; ')}`);
     if (Object.keys(o.properties).length) lines.push(`  properties: ${Object.entries(o.properties).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')}`);
     o.events.forEach((e, i) => lines.push(`  [${i}] ${describeEvent(e)}`));
@@ -217,6 +219,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       text_color: z.string().optional(),
       text_size: z.number().int().min(1).max(8).optional(),
       hud: z.boolean().optional().describe('Draw in screen space (ignores the camera)'),
+      tags: z.array(z.string()).optional().describe('Group tags for scripts (self.hasTag, findWithTag, raycast/overlap filters, countTag()), e.g. ["enemy"]. Replaces the list.'),
       properties: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       behaviors: z.array(stepSchema).optional().describe('e.g. [{type:"platformer", speed:100, jump:300}, {type:"camera"}]'),
       events: z.array(eventSchema).optional(),
@@ -252,6 +255,11 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
         }
         if (a.text_color !== undefined) o.textColor = a.text_color;
         if (a.text_size !== undefined) o.textSize = a.text_size;
+        if (a.tags !== undefined) {
+          const t = normalizeTags(a.tags);
+          if (t) o.tags = t;
+          else delete o.tags;
+        }
         if (a.hud !== undefined) {
           if (a.hud) o.hud = true;
           else delete o.hud;
@@ -571,6 +579,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
         props: z.record(z.string(), valueSchema).optional().describe('Instance properties, e.g. { dialogue: "elder" } for a Talks NPC'),
         components: z.record(z.string(), z.record(z.string(), valueSchema)).optional().describe('Component params for this instance, by component name: { Patrol: { speed: 80 } }. A component the object type lacks is added to this instance only; { enabled: false } turns one off.'),
         flip_x: z.boolean().optional(),
+        tags: z.array(z.string()).optional().describe('Extra group tags for this instance (e.g. ["boss"])'),
       })).min(1),
       tiles: z.boolean().optional(),
     },
@@ -595,7 +604,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           }
           const id = newGameId();
           ids.push(id);
-          s.instances.push({ id, object: i.object, x, y, ...(i.name ? { name: i.name } : {}), ...(i.sprite ? { sprite: i.sprite } : {}), ...(i.animation ? { animation: i.animation } : {}), ...(i.props ? { props: i.props } : {}), ...(i.components ? { components: i.components as Record<string, Record<string, Value>> } : {}), ...(i.flip_x ? { flipX: true } : {}) });
+          s.instances.push({ id, object: i.object, x, y, ...(i.name ? { name: i.name } : {}), ...(i.sprite ? { sprite: i.sprite } : {}), ...(i.animation ? { animation: i.animation } : {}), ...(i.props ? { props: i.props } : {}), ...(i.components ? { components: i.components as Record<string, Record<string, Value>> } : {}), ...(i.flip_x ? { flipX: true } : {}), ...(normalizeTags(i.tags) ? { tags: normalizeTags(i.tags) } : {}) });
         }
       });
       return text(`Placed ${ids.length} instance(s): ${ids.join(', ')}. Scene now has ${scene.instances.length}.`);
@@ -615,6 +624,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       dx: z.number().optional().describe('Relative move'),
       dy: z.number().optional(),
       flip_x: z.boolean().optional(),
+      tags: z.array(z.string()).nullable().optional().describe('Extra tags of the instances (replace; null clears)'),
       name: z.string().nullable().optional().describe('Rename (null clears)'),
       sprite: z.string().nullable().optional().describe('Sprite override (null = the object type\'s)'),
       animation: z.string().nullable().optional(),
@@ -638,6 +648,11 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           if (a.y !== undefined) i.y = a.y;
           i.x += a.dx ?? 0;
           i.y += a.dy ?? 0;
+          if (a.tags !== undefined) {
+            const t = normalizeTags(a.tags);
+            if (t) i.tags = t;
+            else delete i.tags;
+          }
           if (a.flip_x !== undefined) {
             if (a.flip_x) i.flipX = true;
             else delete i.flipX;

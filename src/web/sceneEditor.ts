@@ -1,6 +1,6 @@
 /** Scene editor: paint tile layers, place and move instances, edit scene settings and events. */
 
-import { type Instance, type Scene, type TileLayer, type Value, newGameId, normalizeScene, resizeScene } from '../core/game/types.js';
+import { type Instance, type Scene, type TileLayer, type Value, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
 import { renderEventSheet } from './eventSheet.js';
 import { componentListCard, instanceComponents } from './componentsUi.js';
 import { type LoadedAsset, gameApi } from './gameApi.js';
@@ -990,6 +990,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('label', {}, 'Name', nameIn),
         h('div', { class: 'row2' }, h('label', {}, 'Object type', typeSel), h('label', {}, 'Sprite', spriteSel)),
         h('div', { class: 'row2' }, h('label', {}, 'Animation', animSel), h('label', { class: 'inline flip-in' }, flip, 'Flip')),
+        h('label', { title: `Extra group tags for this instance${obj?.tags?.length ? ` (the type has: ${obj.tags.join(', ')})` : ''}` }, 'Tags', h('input', { type: 'text', value: (inst.tags ?? []).join(', '), placeholder: obj?.tags?.length ? `+ ${obj.tags.join(', ')}` : 'boss…', spellcheck: false, onchange: (e: Event) => edit(() => { const t = normalizeTags((e.target as HTMLInputElement).value); if (t) inst.tags = t; else delete inst.tags; }) })),
         dialogueRow,
         h('div', { class: 'row2' }, num('x', () => inst.x, (v) => (inst.x = v)), num('y', () => inst.y, (v) => (inst.y = v))),
         h('div', {}, h('div', { class: 'muted small' }, keys.size ? 'Properties (empty = default of the type)' : 'Properties'), props,

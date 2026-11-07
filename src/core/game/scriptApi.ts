@@ -111,6 +111,10 @@ export const HANDLE_MEMBERS: ApiEntry[] = [
   method('distanceTo', 'distanceTo(other: Instance): number', 'Distance in pixels.'),
   method('overlaps', 'overlaps(other: Instance): boolean', 'Hitboxes touch.'),
   method('has', 'has(animation: string): boolean', 'The sprite has this animation tag.'),
+  prop('tags', 'readonly tags: string[]', 'Group tags (object type tags + the instance\'s own).'),
+  method('hasTag', 'hasTag(tag: TagName): boolean', 'Has this group tag ("enemy", "pickup"), like Unity CompareTag.', "hasTag('$0')"),
+  method('addTag', 'addTag(tag: TagName): void', 'Adds a group tag at runtime.', "addTag('$0')"),
+  method('removeTag', 'removeTag(tag: TagName): void', 'Removes a group tag.', "removeTag('$0')"),
 ];
 
 export const UI_MEMBERS: ApiEntry[] = [
@@ -159,6 +163,12 @@ export const GLOBALS: ApiEntry[] = [
   fn('findOne', 'findOne(object: ObjectName): Instance | undefined', 'First instance of an object type.', "findOne('$0')"),
   fn('player', 'player(): Instance | undefined', 'The player (instance with platformer/topdown controls).'),
   fn('spawn', 'spawn(object: ObjectName, x: number, y: number, props?: Record<string, any>): Instance | undefined', 'Creates an instance.', "spawn('$0')"),
+  fn('findWithTag', 'findWithTag(tag: TagName): Instance[]', 'Every instance with a group tag.', "findWithTag('$0')"),
+  fn('findNearest', 'findNearest(from: Instance | number, y?: number | QueryFilter, filter?: QueryFilter & { maxDistance?: number }): Instance | null', 'Nearest instance to an instance (itself excluded) or to a point: findNearest(this.self, { tag: "enemy", maxDistance: 80 }).'),
+  fn('overlapBox', 'overlapBox(x: number, y: number, w: number, h: number, filter?: QueryFilter): Instance[]', 'Instances whose hitbox overlaps a rectangle (world pixels): area attacks, sensors.'),
+  fn('overlapCircle', 'overlapCircle(x: number, y: number, radius: number, filter?: QueryFilter): Instance[]', 'Instances whose hitbox touches a circle: explosions, auras.'),
+  fn('raycast', 'raycast(x1: number, y1: number, x2: number, y2: number, filter?: QueryFilter & { solids?: boolean; instances?: boolean }): RayHit | null', 'First thing on the segment: solid tiles and solid instances, plus instances matching { tag, object } (or any with instances: true). null = clear. Line of sight: raycast(me.centerX, me.centerY, p.centerX, p.centerY, { object: "player", ignore: me })?.instance === p'),
+  fn('isSolidAt', 'isSolidAt(x: number, y: number): boolean', 'A solid tile or solid instance at a world point (ledge checks, placement).'),
   fn('findComponent', 'findComponent<T = any>(type: ComponentName): T | null', 'First component of a type anywhere (game, scene or instances).', "findComponent('$0')"),
   fn('findComponents', 'findComponents<T = any>(type: ComponentName): T[]', 'Every component of a type.', "findComponents('$0')"),
   fn('goto', 'goto(scene: SceneName, opts?: { fade?: number; color?: string }): void', 'Changes scene (at the end of the frame). goto("dungeon", { fade: 0.4 }) fades to black and back.', "goto('$0')"),
@@ -175,6 +185,11 @@ export const GLOBALS: ApiEntry[] = [
   fn('random', 'random(min?: number, max?: number): number', 'Random number (deterministic per seed).'),
   fn('randint', 'randint(min: number, max: number): number', 'Random integer, both ends included.'),
   fn('pick', 'pick<T>(list: T[]): T', 'Random element.'),
+  fn('saveGame', 'saveGame(slot?: string): SaveInfo', 'Saves the whole game in a slot (default "auto"): variables, current scene with its instances and component fields, remembered scenes, global components.', "saveGame('$0')"),
+  fn('loadGame', 'loadGame(slot?: string): boolean', 'Loads a slot at the end of the frame (false if empty).', "loadGame('$0')"),
+  fn('hasSave', 'hasSave(slot?: string): boolean', 'Is there a save in this slot? (Continue buttons.)', "hasSave('$0')"),
+  fn('deleteSave', 'deleteSave(slot: string): void', 'Deletes a save slot.', "deleteSave('$0')"),
+  fn('listSaves', 'listSaves(): SaveInfo[]', 'Saved slots: { slot, scene, savedAt, title }.'),
   fn('save', 'save(key: string, value: any): void', 'Stores a value (browser storage).', "save('$0')"),
   fn('load', 'load<T = any>(key: string, fallback?: T): T', 'Reads a stored value.', "load('$0')"),
   // Registration helpers for plain (non-component) scripts.
@@ -286,6 +301,12 @@ ${list(GLOBALS.filter((g) => g.kind !== 'class'))}
 UI (onDraw(ui), screen pixels, 4x6 pixel font)
 ${list(UI_MEMBERS, 'ui.')}
 
+TAGS, QUERIES, SAVES
+- Object types (and placed instances) have group tags: self.hasTag('enemy'), findWithTag('pickup'), countTag("enemy") in expressions
+- raycast(x1, y1, x2, y2, { tag, object, ignore, solids, instances }) → { x, y, distance, normalX, normalY, instance, tile } | null
+- overlapBox(x, y, w, h, filter), overlapCircle(x, y, r, filter), findNearest(self, { tag, maxDistance }), isSolidAt(x, y)
+- saveGame('slot1'), loadGame('slot1'), hasSave('slot1'), listSaves(), deleteSave('slot1') — also event actions "Save game" / "Load game" and hasSave("slot") in expressions
+
 MESSAGES, TWEENS, TRANSITIONS
 - emit('playerHit', { damage: 2 }) → this.on('playerHit', (data) => ...) in any component (auto-removed), onMessage(name, data), events "Message received"
 - await this.tween(this.self, { y: this.self.y - 12, opacity: 0 }, 0.4, 'outQuad')   easings: linear, inQuad, outQuad, inOutQuad, inCubic, outCubic, inOutCubic, inOutSine, outBack, outElastic, outBounce; { ease, delay }
@@ -326,6 +347,8 @@ export interface ProjectTypeInfo {
   variables: Record<string, string | number | boolean>;
   /** Property names of all object types (instance handle fields). */
   properties: Record<string, string | number | boolean>;
+  /** Group tags used by the object types. */
+  tags?: string[];
 }
 
 const tsType = (v: unknown) => (typeof v === 'number' ? 'number' : typeof v === 'boolean' ? 'boolean' : 'string');
@@ -343,6 +366,10 @@ type SceneName = ${union(p.scenes)};
 type SoundName = ${union(p.sounds)};
 type DialogueName = ${union(p.dialogues)};
 type EaseName = 'linear' | 'inQuad' | 'outQuad' | 'inOutQuad' | 'inCubic' | 'outCubic' | 'inOutCubic' | 'inOutSine' | 'outBack' | 'outElastic' | 'outBounce';
+type TagName = ${union(p.tags ?? [])};
+interface QueryFilter { tag?: TagName; object?: ObjectName; ignore?: Instance | Instance[] }
+interface RayHit { x: number; y: number; distance: number; normalX: number; normalY: number; instance: Instance | null; tile: boolean }
+interface SaveInfo { slot: string; scene: string; savedAt: number; title: string }
 type KeyName = 'left' | 'right' | 'up' | 'down' | 'action' | 'action2' | 'space' | 'enter' | 'escape' | 'shift' | (string & {});
 
 interface ComponentMap {

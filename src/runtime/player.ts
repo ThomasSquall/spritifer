@@ -22,6 +22,10 @@ export interface Player {
   world: World;
   destroy(): void;
   restart(scene?: string): void;
+  /** Paused games keep drawing but don't advance (inspector). */
+  paused: boolean;
+  /** Advances one frame while paused. */
+  stepOnce(): void;
 }
 
 /** Physical key code → logical keys. Letters keep their own name and WASD also act as arrows. */
@@ -316,12 +320,19 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
   let last = performance.now();
   let acc = 0;
   let busy = false;
+  let paused = false;
+  let stepRequests = 0;
   const frame = async (now: number) => {
     raf = requestAnimationFrame((t) => void frame(t));
     if (busy) return;
     busy = true;
     acc += Math.min(0.25, (now - last) / 1000);
     last = now;
+    if (paused) {
+      // Only the frames asked for with stepOnce().
+      acc = stepRequests * STEP;
+      stepRequests = 0;
+    }
     let steps = 0;
     while (acc >= STEP && steps < 5) {
       world.step(readInput());
@@ -355,6 +366,16 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     },
     restart(scene?: string) {
       world = makeWorld(scene ?? opts.scene);
+    },
+    get paused() {
+      return paused;
+    },
+    set paused(on: boolean) {
+      paused = on;
+      acc = 0;
+    },
+    stepOnce() {
+      stepRequests++;
     },
     destroy() {
       cancelAnimationFrame(raf);

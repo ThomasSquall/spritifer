@@ -26,6 +26,14 @@ Oltre a quanto richiesto (un behaviour per file, cartelle, ciclo di vita, parame
 - **7. (in parte) Transizioni**: `goto(scene, { fade })`, `restart({ fade })` e il campo *fade* nelle azioni evento. Zoom e dead-zone della camera restano da fare.
 - **9. (in parte) Gamepad**: c'era già nel runtime (croce/stick, A, B, Start). Manca la mappatura configurabile delle azioni.
 
+## Fatto nel terzo giro
+
+- **3. Inspector dal vivo nel Play**: pausa, avanzamento di un frame, variabili, camera, componenti e istanze modificabili mentre il gioco gira (`src/core/game/debug.ts`, `src/web/playInspector.ts`).
+- **5. Tag e query fisiche**: tag su tipi di oggetto e istanze, `hasTag`, `findWithTag`, `raycast`, `overlapBox`, `overlapCircle`, `findNearest`, `isSolidAt`, `countTag()` nelle espressioni.
+- **8. Salvataggi a slot**: `saveGame` / `loadGame` / `hasSave` / `listSaves` / `deleteSave`, le azioni evento *Save game* / *Load game* e `hasSave()` nelle espressioni.
+
+Restano: zoom e dead-zone della camera (7), mappatura delle azioni (9), pathfinding (10), varianti di tipo (11), musica e audio importato (12).
+
 ## Prossimi passi consigliati (in ordine)
 
 | # | Funzionalità | Perché | Sforzo |

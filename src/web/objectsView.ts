@@ -5,6 +5,7 @@ import { GAME_NAME_RE, type ObjectType, type Value, normalizeObject } from '../c
 import { api } from './api.js';
 import { type SheetContext, paramInput, renderEventSheet } from './eventSheet.js';
 import { gameApi } from './gameApi.js';
+import { looksLikePlainText, previewText } from './textPreview.js';
 import { state } from './gameState.js';
 import { appNav } from './nav.js';
 import { clear, confirmDialog, h, icon, iconButton, promptText, toast } from './dom.js';
@@ -38,6 +39,8 @@ export function sheetContext(obj: ObjectType | null, animations: string[]): Shee
     isObject: !!obj,
     animations,
     variables: [...Object.keys(g.variables), ...(obj ? Object.keys(obj.properties).map((p) => `self.${p}`) : [])],
+    functions: state.scriptInfo.functions,
+    scriptBehaviors: state.scriptInfo.behaviors,
   };
 }
 
@@ -240,12 +243,28 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
   const zIn = h('input', { type: 'number', class: 'num', value: String(obj.z ?? 0), oninput: () => { obj.z = Number(zIn.value) || 0; if (!obj.z) delete obj.z; changed(); } });
 
   const isText = obj.text !== undefined;
-  const textIn = h('input', { type: 'text', class: 'expr', value: obj.text ?? '', spellcheck: false, oninput: () => { obj.text = textIn.value; changed(); } });
+  const textPreviewEl = h('div', { class: 'text-preview' });
+  const plainBtn = h('button', { type: 'button', class: 'small', onclick: () => {
+    textIn.value = JSON.stringify(textIn.value.trim());
+    obj.text = textIn.value;
+    changed();
+    updateTextPreview();
+  } }, 'Use as fixed text');
+  const updateTextPreview = () => {
+    const r = previewText(textIn.value, obj);
+    textIn.classList.toggle('invalid', !!r.error);
+    plainBtn.hidden = !looksLikePlainText(textIn.value);
+    textPreviewEl.className = `text-preview${r.error ? ' err' : ''}`;
+    textPreviewEl.textContent = r.error ? (plainBtn.hidden ? `Error: ${r.error}` : 'Fixed words need quotes, e.g. "GAME OVER".') : `Shows: ${r.text || '(empty)'}`;
+  };
+  const textIn = h('input', { type: 'text', class: 'expr', value: obj.text ?? '', spellcheck: false, oninput: () => { obj.text = textIn.value; changed(); updateTextPreview(); } });
   const colorIn = h('input', { type: 'color', value: obj.textColor ?? '#ffffff', oninput: () => { obj.textColor = colorIn.value; changed(); } });
   const sizeIn = h('input', { type: 'number', class: 'num', min: '1', max: '8', value: String(obj.textSize ?? 1), oninput: () => { obj.textSize = Math.max(1, Number(sizeIn.value) || 1); changed(); } });
   const hudIn = h('input', { type: 'checkbox', checked: !!obj.hud, onchange: () => { if (hudIn.checked) obj.hud = true; else delete obj.hud; changed(); } });
   const textBox = h('div', { class: 'text-box' },
-    h('label', {}, 'Text (expression)', textIn),
+    h('label', {}, 'Text', textIn),
+    h('div', { class: 'text-preview-row' }, textPreviewEl, plainBtn),
+    h('p', { class: 'muted small' }, 'Fixed text goes in quotes: ', h('code', {}, '"GAME OVER"'), '. Join values with +: ', h('code', {}, '"Score: " + score'), ' (score is a global variable, see the Game tab). To change the text while playing, use the action Set variable with target ', h('code', {}, 'self.text'), '.'),
     h('div', { class: 'row3' }, h('label', {}, 'Color', colorIn), h('label', {}, 'Size', sizeIn), h('label', { class: 'inline' }, hudIn, 'HUD (fixed on screen)')),
   );
   const textToggle = h('input', { type: 'checkbox', checked: isText, onchange: () => {
@@ -257,6 +276,7 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
     changed();
   } });
   textBox.hidden = !isText;
+  updateTextPreview();
 
   el.append(h('div', { class: 'obj-grid' },
     h('div', { class: 'card' },

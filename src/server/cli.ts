@@ -6,6 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { Workspace } from './store.js';
 import { startEditorServer } from './http.js';
 import { createMcpServer } from './mcp.js';
+import { ProjectRegistry, defaultProjectsRoot } from './projects.js';
 
 const DEFAULT_PORT = 7420;
 
@@ -17,7 +18,8 @@ Usage:
   spritifer init  [--workspace DIR]                          Register the MCP server in ./.mcp.json for Claude Code
 
 Options:
-  --workspace DIR  Folder holding the project: *.sprite.json, *.scene.json, game.json (default: $SPRITIFER_WORKSPACE or ./sprites)
+  --workspace DIR  Project opened by default: *.sprite.json, *.scene.json, scripts/, game.json (default: $SPRITIFER_WORKSPACE or ./sprites)
+  --projects DIR   Where new projects are created (default: $SPRITIFER_PROJECTS or ~/Documents/Spritifer)
   --port N         Editor port (default: $SPRITIFER_PORT or ${DEFAULT_PORT})
 `;
 
@@ -41,20 +43,23 @@ async function main() {
   const workspaceDir = String(flags.workspace ?? process.env.SPRITIFER_WORKSPACE ?? './sprites');
   const port = Number(flags.port ?? process.env.SPRITIFER_PORT ?? DEFAULT_PORT);
   const host = String(flags.host ?? '127.0.0.1');
+  const projectsRoot = String(flags.projects ?? process.env.SPRITIFER_PROJECTS ?? defaultProjectsRoot());
 
   switch (cmd) {
     case 'serve': {
       const ws = new Workspace(workspaceDir);
-      const editor = await startEditorServer(ws, port, host);
+      const registry = new ProjectRegistry({ root: projectsRoot, defaultDir: ws.dir });
+      const editor = await startEditorServer(ws, port, host, { registry });
       console.log(`Spritifer editor: ${editor.url}\nWorkspace: ${ws.dir}`);
       break;
     }
     case 'mcp': {
       const ws = new Workspace(workspaceDir);
+      const registry = new ProjectRegistry({ root: projectsRoot, defaultDir: ws.dir });
       let editorUrl: string | undefined;
       if (!flags['no-editor'] && process.env.SPRITIFER_NO_EDITOR !== '1') {
         try {
-          editorUrl = (await startEditorServer(ws, port, host)).url;
+          editorUrl = (await startEditorServer(ws, port, host, { registry })).url;
           console.error(`[spritifer] editor at ${editorUrl} (workspace ${ws.dir})`);
         } catch (err) {
           // Most likely another Spritifer instance owns the port; it shares the same files.
@@ -62,7 +67,7 @@ async function main() {
           console.error(`[spritifer] editor not started (${(err as Error).message}); assuming one is already running at ${editorUrl}`);
         }
       }
-      const server = createMcpServer(ws, { editorUrl: () => editorUrl });
+      const server = createMcpServer(ws, { editorUrl: () => editorUrl, registry });
       await server.connect(new StdioServerTransport());
       // The editor's HTTP server would otherwise keep the process alive after the client disconnects.
       process.stdin.on('close', () => process.exit(0));

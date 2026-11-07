@@ -8,6 +8,7 @@ import { TEMPLATES, createFromTemplate, sheetContext } from './objectsView.js';
 import { openPlay, registerFlusher } from './play.js';
 import { clear, h, icon, iconButton, modal, promptText, toast } from './dom.js';
 import { api } from './api.js';
+import { drawPixelText, previewText, textSize } from './textPreview.js';
 
 type Tool = 'paint' | 'rect' | 'fill' | 'erase' | 'place' | 'select';
 
@@ -220,7 +221,10 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     const fr = instanceFrame(i);
     if (fr) return { x: i.x, y: i.y, w: fr.a.width, h: fr.a.height };
     const obj = state.object(i.object);
-    if (obj?.text !== undefined) return { x: i.x, y: i.y, w: Math.max(12, String(obj.text).length * 3), h: 6 * (obj.textSize ?? 1) };
+    if (obj?.text !== undefined) {
+      const sz = textSize(previewText(obj.text, obj, scene.variables).text || ' ', obj.textSize ?? 1);
+      return { x: i.x, y: i.y, w: sz.w, h: sz.h };
+    }
     return { x: i.x, y: i.y, w: ts(), h: ts() };
   };
 
@@ -257,7 +261,8 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     });
     scene.instances.forEach((inst, k) => {
       const obj = state.object(inst.object);
-      items.push({ z: obj?.z ?? 0, o: 1000 + k, d: () => {
+      const sortKey = scene.ySort ? 1000 + (() => { const b = instanceBox(inst); return b.y + b.h; })() + k / 10000 : 1000 + k;
+      items.push({ z: obj?.z ?? 0, o: sortKey, d: () => {
         const fr = instanceFrame(inst);
         ctx.globalAlpha = dimOthers ? 0.5 : 1;
         if (fr) {
@@ -268,6 +273,12 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
             ctx.drawImage(fr.a.img, fr.f.x, fr.f.y, fr.f.w, fr.f.h, 0, 0, fr.f.w, fr.f.h);
             ctx.restore();
           } else ctx.drawImage(fr.a.img, fr.f.x, fr.f.y, fr.f.w, fr.f.h, inst.x, inst.y, fr.f.w, fr.f.h);
+        } else if (obj?.text !== undefined) {
+          const r = previewText(obj.text, obj, scene.variables);
+          if (r.error) {
+            ctx.fillStyle = '#e43b4466';
+            ctx.fillRect(inst.x, inst.y, 24, 6);
+          } else drawPixelText(ctx, r.text, inst.x, inst.y, obj.textColor ?? '#ffffff', obj.textSize ?? 1);
         } else {
           const b = instanceBox(inst);
           ctx.fillStyle = obj ? (obj.text !== undefined ? '#ffffff22' : '#feae3455') : '#e43b4466';
@@ -884,6 +895,9 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('div', { class: 'row2' }, h('label', {}, 'Width (tiles)', colsIn), h('label', {}, 'Height (tiles)', rowsIn)),
         h('p', { class: 'muted small' }, `${scene.cols * ts()}×${scene.rows * ts()} px · tiles ${ts()} px · screen ${state.game!.width}×${state.game!.height}`),
         h('label', {}, 'Background', bg),
+        h('label', { class: 'inline', title: 'Instances lower on screen are drawn in front: depth for top-down games and RPGs' },
+          h('input', { type: 'checkbox', checked: !!scene.ySort, onchange: (e: Event) => { snapshot(); if ((e.target as HTMLInputElement).checked) scene.ySort = true; else delete scene.ySort; changed(); } }),
+          'Sort by Y (top-down depth)'),
         vars,
         h('div', { class: 'actions' },
           h('button', { class: 'small', onclick: async () => {

@@ -26,6 +26,19 @@
         "7421"
       ],
       "port": 7421
+    },
+    {
+      "name": "village",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "dist/server/cli.js",
+        "serve",
+        "--workspace",
+        "examples/village",
+        "--port",
+        "7422"
+      ],
+      "port": 7422
     }
   ]
 }

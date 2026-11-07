@@ -111,6 +111,8 @@ export interface Scene {
   layers: TileLayer[];
   instances: Instance[];
   events: GameEvent[];
+  /** Draw instances lower on screen in front of higher ones (top-down / RPG depth). */
+  ySort?: boolean;
   /** Scene variables (reset when the scene starts). Read as `scene.name`. */
   variables: Record<string, Value>;
   rev: string;
@@ -281,6 +283,7 @@ export function normalizeScene(v: unknown): Scene {
     layers,
     instances,
     events: normalizeEvents(o.events),
+    ...(o.ySort === true ? { ySort: true } : {}),
     variables: vars(o.variables),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
@@ -341,4 +344,6 @@ export interface GameBundle {
   game: GameProject;
   scenes: Record<string, Scene>;
   sprites: Record<string, SpriteAsset>;
+  /** Script sources by name (scripts/<name>.js). */
+  scripts?: Record<string, string>;
 }

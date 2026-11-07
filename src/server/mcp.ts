@@ -105,6 +105,7 @@ import { exportSpritesheet, previewPng, referenceBitmap, referenceCoverage, rend
 import { decodePng, encodePng } from './png.js';
 import type { Workspace } from './store.js';
 import { GAME_INSTRUCTIONS, registerGameTools } from './mcpGame.js';
+import { type ProjectInfo, ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
 
 const VERSION = '0.1.0';
 const AUTHOR = 'claude';
@@ -156,7 +157,7 @@ Every change is saved immediately; undo reverts your own recent changes.`;
 type Content = CallToolResult['content'];
 
 /** Builds an MCP server exposing drawing tools over a workspace. */
-export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string | undefined } = {}): McpServer {
+export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string | undefined; registry?: ProjectRegistry } = {}): McpServer {
   const server = new McpServer({ name: 'spritifer', version: VERSION }, { instructions: INSTRUCTIONS + '\n' + GAME_INSTRUCTIONS });
   const history = new Map<string, string[]>();
 
@@ -1817,12 +1818,53 @@ Use it to stamp tiles into an environment, copy a body part between frames, or a
     return text(`Undid ${steps} step(s). ${stack.length} more available.`);
   });
 
-  tool('editor_url', 'Get the URL of the Spritifer web editor where the user can see and edit the sprites live.', {}, () => {
+  // ------------------------------------------------------------------ projects
+
+  const registry = opts.registry ?? new ProjectRegistry({ root: defaultProjectsRoot(), defaultDir: ws.dir });
+  registry.seed(ws);
+  let projectId = registry.idFor(ws.dir);
+  const projectUrl = () => {
     const url = opts.editorUrl?.();
-    return text(url ? `Editor: ${url}\nWorkspace: ${ws.dir}` : `The editor is not running in this process. Start it with \`npx spritifer serve\`. Workspace: ${ws.dir}`);
+    return url ? `${url}/?project=${encodeURIComponent(projectId)}#/` : undefined;
+  };
+
+  tool('editor_url', 'Get the URL of the Spritifer web editor showing the current project, where the user sees your changes live.', {}, () => {
+    const url = projectUrl();
+    return text(url ? `Editor: ${url}\nProject: ${projectId} (${ws.dir})` : `The editor is not running in this process. Start it with \`npx spritifer serve\`. Project folder: ${ws.dir}`);
   }, { readOnlyHint: true });
 
-  registerGameTools(ws, { tool, text, image });
+  // Every tool works on the current project: the game tools see it through this proxy.
+  const currentWs = new Proxy({} as Workspace, {
+    get: (_t, p) => {
+      const v = (ws as unknown as Record<string | symbol, unknown>)[p];
+      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(ws) : v;
+    },
+  });
+  const game = registerGameTools(currentWs, { tool, text, image });
+
+  const describeProject = (p: ProjectInfo) => `${p.id === projectId ? '* ' : '  '}${p.id}: "${p.name}" — ${p.sprites} sprites, ${p.scenes} scenes, ${p.scripts} scripts — ${p.dir}`;
+
+  tool('list_projects', 'List the game projects (folders with their own sprites, scenes, scripts and game.json). * marks the current one.', {}, () => {
+    return text(`Projects (new ones go in ${registry.root}):\n${registry.list().map(describeProject).join('\n')}`);
+  }, { readOnlyHint: true });
+
+  const switchTo = (p: ProjectInfo) => {
+    ws = registry.get(p.id);
+    projectId = p.id;
+    history.clear();
+    game.reset();
+    const url = projectUrl();
+    return text(`Current project: ${p.id} "${p.name}" — ${p.sprites} sprites, ${p.scenes} scenes, ${p.scripts} scripts — ${p.dir}${url ? `\nEditor: ${url}` : ''}\nAll tools now work on this project.`);
+  };
+
+  tool('open_project', 'Switch to another project by id, title or folder path (an existing folder that is not listed yet gets added). All tools then work on it.', { project: z.string() }, (a) => switchTo(registry.resolve(a.project)));
+
+  tool(
+    'create_project',
+    `Create a new game project folder in ${'the projects folder'} and switch to it. Templates: ${TEMPLATES.map((t) => `${t.id} (${t.description})`).join('; ')}.`,
+    { name: z.string().describe('Game title, e.g. "Dungeon Quest"'), template: z.enum(['empty', 'platformer', 'rpg']).optional() },
+    (a) => switchTo(registry.create(a.name, a.template ?? 'empty')),
+  );
 
   return server;
 }

@@ -1,6 +1,6 @@
 # Spritifer
 
-Strumento **all-in-one per creare giochi 2D**: disegni gli **asset** in pixel art (personaggi animati, tileset, oggetti), costruisci le **scene** con mappe a tile e oggetti, dai vita al gioco con **eventi** visuali (quando → se → fai) e **comportamenti** pronti (piattaforme, top-down, nemici, proiettili), lo provi con **Play** e lo **esporti per il web** in un unico file HTML.
+Strumento **all-in-one per creare giochi 2D**: disegni gli **asset** in pixel art (personaggi animati, tileset, oggetti), costruisci le **scene** con mappe a tile e oggetti, dai vita al gioco con **eventi** visuali (quando → se → fai), **comportamenti** pronti (piattaforme, top-down, nemici, proiettili) e **script** JavaScript (dialoghi con scelte, NPC, battaglie a turni, interfacce), lo provi con **Play** e lo **esporti per il web** in un unico file HTML. Gestisce **più progetti**: platform, RPG o qualsiasi altro gioco, ognuno nella sua cartella.
 
 Un **server MCP** permette a Claude Code di fare tutto questo con te: disegnare pixel per pixel, creare oggetti ed eventi, comporre i livelli, giocare il gioco in modalità headless per verificarlo ed esportarlo. Mentre Claude lavora, l'editor nel browser si aggiorna in tempo reale.
 
@@ -19,12 +19,22 @@ Avvia l'editor web (sprite salvati in `./sprites`):
 npm start
 ```
 
-Poi apri http://localhost:7420. Le schede in alto sono le parti del gioco: **Sprites** (asset), **Objects** (tipi di oggetto), **Scenes** (livelli), **Game** (impostazioni ed export), più **Play** ed **Export**.
+Poi apri http://localhost:7420. Le schede in alto sono le parti del gioco: **Sprites** (asset), **Objects** (tipi di oggetto), **Scenes** (livelli), **Scripts** (codice), **Game** (impostazioni ed export), più **Play** ed **Export**. Il pulsante con il nome del progetto, in alto a sinistra, apre la pagina **Projects**.
 
-Per vedere un gioco completo, apri l'esempio *Coin Quest* (platform con titolo, livello, nemici, monete, HUD e schermata di vittoria):
+### Progetti
+
+Ogni gioco è una cartella con i suoi sprite, scene, script e `game.json`. Dalla pagina **Projects** puoi:
+
+- creare un progetto nuovo, vuoto o da un modello: **Platformer** (*Coin Quest*: titolo, livello, monete, nemici, schermata di vittoria) o **RPG** (*Village*: villaggio top-down, NPC con dialoghi e scelte, missione, negozio, scrigno, battaglie a turni);
+- aprire una cartella esistente qualsiasi;
+- passare da un progetto all'altro. Ogni scheda del browser può mostrare un progetto diverso (`?project=<id>` nell'indirizzo).
+
+I progetti nuovi vanno in `~/Documents/Spritifer` (si cambia con `--projects DIR` o `SPRITIFER_PROJECTS`). La cartella passata con `--workspace` è il progetto aperto all'avvio. Claude fa lo stesso via MCP con `list_projects`, `open_project` e `create_project`.
+
+Per vedere gli esempi senza crearne una copia:
 
 ```bash
-node dist/server/cli.js serve --workspace examples/coin-quest
+node dist/server/cli.js serve --workspace examples/village
 ```
 
 ## Creare giochi
@@ -51,6 +61,46 @@ Ogni evento è **QUANDO** *trigger* **SE** *condizioni* **FAI** *azioni*:
 - **Azioni**: imposta/aggiungi variabile, muovi, posiziona, velocità, salto, crea istanza, distruggi, animazione, lampeggio, vai alla scena, riavvia scena, suono (effetti retrò sintetizzati: `coin`, `jump`, `hit`, `explosion`, `powerup`, `laser`…), scuoti la camera, messaggio a schermo, invia messaggio, salva variabile (record nel browser), log.
 
 Le **espressioni** sono un piccolo linguaggio sicuro: `score + 10`, `self.hp <= 0 && !self.invincible`, `"Monete: " + score`, `count("enemy") == 0`, `dist(self.x, self.y, other.x, other.y) < 32`, `random(1, 6)`. Nomi: variabili globali (`score`), `self.*` e `other.*` (campi come `x`, `y`, `vx`, `vy`, `flipX`, `onGround` e le proprietà), `scene.*`, `game.time`.
+
+### Script
+
+Per quello che gli eventi non esprimono bene (conversazioni con scelte, NPC, sequenze animate, battaglie a turni, inventari, menu e HUD personalizzati) ci sono gli **script**: file JavaScript in `scripts/<nome>.js`, scritti nella scheda **Scripts** (evidenziazione, numeri di riga, salvataggio automatico, riferimento API a lato) o da Claude con `write_script` / `edit_script`.
+
+```js
+// Un NPC: dai al tipo di oggetto il comportamento { type: "script", name: "shopkeeper" }
+behavior('shopkeeper', {
+  interact: async (self, player) => {
+    await say('Pozioni fresche!', { speaker: 'Mercante' })
+    const c = await choose(['Compra (10 oro)', 'Esci'])
+    if (c === 0 && vars.gold >= 10) { vars.gold -= 10; vars.potions += 1; sound('coin') }
+  },
+})
+
+// Una funzione richiamabile dagli eventi con l'azione "Run script function"
+func('apriPorta', async (self) => { self.play('open'); await wait(0.3); goto('dungeon') })
+
+// Interfaccia disegnata ogni frame
+onDraw((ui) => ui.bar(4, 4, 60, 6, vars.hp, vars.maxHp, '#e43b44'))
+```
+
+- **Registrazione**: `behavior` (hook `create`, `update`, `collide`, `interact`, `destroy`), `func`, `onStart`, `onSceneStart`, `onUpdate`, `onDraw`, `onMessage`.
+- **Flusso asincrono**: `await say()` (finestra di dialogo con effetto macchina da scrivere, il gioco si ferma), `await choose([...])` (menu), `await wait(s)`, `await waitUntil(fn)`, `await self.moveTo(x, y)`, `lockControls()`.
+- **Stato e istanze**: `vars`, `scene`, `game`, `camera`, `find`, `findOne`, `player()`, `spawn`; le istanze espongono campi (`x`, `y`, `facing`…), proprietà (`self.hp`) e metodi (`play`, `destroy`, `flash`, `face`, `say`).
+- **Interfaccia**: `ui.text`, `ui.panel`, `ui.bar`, `ui.rect`, `ui.sprite`.
+
+Gli eventi possono usare le azioni **Dialog** (finestra RPG), **Run script function** e **Lock player controls**, e il trigger **Player interacts**: si attiva quando il giocatore preme azione accanto all'istanza o rivolto verso di essa.
+
+Nel playtest di Claude gli script girano isolati (`node:vm`). I dialoghi si confermano da soli e `choices` sceglie le voci dei menu, così Claude può verificare missioni e battaglie senza browser.
+
+### RPG
+
+- Giocatore `topdown` con animazioni `walk_<dir>`/`idle_<dir>` e hitbox sui piedi.
+- Scene con **Sort by Y**: chi sta più in basso viene disegnato davanti, per dare profondità.
+- Livelli tile *solid* per muri, alberi e acqua.
+- NPC con il trigger *Player interacts* o con un comportamento script (`interact`).
+- Battaglie in una scena dedicata, guidate da `onSceneStart('battle', async () => …)`, con menu `choose` e barre HP in `onDraw`.
+
+L'esempio `examples/village` mostra tutto questo in circa 200 righe di script.
 
 ### Editor di scena
 
@@ -113,7 +163,9 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Export/import | `export_spritesheet` (PNG + JSON), `import_png` |
 | Gioco | `game_reference` (vocabolario completo di trigger, condizioni, azioni, comportamenti ed espressioni), `get_game`, `set_game`, `set_object`, `delete_object`, `set_events` |
 | Scene | `create_scene`, `get_scene` (anche la mappa come griglia di caratteri), `update_scene`, `delete_scene`, `set_tile_layer`, `paint_tiles` (righe + legenda come `draw_pixels`, o rettangoli), `place_instances`, `update_instances`, `tileset_preview` (indici dei tile) |
-| Verifica ed export del gioco | `validate_game`, `preview_scene`, `playtest` (gioco headless con input scriptati: log, stato, screenshot), `export_game` (HTML unico per il web), `undo_game_change` |
+| Script | `script_reference` (API completa con esempio di battaglia), `list_scripts`, `read_script`, `write_script` (con controllo della sintassi e nomi registrati), `edit_script`, `delete_script` |
+| Progetti | `list_projects`, `open_project`, `create_project` (vuoto, platformer, rpg) |
+| Verifica ed export del gioco | `validate_game`, `preview_scene`, `playtest` (gioco headless con input scriptati e risposte ai menu: log, dialoghi, stato, screenshot), `export_game` (HTML unico per il web), `undo_game_change` |
 | Altro | `undo`, `editor_url` |
 
 `draw_pixels` è lo strumento principale: Claude scrive righe di caratteri e una legenda colore, ad esempio:
@@ -221,7 +273,8 @@ Il workspace (default `./sprites`) contiene tutto il progetto:
 
 - `<nome>.sprite.json`: dimensioni, palette, livelli, frame, tag, griglia tile opzionale e pixel RGBA (base64) per ogni cel `livello/frame`;
 - `<nome>.scene.json`: dimensioni in tile, tileset, livelli tile (indici, `-1` = vuoto), istanze, eventi e variabili della scena;
-- `game.json`: impostazioni, variabili globali e tipi di oggetto con comportamenti ed eventi.
+- `game.json`: impostazioni, variabili globali e tipi di oggetto con comportamenti ed eventi;
+- `scripts/<nome>.js`: gli script del gioco.
 
 Sono JSON leggibili e versionabili. L'editor e il server MCP leggono e scrivono gli stessi file; un watcher notifica le modifiche al browser via WebSocket.
 
@@ -236,7 +289,7 @@ npm run dev:web     # Vite con hot reload (richiede `npm start` per l'API)
 Struttura:
 
 - `src/core` — modello dello sprite, algoritmi di disegno, layout degli spritesheet (condiviso tra browser e Node)
-- `src/core/game` — modello del gioco, catalogo eventi/comportamenti, linguaggio delle espressioni, **motore** deterministico e indipendente dal rendering (usato dal browser e dai playtest headless)
+- `src/core/game` — modello del gioco, catalogo eventi/comportamenti, linguaggio delle espressioni, host degli script (API, dialoghi, menu, UI), **motore** deterministico e indipendente dal rendering (usato dal browser e dai playtest headless)
 - `src/runtime` — player per il browser (canvas, input, touch, gamepad, audio sintetizzato), compilato in `dist/runtime/player.js` e incorporato nei giochi esportati
-- `src/server` — workspace su disco, codec PNG, server HTTP + WebSocket, server MCP, export del gioco, CLI
-- `src/web` — editor nel browser (TypeScript senza framework): sprite, oggetti, eventi, scene, impostazioni del gioco
+- `src/server` — workspace su disco, registro dei progetti, codec PNG, server HTTP + WebSocket, server MCP, esecuzione degli script con `node:vm`, export del gioco, CLI
+- `src/web` — editor nel browser (TypeScript senza framework): progetti, sprite, oggetti, eventi, scene, script, impostazioni del gioco

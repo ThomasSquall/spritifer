@@ -11,6 +11,9 @@ import { renderObjects } from './objectsView.js';
 import { renderScenes } from './scenesView.js';
 import { renderGameSettings } from './gameView.js';
 import { type SceneEditorHandle, mountSceneEditor } from './sceneEditor.js';
+import { renderProjects } from './projectsView.js';
+import { renderScripts } from './scriptsView.js';
+import { currentProjectId } from './api.js';
 
 const root = document.getElementById('app')!;
 
@@ -19,7 +22,8 @@ let current: { editor: Editor; view: ReturnType<typeof mountEditor> } | null = n
 let sceneEd: SceneEditorHandle | null = null;
 /** Re-renders the current list page after remote changes. */
 let refreshPage: (() => void) | null = null;
-let page: 'sprites' | 'objects' | 'scenes' | 'game' | 'sprite' | 'scene' = 'sprites';
+let page: 'sprites' | 'objects' | 'scenes' | 'scripts' | 'game' | 'sprite' | 'scene' | 'projects' = 'sprites';
+let scriptsPage: ReturnType<typeof renderScripts> | null = null;
 
 /** The previous in-app page, so "back" from the sprite editor returns where the user came from. */
 let prevHash = '#/';
@@ -43,6 +47,10 @@ async function route(): Promise<void> {
     sceneEd.destroy();
     sceneEd = null;
   }
+  if (scriptsPage) {
+    scriptsPage.destroy();
+    scriptsPage = null;
+  }
   refreshPage = null;
   const hash = location.hash;
   let m: RegExpExecArray | null;
@@ -64,9 +72,34 @@ async function route(): Promise<void> {
   try {
     await state.ensure();
   } catch (err) {
+    const stale = /not found/i.test((err as Error).message);
+    if (stale) {
+      // The page is newer than the server process (e.g. an MCP server started before an update).
+      page = 'sprites';
+      root.replaceChildren(
+        Object.assign(document.createElement('div'), {
+          className: 'stale-server',
+          innerHTML: `<h2>The Spritifer server needs a restart</h2><p>The server running on this port is an older version that doesn't know about games (objects, scenes, variables). The editor pages are new, but nothing can be loaded or saved.</p><p>Stop the old process and start it again: <code>npm start</code>, or restart Claude Code if it started the server through MCP.</p><p><a href="#/">← Back to sprites</a></p>`,
+        }),
+      );
+      return;
+    }
     toast(`Could not load the game project: ${(err as Error).message}`, 'error');
   }
 
+  if (hash === '#/projects') {
+    page = 'projects';
+    document.title = 'Projects · Spritifer';
+    refreshPage = renderProjects(root);
+    return;
+  }
+  if ((m = /^#\/scripts(?:\/(.+))?$/.exec(hash))) {
+    page = 'scripts';
+    document.title = 'Scripts · Spritifer';
+    scriptsPage = renderScripts(root, m[1] ? decodeURIComponent(m[1]) : null, (name) => go(name ? `#/scripts/${encodeURIComponent(name)}` : '#/scripts'));
+    refreshPage = scriptsPage.refresh;
+    return;
+  }
   if ((m = /^#\/scene\/(.+)$/.exec(hash))) {
     page = 'scene';
     try {
@@ -121,8 +154,20 @@ state.subscribe(() => {
 });
 
 async function onRemoteChange(e: ChangeEvent): Promise<void> {
-  const kind = e.type.replace('-changed', '') as 'sprite' | 'scene' | 'game';
+  const kind = e.type.replace('-changed', '') as 'sprite' | 'scene' | 'game' | 'script';
   const fromSelf = e.updatedBy === 'editor';
+  // Changes to other projects (e.g. Claude working elsewhere) only show a note.
+  const mine = currentProjectId();
+  if (e.project && mine && e.project !== mine) {
+    if (page === 'projects') refreshSoon();
+    if (e.updatedBy === 'claude') toast(`Claude is editing project "${e.project}"`, 'claude');
+    return;
+  }
+  if (kind === 'script') {
+    await state.remote('script', e.rev);
+    if (page === 'scripts') refreshSoon();
+    return;
+  }
   if (kind === 'game') {
     const changed = await state.remote('game', e.rev);
     if (changed && !fromSelf) {

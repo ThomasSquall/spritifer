@@ -8,9 +8,12 @@ import { type SheetLayout, type SheetOptions, buildSpritesheet } from '../core/s
 import { encodePng } from './png.js';
 import { exportSpritesheet, previewPng, spriteFromPng } from './ops.js';
 import type { Workspace } from './store.js';
+import { ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
 import { createScene, normalizeGame, normalizeScene } from '../core/game/types.js';
 import { buildGameHtml, exportGame, loadGameBundle, loadRuntime, renderScenePreview } from './game.js';
 import { renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
+import { SCRIPT_TEMPLATE, checkScriptSyntax, inspectScripts } from './scripts.js';
+import { SCRIPT_REFERENCE } from '../core/game/script.js';
 
 const WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
 
@@ -36,10 +39,12 @@ export interface EditorServer {
   close(): Promise<void>;
 }
 
-/** Serves the editor UI, a small REST API over the workspace and a live-change WebSocket. */
-export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1'): Promise<EditorServer> {
+/** Serves the editor UI, a REST API over the projects and a live-change WebSocket. */
+export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1', opts: { registry?: ProjectRegistry } = {}): Promise<EditorServer> {
+  const registry = opts.registry ?? new ProjectRegistry({ root: defaultProjectsRoot(), defaultDir: ws.dir });
+  registry.seed(ws);
   const server = http.createServer((req, res) => {
-    handle(ws, req, res).catch((err: unknown) => {
+    handleRequest(registry, req, res, watchProject).catch((err: unknown) => {
       const status = err instanceof HttpError ? err.status : 400;
       sendJson(res, status, { error: err instanceof Error ? err.message : String(err) });
     });
@@ -50,31 +55,44 @@ export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1
   wss.on('connection', (sock) => {
     clients.add(sock);
     sock.on('close', () => clients.delete(sock));
-    sock.send(JSON.stringify({ type: 'hello', workspace: ws.dir }));
+    sock.send(JSON.stringify({ type: 'hello', workspace: ws.dir, project: registry.defaultId }));
   });
-  const stopWatching = ws.watch((name, kind) => {
-    let rev: string | null = null;
-    let updatedBy: string | undefined;
-    try {
-      if (kind === 'sprite') {
-        const raw = ws.readRaw(name);
-        rev = raw.rev;
-        updatedBy = raw.updatedBy;
-      } else if (kind === 'scene') {
-        const sc = ws.loadScene(name);
-        rev = sc.rev;
-        updatedBy = sc.updatedBy;
-      } else {
-        const g = ws.loadGame();
-        rev = ws.hasGame() ? g.rev : null;
-        updatedBy = g.updatedBy;
+
+  // One file watcher per project that a client has used; change messages say which project changed.
+  const watchers = new Map<string, () => void>();
+  function watchProject(id: string, pws: Workspace): void {
+    if (watchers.has(id)) return;
+    watchers.set(id, pws.watch((name, kind) => {
+      let rev: string | null = null;
+      let updatedBy: string | undefined;
+      try {
+        if (kind === 'sprite') {
+          const raw = pws.readRaw(name);
+          rev = raw.rev;
+          updatedBy = raw.updatedBy;
+        } else if (kind === 'script') {
+          rev = pws.scriptExists(name) ? String(Date.now()) : null;
+        } else if (kind === 'scene') {
+          const sc = pws.loadScene(name);
+          rev = sc.rev;
+          updatedBy = sc.updatedBy;
+        } else {
+          const g = pws.loadGame();
+          rev = pws.hasGame() ? g.rev : null;
+          updatedBy = g.updatedBy;
+        }
+      } catch {
+        // Deleted.
       }
-    } catch {
-      // Deleted.
-    }
-    const msg = JSON.stringify({ type: `${kind}-changed`, name, rev, updatedBy });
-    for (const c of clients) c.send(msg);
-  });
+      const msg = JSON.stringify({ type: `${kind}-changed`, project: id, name, rev, updatedBy });
+      for (const c of clients) c.send(msg);
+    }));
+  }
+  watchProject(registry.defaultId, ws);
+  const stopWatching = () => {
+    for (const stop of watchers.values()) stop();
+    watchers.clear();
+  };
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -95,12 +113,52 @@ export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1
   });
 }
 
-async function handle(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+async function handleRequest(registry: ProjectRegistry, req: http.IncomingMessage, res: http.ServerResponse, watch: (id: string, ws: Workspace) => void): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
-  const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  let parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
   const method = req.method ?? 'GET';
-
   if (parts[0] !== 'api') return serveStatic(url.pathname, res);
+
+  if (parts[1] === 'projects') return handleProjects(registry, req, res, parts.slice(2));
+  // /api/p/<project>/... works on that project; plain /api/... on the default one.
+  let id = registry.defaultId;
+  if (parts[1] === 'p' && parts[2]) {
+    id = parts[2];
+    parts = ['api', ...parts.slice(3)];
+  }
+  let ws: Workspace;
+  try {
+    ws = registry.get(id);
+  } catch (err) {
+    throw new HttpError(404, (err as Error).message);
+  }
+  watch(id, ws);
+  return handle(ws, req, res, parts, url, method);
+}
+
+async function handleProjects(registry: ProjectRegistry, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {
+  const method = req.method ?? 'GET';
+  if (!parts[0]) {
+    if (method === 'GET') return sendJson(res, 200, { root: registry.root, defaultId: registry.defaultId, projects: registry.list(), templates: TEMPLATES });
+    if (method === 'POST') {
+      const body = (await readJson(req)) as { name: string; template?: string };
+      return sendJson(res, 201, registry.create(body.name, body.template));
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (parts[0] === 'open' && method === 'POST') {
+    const body = (await readJson(req)) as { dir: string };
+    return sendJson(res, 200, registry.add(body.dir));
+  }
+  if (method === 'DELETE') {
+    registry.forget(parts[0]);
+    return sendJson(res, 200, { ok: true });
+  }
+  if (method === 'GET') return sendJson(res, 200, registry.info(registry.get(parts[0]).dir));
+  throw new HttpError(404, 'Not found');
+}
+
+async function handle(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[], url: URL, method: string): Promise<void> {
 
   // /api/workspace
   if (parts[1] === 'workspace' && method === 'GET') {
@@ -118,6 +176,7 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
 
   if (parts[1] === 'game') return handleGame(ws, req, res, parts.slice(2), url);
   if (parts[1] === 'scenes') return handleScenes(ws, req, res, parts.slice(2), url);
+  if (parts[1] === 'scripts') return handleScripts(ws, req, res, parts.slice(2));
 
   if (parts[1] !== 'sprites') throw new HttpError(404, 'Not found');
   const name = parts[2];
@@ -249,6 +308,46 @@ async function handleGame(ws: Workspace, req: http.IncomingMessage, res: http.Se
     ws.saveGame(game, 'editor');
     for (const s of changed) ws.saveScene(s, 'editor');
     return sendJson(res, 200, { ok: true });
+  }
+  throw new HttpError(404, 'Not found');
+}
+
+async function handleScripts(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {
+  const method = req.method ?? 'GET';
+  const name = parts[0];
+  if (!name) {
+    if (method === 'GET') return sendJson(res, 200, ws.listScripts());
+    if (method === 'POST') {
+      const body = (await readJson(req)) as { name: string; code?: string };
+      if (ws.scriptExists(body.name)) throw new HttpError(409, `Script "${body.name}" already exists`);
+      ws.writeScript(body.name, body.code ?? SCRIPT_TEMPLATE);
+      return sendJson(res, 201, { name: body.name });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (name === '_info' && method === 'GET') return sendJson(res, 200, inspectScripts(ws.loadScripts()));
+  if (name === '_reference' && method === 'GET') return sendJson(res, 200, { reference: SCRIPT_REFERENCE });
+  const sub = parts[1];
+  if (!sub) {
+    if (method === 'GET') return sendJson(res, 200, { name, code: ws.readScript(name) });
+    if (method === 'PUT') {
+      const body = (await readJson(req)) as { code: string };
+      if (typeof body.code !== 'string') throw new HttpError(400, 'Missing code');
+      ws.writeScript(name, body.code);
+      return sendJson(res, 200, { ok: true, syntaxError: checkScriptSyntax(body.code, `scripts/${name}.js`) });
+    }
+    if (method === 'DELETE') {
+      ws.removeScript(name);
+      return sendJson(res, 200, { ok: true });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (sub === 'rename' && method === 'POST') {
+    const body = (await readJson(req)) as { to: string };
+    if (ws.scriptExists(body.to)) throw new HttpError(409, `Script "${body.to}" already exists`);
+    ws.writeScript(body.to, ws.readScript(name));
+    ws.removeScript(name);
+    return sendJson(res, 200, { name: body.to });
   }
   throw new HttpError(404, 'Not found');
 }

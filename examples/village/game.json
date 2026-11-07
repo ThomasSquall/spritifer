@@ -1,0 +1,160 @@
+{
+ "format": "spritifer-game",
+ "version": 1,
+ "title": "Village",
+ "width": 320,
+ "height": 180,
+ "zoom": "fit",
+ "background": "#1a1c2c",
+ "startScene": "town",
+ "gravity": 900,
+ "touchControls": true,
+ "variables": {
+  "hp": 20,
+  "maxHp": 20,
+  "gold": 0,
+  "potions": 1,
+  "slain": "",
+  "opened": "",
+  "returnX": 0,
+  "returnY": 0,
+  "foeId": "",
+  "grace": 0,
+  "metElder": false,
+  "quest": 0,
+  "questDone": false
+ },
+ "objects": [
+  {
+   "name": "player",
+   "properties": {},
+   "behaviors": [
+    {
+     "type": "topdown",
+     "speed": 70,
+     "diagonals": true
+    },
+    {
+     "type": "camera",
+     "smoothing": 0.15
+    }
+   ],
+   "events": [],
+   "sprite": "hero",
+   "animation": "idle_down",
+   "hitbox": {
+    "x": 3,
+    "y": 9,
+    "w": 10,
+    "h": 7
+   }
+  },
+  {
+   "name": "elder",
+   "properties": {},
+   "behaviors": [
+    {
+     "type": "solid"
+    },
+    {
+     "type": "script",
+     "name": "elder"
+    }
+   ],
+   "events": [],
+   "sprite": "elder",
+   "hitbox": {
+    "x": 2,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   }
+  },
+  {
+   "name": "merchant",
+   "properties": {},
+   "behaviors": [
+    {
+     "type": "solid"
+    },
+    {
+     "type": "script",
+     "name": "merchant"
+    }
+   ],
+   "events": [],
+   "sprite": "merchant",
+   "hitbox": {
+    "x": 2,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   }
+  },
+  {
+   "name": "chest",
+   "properties": {},
+   "behaviors": [
+    {
+     "type": "solid"
+    },
+    {
+     "type": "script",
+     "name": "chest"
+    }
+   ],
+   "events": [],
+   "sprite": "chest",
+   "animation": "closed",
+   "hitbox": {
+    "x": 1,
+    "y": 4,
+    "w": 14,
+    "h": 9
+   }
+  },
+  {
+   "name": "slime",
+   "properties": {},
+   "behaviors": [
+    {
+     "type": "chase",
+     "target": "player",
+     "speed": 28,
+     "range": 72
+    },
+    {
+     "type": "script",
+     "name": "monster"
+    }
+   ],
+   "events": [],
+   "sprite": "slime",
+   "animation": "walk",
+   "hitbox": {
+    "x": 2,
+    "y": 4,
+    "w": 12,
+    "h": 8
+   }
+  },
+  {
+   "name": "hero_battle",
+   "properties": {},
+   "behaviors": [],
+   "events": [],
+   "sprite": "hero",
+   "animation": "idle_right"
+  },
+  {
+   "name": "foe",
+   "properties": {},
+   "behaviors": [],
+   "events": [],
+   "sprite": "big_slime",
+   "animation": "walk"
+  }
+ ],
+ "rev": "er05zmzs",
+ "updatedBy": "claude"
+}

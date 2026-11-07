@@ -12,13 +12,16 @@ class GameState {
   saved = false;
   sprites: SpriteSummary[] = [];
   scenes: SceneSummary[] = [];
+  /** What the project scripts register (for dropdowns) and their loading errors. */
+  scriptInfo: { behaviors: string[]; functions: string[]; errors: string[] } = { behaviors: [], functions: [], errors: [] };
   private listeners = new Set<Listener>();
   private saveTimer = 0;
   private lastRev = '';
   private dirty = false;
 
   async load(): Promise<void> {
-    const [game, sprites, scenes] = await Promise.all([gameApi.getGame(), api.list(), gameApi.listScenes()]);
+    const [game, sprites, scenes, scriptInfo] = await Promise.all([gameApi.getGame(), api.list(), gameApi.listScenes(), gameApi.scriptInfo().catch(() => this.scriptInfo)]);
+    this.scriptInfo = scriptInfo;
     this.saved = game.saved;
     this.game = game;
     this.lastRev = game.rev;
@@ -79,7 +82,12 @@ class GameState {
   }
 
   /** Handles live notifications from the server (Claude editing through MCP, other tabs). */
-  async remote(kind: 'sprite' | 'scene' | 'game', rev: string | null): Promise<boolean> {
+  async remote(kind: 'sprite' | 'scene' | 'game' | 'script', rev: string | null): Promise<boolean> {
+    if (kind === 'script') {
+      this.scriptInfo = await gameApi.scriptInfo();
+      this.emit();
+      return true;
+    }
     if (kind === 'game') {
       if (rev === this.lastRev || this.dirty) return false;
       const g = await gameApi.getGame();

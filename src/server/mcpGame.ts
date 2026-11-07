@@ -24,6 +24,8 @@ import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePrev
 import { encodePng } from './png.js';
 import { scaleBitmap } from '../core/draw.js';
 import type { Workspace } from './store.js';
+import { SCRIPT_TEMPLATE, checkScriptSyntax, inspectScripts, nodeEvaluator } from './scripts.js';
+import { SCRIPT_REFERENCE } from '../core/game/script.js';
 
 type Content = CallToolResult['content'];
 
@@ -46,6 +48,9 @@ Model:
 - Object types (set_object) are reusable things: player, enemy, coin, door, bullet, score label. Each has a sprite (+ default animation tag), an optional hitbox, behaviors (platformer, topdown, solid, bullet, patrol, chase, sine, camera, bounded, lifetime, wrap), properties (instance variables with defaults) and an event sheet. Text objects (text = expression, hud = true) show scores and labels.
 - Scenes (create_scene) are tile maps (cols x rows, tileSize from the tileset sprite's grid) with tile layers (solid layers collide) and placed instances. Scenes have their own event sheet and variables.
 - Events: WHEN trigger IF conditions DO actions. Call game_reference for the full vocabulary (triggers, conditions, actions, behaviors, keys, sounds, expression syntax).
+- Scripts (write_script, script_reference) are JavaScript files for anything events can't express well: RPG dialogs with choices (await say / choose), NPC behaviors (behavior(name, { interact })), cutscenes (moveTo, wait, lockControls), turn-based battles, inventories and custom UI (onDraw with bars, panels, text). Attach script behaviors to object types with { type: "script", name } and call script functions from events with the action "call".
+- RPGs: top-down player (topdown + camera, sprite tags walk_<dir>/idle_<dir>), scene ySort: true for depth, solid tile layers for walls, the "interact" trigger (or a script behavior's interact hook) for talking and opening chests, a battle scene driven by onSceneStart('battle', async () => ...).
+- Projects: list_projects / open_project / create_project switch between games; each project folder has its own sprites, scenes, scripts and game.json.
 
 Workflow that works:
 1. Draw the art first with the sprite tools: a tileset sprite with tile_width/tile_height (index = position in the grid, row-major), characters with tags idle/run/jump/fall (platformer) or idle_<dir>/walk_<dir> (topdown, as rig_animate makes them), items, enemies. tileset_preview shows each tile's index.
@@ -56,7 +61,7 @@ Workflow that works:
 6. export_game and tell the user where index.html is (it runs offline and can be uploaded to itch.io as an HTML game).
 `;
 
-export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
+export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): void } {
   const { tool, text, image } = h;
   const AUTHOR = 'claude';
   const history: { kind: 'game' | 'scene'; name: string; json: string | null }[] = [];
@@ -99,7 +104,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
     const counts = new Map<string, number>();
     for (const i of s.instances) counts.set(i.object, (counts.get(i.object) ?? 0) + 1);
     const lines = [
-      `Scene "${s.name}": ${s.cols}x${s.rows} tiles of ${s.tileSize}px (${s.cols * s.tileSize}x${s.rows * s.tileSize}px), tileset ${s.tileset ?? 'none'}${s.background ? `, background ${s.background}` : ''}`,
+      `Scene "${s.name}": ${s.cols}x${s.rows} tiles of ${s.tileSize}px (${s.cols * s.tileSize}x${s.rows * s.tileSize}px), tileset ${s.tileset ?? 'none'}${s.background ? `, background ${s.background}` : ''}${s.ySort ? ', y-sorted' : ''}`,
       `Layers: ${s.layers.map((l, i) => `[${i}] ${l.name}${l.solid ? ' (solid)' : ''}${l.visible ? '' : ' (hidden)'}: ${l.tiles.filter((t) => t >= 0).length} tiles`).join(', ')}`,
       `Instances (${s.instances.length}): ${[...counts].map(([k, v]) => `${k}×${v}`).join(', ') || 'none'}`,
     ];
@@ -385,7 +390,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
 
   tool(
     'update_scene',
-    'Change scene properties: size (keeps the top-left content), tileset, background color, parallax background sprites, scene variables, name.',
+    'Change scene properties: size (keeps the top-left content), tileset, background color, parallax background sprites, scene variables, y-sort, name.',
     {
       scene: z.string(),
       new_name: z.string().optional(),
@@ -395,9 +400,14 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
       background: z.string().optional(),
       backgrounds: z.array(z.object({ sprite: z.string(), parallax: z.number().optional(), repeat_x: z.boolean().optional(), y: z.number().optional() })).optional().describe('Parallax background images, back to front'),
       variables: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
+      y_sort: z.boolean().optional().describe('Draw instances lower on screen in front (top-down / RPG depth)'),
     },
     (a) => {
       const { scene } = mutateScene(a.scene, (s) => {
+        if (a.y_sort !== undefined) {
+          if (a.y_sort) s.ySort = true;
+          else delete s.ySort;
+        }
         if (a.cols !== undefined || a.rows !== undefined) resizeScene(s, a.cols ?? s.cols, a.rows ?? s.rows);
         if (a.tileset !== undefined) {
           if (a.tileset === null) delete s.tileset;
@@ -641,7 +651,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
 
   tool(
     'playtest',
-    'Run the game headless for some seconds with scripted input and report what happened: logs (log/say actions, scene changes, runtime errors), final variables and instances, snapshots at sample times, and a screenshot of the last frame (plus one per sample time with screenshots: true). Keys: left, right, up, down, action (space/Z), action2 (X), letters...',
+    'Run the game headless for some seconds with scripted input and report what happened: logs (log/say actions, dialogs and choices, scene changes, runtime and script errors), final variables and instances, snapshots at sample times, and a screenshot of the last frame (plus one per sample time with screenshots: true). Keys: left, right, up, down, action (space/Z), action2 (X), letters...',
     {
       seconds: z.number().min(0.1).max(120),
       scene: z.string().optional().describe('Start in this scene (default: the start scene)'),
@@ -650,13 +660,18 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
       screenshots: z.boolean().optional().describe('Also screenshot every sample time'),
       scale: z.number().int().min(1).max(4).optional(),
       seed: z.number().int().optional(),
+      choices: z.array(z.number().int().min(0)).optional().describe('Menu answers for choose() dialogs, in order (default: first entry)'),
+      auto_dialog: z.boolean().optional().describe('Confirm dialogs automatically (default true); false = drive them with "action" key inputs'),
     },
-    (a) => {
+    async (a) => {
       const loaded = loadGameBundle(ws);
       if (!Object.keys(loaded.bundle.scenes).length) throw new Error('No scenes yet');
       const shots: Buffer[] = [];
       const scale = a.scale ?? 2;
-      const r = runPlaytest(loaded.bundle, {
+      const r = await runPlaytest(loaded.bundle, {
+        evaluator: nodeEvaluator,
+        choices: a.choices,
+        autoDialog: a.auto_dialog,
         seconds: a.seconds,
         scene: a.scene,
         inputs: a.inputs as PlaytestInput[] | undefined,
@@ -683,6 +698,58 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
     { readOnlyHint: true },
   );
 
+  // ------------------------------------------------------------------ scripts
+
+  const scriptSummary = () => {
+    const info = inspectScripts(ws.loadScripts());
+    return `Registered behaviors: ${info.behaviors.join(', ') || 'none'}\nRegistered functions: ${info.functions.join(', ') || 'none'}${info.errors.length ? `\nERRORS:\n${info.errors.map((e) => '- ' + e).join('\n')}` : ''}`;
+  };
+
+  tool('script_reference', 'Reference of the game scripting API (JavaScript): behaviors, functions callable from events, hooks, async dialogs/menus/waits/movement, instance handles, UI drawing, with a turn-based battle example. Read it before writing scripts.', {}, () => text(SCRIPT_REFERENCE), { readOnlyHint: true });
+
+  tool('list_scripts', 'List the project scripts (scripts/<name>.js) and what they register.', {}, () => {
+    const list = ws.listScripts();
+    return text(`${list.length ? list.map((s) => `${s.name}.js (${s.size} bytes)`).join('\n') : 'No scripts yet. Create one with write_script.'}\n\n${scriptSummary()}`);
+  }, { readOnlyHint: true });
+
+  tool('read_script', 'Read a script with line numbers.', { name: z.string() }, (a) => {
+    const code = ws.readScript(a.name);
+    return text(code.split('\n').map((l, i) => `${String(i + 1).padStart(4)}  ${l}`).join('\n'));
+  }, { readOnlyHint: true });
+
+  const saveScript = (name: string, code: string) => {
+    const err = checkScriptSyntax(code, `scripts/${name}.js`);
+    if (err) throw new Error(`Syntax error, not saved: ${err}`);
+    ws.writeScript(name, code);
+    return text(`Saved scripts/${name}.js (${code.split('\n').length} lines).\n${scriptSummary()}\n\n${problemsText()}`);
+  };
+
+  tool(
+    'write_script',
+    'Create or replace a game script (plain JavaScript, see script_reference). It is syntax-checked before saving; the result lists what all scripts register and any loading errors. Then attach behaviors to object types ({ type: "script", name }) or call functions from events (action "call"), and verify with playtest.',
+    { name: z.string().describe('Script name (file scripts/<name>.js), e.g. "npcs", "battle"'), code: z.string() },
+    (a) => saveScript(a.name, a.code),
+  );
+
+  tool(
+    'edit_script',
+    'Replace one exact snippet in a script (must match exactly once). Prefer this to write_script for small changes.',
+    { name: z.string(), find: z.string(), replace: z.string() },
+    (a) => {
+      const code = ws.readScript(a.name);
+      const n = code.split(a.find).length - 1;
+      if (n !== 1) throw new Error(n ? `The snippet appears ${n} times; include more context` : 'Snippet not found (read_script shows the current code)');
+      return saveScript(a.name, code.replace(a.find, () => a.replace));
+    },
+  );
+
+  tool('delete_script', 'Delete a script file.', { name: z.string() }, (a) => {
+    ws.removeScript(a.name);
+    return text(`Deleted scripts/${a.name}.js.\n${scriptSummary()}`);
+  }, { destructiveHint: true });
+
+  void SCRIPT_TEMPLATE;
+
   tool('validate_game', 'Check the game for problems: unknown triggers/actions/behaviors, bad expressions, missing sprites, objects and scenes.', {}, () => text(problemsText()), { readOnlyHint: true });
 
   tool('export_game', 'Export the game as a single self-contained index.html (plays offline, on any static host, or uploaded to itch.io as an HTML5 game). Default folder: <workspace>/export/web/<title>/.', { out_dir: z.string().optional() }, (a) => {
@@ -707,4 +774,11 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
     }
     return text(`Undid ${steps} change(s): ${done.join(', ')}. ${history.length} more available.`);
   });
+
+  return {
+    /** Forget undo history (after switching projects). */
+    reset: () => {
+      history.length = 0;
+    },
+  };
 }

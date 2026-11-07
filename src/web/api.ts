@@ -26,30 +26,51 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
 
 const enc = encodeURIComponent;
 
+/** The project shown in this tab (?project=<id> in the URL); null = the server's default project. */
+export function projectId(): string | null {
+  return new URLSearchParams(location.search).get('project');
+}
+
+/** API prefix of the current project. */
+export function apiBase(): string {
+  const id = projectId();
+  return id ? `/api/p/${encodeURIComponent(id)}` : '/api';
+}
+
+/** Project id the server opened by default (from the live socket's hello). */
+export let defaultProjectId: string | null = null;
+
+/** Id of the project shown in this tab. */
+export function currentProjectId(): string | null {
+  return projectId() ?? defaultProjectId;
+}
+
 export const api = {
-  workspace: () => req<{ dir: string; exportDir: string }>('GET', '/api/workspace'),
-  list: () => req<SpriteSummary[]>('GET', '/api/sprites'),
-  get: (name: string) => req<SpriteFile>('GET', `/api/sprites/${enc(name)}`),
-  save: (file: SpriteFile) => req<{ rev: string }>('PUT', `/api/sprites/${enc(file.name)}`, file),
+  workspace: () => req<{ dir: string; exportDir: string }>('GET', `${apiBase()}/workspace`),
+  list: () => req<SpriteSummary[]>('GET', `${apiBase()}/sprites`),
+  get: (name: string) => req<SpriteFile>('GET', `${apiBase()}/sprites/${enc(name)}`),
+  save: (file: SpriteFile) => req<{ rev: string }>('PUT', `${apiBase()}/sprites/${enc(file.name)}`, file),
   create: (body: { name: string; width: number; height: number; palette?: string; grid?: { width: number; height: number } | null }) =>
-    req<{ name: string; rev: string }>('POST', '/api/sprites', body),
-  remove: (name: string) => req<{ ok: true }>('DELETE', `/api/sprites/${enc(name)}`),
-  rename: (name: string, to: string) => req<{ name: string; rev: string }>('POST', `/api/sprites/${enc(name)}/rename`, { to }),
-  duplicate: (name: string, to: string) => req<{ name: string }>('POST', `/api/sprites/${enc(name)}/duplicate`, { to }),
-  importPng: (body: { name: string; png: string; frameWidth?: number; frameHeight?: number }) => req<{ name: string }>('POST', '/api/import', body),
+    req<{ name: string; rev: string }>('POST', `${apiBase()}/sprites`, body),
+  remove: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/sprites/${enc(name)}`),
+  rename: (name: string, to: string) => req<{ name: string; rev: string }>('POST', `${apiBase()}/sprites/${enc(name)}/rename`, { to }),
+  duplicate: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/sprites/${enc(name)}/duplicate`, { to }),
+  importPng: (body: { name: string; png: string; frameWidth?: number; frameHeight?: number }) => req<{ name: string }>('POST', `${apiBase()}/import`, body),
   export: (name: string, opts: SheetOptions & { byTag?: boolean }) =>
-    req<{ files: { png: string; json: string; width: number; height: number; frames: number }[] }>('POST', `/api/sprites/${enc(name)}/export`, opts),
+    req<{ files: { png: string; json: string; width: number; height: number; frames: number }[] }>('POST', `${apiBase()}/sprites/${enc(name)}/export`, opts),
   sheetUrl: (name: string, opts: SheetOptions, kind: 'png' | 'json', download = false) => {
     const q = new URLSearchParams();
     for (const [k, v] of Object.entries(opts)) if (v !== undefined && v !== '' && !Array.isArray(v)) q.set(k, String(v));
     if (download) q.set('download', '1');
-    return `/api/sprites/${enc(name)}/sheet.${kind}?${q}`;
+    return `${apiBase()}/sprites/${enc(name)}/sheet.${kind}?${q}`;
   },
-  previewUrl: (name: string, rev: string, scale = 4) => `/api/sprites/${enc(name)}/preview.png?scale=${scale}&r=${enc(rev)}`,
+  previewUrl: (name: string, rev: string, scale = 4) => `${apiBase()}/sprites/${enc(name)}/preview.png?scale=${scale}&r=${enc(rev)}`,
 };
 
 export interface ChangeEvent {
-  type: 'sprite-changed' | 'scene-changed' | 'game-changed';
+  type: 'sprite-changed' | 'scene-changed' | 'game-changed' | 'script-changed';
+  /** Project the change belongs to. */
+  project?: string;
   name: string;
   rev: string | null;
   updatedBy?: string;
@@ -66,6 +87,7 @@ export function connectLive(onChange: (e: ChangeEvent) => void, onStatus: (conne
     };
     sock.onmessage = (m) => {
       const msg = JSON.parse(String(m.data));
+      if (msg.type === 'hello' && typeof msg.project === 'string') defaultProjectId = msg.project;
       if (typeof msg.type === 'string' && msg.type.endsWith('-changed')) onChange(msg);
     };
     sock.onclose = () => {

@@ -14,7 +14,8 @@ const SUFFIX = '.sprite.json';
 const SCENE_SUFFIX = '.scene.json';
 export const GAME_FILE = 'game.json';
 
-export type ChangeKind = 'sprite' | 'scene' | 'game';
+export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script';
+const SCRIPT_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
 
 export interface SpriteSummary {
   name: string;
@@ -183,6 +184,59 @@ export class Workspace {
     fs.rmSync(this.sceneFile(name));
   }
 
+  // ------------------------------------------------------------------ scripts
+
+  get scriptsDir(): string {
+    return path.join(this.dir, 'scripts');
+  }
+
+  scriptFile(name: string): string {
+    if (!SCRIPT_RE.test(name)) throw new Error(`Invalid script name "${name}". Use letters, digits, "_" and "-".`);
+    return path.join(this.scriptsDir, `${name}.js`);
+  }
+
+  scriptExists(name: string): boolean {
+    return fs.existsSync(this.scriptFile(name));
+  }
+
+  listScripts(): { name: string; size: number; updatedAt: number }[] {
+    if (!fs.existsSync(this.scriptsDir)) return [];
+    return fs
+      .readdirSync(this.scriptsDir)
+      .filter((f) => f.endsWith('.js') && SCRIPT_RE.test(f.slice(0, -3)))
+      .map((f) => {
+        const st = fs.statSync(path.join(this.scriptsDir, f));
+        return { name: f.slice(0, -3), size: st.size, updatedAt: st.mtimeMs };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  readScript(name: string): string {
+    const f = this.scriptFile(name);
+    if (!fs.existsSync(f)) {
+      const names = this.listScripts().map((s) => s.name);
+      throw new Error(`Script "${name}" not found.${names.length ? ' Available: ' + names.join(', ') : ' There are no scripts yet.'}`);
+    }
+    return fs.readFileSync(f, 'utf8');
+  }
+
+  /** All scripts as name → source. */
+  loadScripts(): Record<string, string> {
+    return Object.fromEntries(this.listScripts().map((s) => [s.name, this.readScript(s.name)]));
+  }
+
+  writeScript(name: string, code: string): void {
+    const f = this.scriptFile(name);
+    fs.mkdirSync(this.scriptsDir, { recursive: true });
+    const tmp = path.join(this.scriptsDir, `.${name}.${process.pid}.tmp`);
+    fs.writeFileSync(tmp, code);
+    fs.renameSync(tmp, f);
+  }
+
+  removeScript(name: string): void {
+    fs.rmSync(this.scriptFile(name));
+  }
+
   private atomicWrite(target: string, data: string): void {
     const tmp = path.join(this.dir, `.${path.basename(target)}.${process.pid}.tmp`);
     fs.writeFileSync(tmp, data);
@@ -216,6 +270,21 @@ export class Workspace {
         }, 40),
       );
     });
-    return () => watcher.close();
+    // Scripts live in a subfolder (fs.watch is not recursive everywhere).
+    fs.mkdirSync(this.scriptsDir, { recursive: true });
+    const scriptWatcher = fs.watch(this.scriptsDir, (_event, filename) => {
+      if (!filename || !filename.endsWith('.js') || filename.startsWith('.')) return;
+      const name = filename.slice(0, -3);
+      const key = 'script:' + name;
+      clearTimeout(timers.get(key));
+      timers.set(key, setTimeout(() => {
+        timers.delete(key);
+        onChange(name, 'script');
+      }, 40));
+    });
+    return () => {
+      watcher.close();
+      scriptWatcher.close();
+    };
   }
 }

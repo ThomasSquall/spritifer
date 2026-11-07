@@ -8,6 +8,7 @@ import { ACTION_MAP, BEHAVIOR_MAP, CONDITION_MAP, TRIGGER_MAP, withDefaults } fr
 import { type ExprContext, MATH_FUNCTIONS, compile, fmt, parseTarget, toNum, truthy } from './expr.js';
 import { measureText } from './font.js';
 import type { Behavior, EventStep, GameBundle, GameEvent, GameProject, Hitbox, ObjectType, Scene, SpriteAsset, Value } from './types.js';
+import { type ScriptEvaluator, ScriptHost, wrapText } from './script.js';
 
 export const STEP = 1 / 60;
 
@@ -34,6 +35,10 @@ export interface EngineOptions {
   log?: (message: string) => void;
   /** Start in this scene instead of game.startScene. */
   scene?: string;
+  /** How scripts are evaluated (the server uses node:vm). */
+  evaluator?: ScriptEvaluator;
+  /** Headless runs: confirm dialogs automatically after `delay` seconds, picking menu entries from `choices` (default 0). */
+  autoDialog?: { choices: number[]; delay: number };
 }
 
 interface Rect {
@@ -187,7 +192,11 @@ export class World {
   private errors = new Set<string>();
   private solidLayers: number[][] = [];
   private started = false;
+  private gameStarted = false;
   readonly opts: EngineOptions;
+  readonly scripts: ScriptHost;
+  /** Player controls ignore input (cutscenes, battles). */
+  controlsLocked = false;
 
   constructor(bundle: GameBundle, opts: EngineOptions = {}) {
     this.bundle = bundle;
@@ -209,6 +218,8 @@ export class World {
         }
       }
     }
+    this.scripts = new ScriptHost(this);
+    this.scripts.load(bundle.scripts ?? {}, opts.evaluator);
     const names = Object.keys(bundle.scenes);
     const first = opts.scene && bundle.scenes[opts.scene] ? opts.scene : bundle.scenes[this.game.startScene] ? this.game.startScene : names[0];
     if (!first) throw new Error('The game has no scenes');
@@ -265,6 +276,7 @@ export class World {
     this.shake = { until: 0, intensity: 0 };
     this.camera = { x: 0, y: 0 };
     this.solidLayers = scene.layers.filter((l) => l.solid).map((l) => l.tiles);
+    this.scripts?.resetScene();
     for (const inst of scene.instances) {
       const type = this.objectMap.get(inst.object);
       if (!type) continue;
@@ -295,7 +307,42 @@ export class World {
     for (const a of [...this.actors]) this.onCreated(a);
     for (const a of [...this.actors]) this.fireObject(a, 'start');
     this.fireScene('start');
+    if (!this.gameStarted) {
+      this.gameStarted = true;
+      for (const fn of this.scripts.startHooks) this.scripts.run('onStart', fn);
+    }
+    for (const h of this.scripts.sceneHooks) if (h.scene === null || h.scene === this.scene.name) this.scripts.run(`onSceneStart(${this.scene.name})`, h.fn, this.scene.name);
     this.updateCamera(true);
+  }
+
+  /** Script behaviors attached to an instance, with their hooks and params. */
+  private scriptBehaviors(a: Actor): { name: string; hooks: import('./script.js').BehaviorHooks; params: Record<string, Value> }[] {
+    const out = [];
+    for (const b of a.behaviors) {
+      if (b.type !== 'script') continue;
+      const name = String(b.name ?? '');
+      const hooks = this.scripts.behaviors.get(name);
+      if (!hooks) {
+        this.error(`object ${a.type.name}`, new Error(`no script behavior "${name}"`));
+        continue;
+      }
+      out.push({ name, hooks, params: b as Record<string, Value> });
+    }
+    return out;
+  }
+
+  gotoScene(name: string): void {
+    if (!this.bundle.scenes[name]) throw new Error(`no scene "${name}"`);
+    this.pendingScene = name;
+  }
+
+  emit(message: string): void {
+    this.messages.push(message);
+  }
+
+  /** Lets pending script continuations run (call after step() when scripts use await). */
+  async settle(): Promise<void> {
+    for (let i = 0; i < 40; i++) await null;
   }
 
   private onCreated(a: Actor): void {
@@ -306,6 +353,7 @@ export class World {
       a.vy = Math.sin(ang) * toNum(bullet.speed);
     }
     this.fireObject(a, 'created');
+    for (const sb of this.scriptBehaviors(a)) this.scripts.run(`${sb.name}.create`, sb.hooks.create, this.scripts.handle(a), sb.params);
   }
 
   // ------------------------------------------------------------------ main loop
@@ -313,6 +361,21 @@ export class World {
   step(input: InputFrame = emptyInput(), dt = STEP): void {
     this.input = input;
     if (!this.started) this.begin();
+
+    // Dialogs pause the game; the frame that closes one doesn't run gameplay either (the key press is used up).
+    const confirm = input.pressed.has('action') || input.pressed.has('enter') || input.clicks.length > 0;
+    const inDialog = this.scripts.updateDialog(dt, confirm, input.pressed.has('up'), input.pressed.has('down'), this.opts.autoDialog ?? null);
+    this.scripts.tick(dt);
+    if (inDialog) {
+      for (const a of this.actors) if (!a.destroyed) this.updateAnimation(a, dt);
+      this.updateTexts();
+      this.clock += dt;
+      this.frame++;
+      this.applyPendingScene();
+      return;
+    }
+    for (const fn of this.scripts.updateHooks) this.scripts.run('onUpdate', fn, dt);
+
     for (const a of this.actors) {
       a.flags.landed = a.flags.hitWall = a.flags.leftScene = false;
       a.flags.animEnd = null;
@@ -347,6 +410,16 @@ export class World {
       }
     }
 
+    // Script collide hooks (start of touch).
+    for (const a of live) {
+      const sbs = this.scriptBehaviors(a).filter((sb) => sb.hooks.collide);
+      if (!sbs.length) continue;
+      for (const o of now.get(a) ?? []) {
+        if (a.touching.has(o) || o.destroyed || a.destroyed) continue;
+        for (const sb of sbs) this.scripts.run(`${sb.name}.collide`, sb.hooks.collide, this.scripts.handle(a), this.scripts.handle(o));
+      }
+    }
+
     // Events.
     for (const a of [...this.actors]) {
       if (a.destroyed) continue;
@@ -354,10 +427,12 @@ export class World {
       this.runObjectEvents(a, touching);
       a.touching = touching;
     }
+    if (this.pressedKey('action')) this.interact();
     this.runSceneEvents();
     for (let round = 0; round < 10 && this.messages.length; round++) {
       const msgs = this.messages.splice(0);
       for (const m of msgs) {
+        for (const fn of this.scripts.messageHooks.get(m) ?? []) this.scripts.run(`onMessage(${m})`, fn, m);
         for (const a of [...this.actors]) if (!a.destroyed) this.fireObject(a, 'message', (t) => t.message === m);
         this.fireScene('message', (t) => t.message === m);
       }
@@ -370,11 +445,47 @@ export class World {
     this.time += dt;
     this.clock += dt;
     this.frame++;
+    this.applyPendingScene();
+  }
 
+  private applyPendingScene(): void {
     if (this.pendingScene) {
       const s = this.pendingScene;
       this.pendingScene = null;
       this.loadScene(s);
+    }
+  }
+
+  /** The player pressed action: talk to / use the instance next to it (or in front of it). */
+  private interact(): void {
+    const players = this.actors.filter((a) => !a.destroyed && a.behaviors.some((b) => (b.type === 'topdown' || b.type === 'platformer') && b.controls !== false));
+    for (const p of players) {
+      const b = p.box();
+      const reach = 8;
+      const dir = p.behavior('topdown') ? p.facing : p.flipX ? 'left' : 'right';
+      const probe = {
+        x: b.x - (dir === 'left' ? reach : 1),
+        y: b.y - (dir === 'up' ? reach : 1),
+        w: b.w + 2 + (dir === 'left' || dir === 'right' ? reach : 0),
+        h: b.h + 2 + (dir === 'up' || dir === 'down' ? reach : 0),
+      };
+      let best: Actor | undefined;
+      let bd = Infinity;
+      for (const o of this.actors) {
+        if (o === p || o.destroyed || o.type.hud) continue;
+        const hasHook = o.type.events.some((e) => !e.disabled && e.trigger.type === 'interact') || this.scriptBehaviors(o).some((sb) => sb.hooks.interact);
+        if (!hasHook || !overlap(probe, o.box())) continue;
+        const ob = o.box();
+        const d = Math.hypot(ob.x + ob.w / 2 - (b.x + b.w / 2), ob.y + ob.h / 2 - (b.y + b.h / 2));
+        if (d < bd) {
+          bd = d;
+          best = o;
+        }
+      }
+      if (!best) continue;
+      this.fireObject(best, 'interact', undefined, p);
+      for (const sb of this.scriptBehaviors(best)) this.scripts.run(`${sb.name}.interact`, sb.hooks.interact, this.scripts.handle(best), this.scripts.handle(p));
+      return;
     }
   }
 
@@ -469,7 +580,11 @@ export class World {
   // ------------------------------------------------------------------ behaviors
 
   private key(k: string): boolean {
-    return this.input.down.has(k);
+    return !this.controlsLocked && this.input.down.has(k);
+  }
+
+  private pressedKey(k: string): boolean {
+    return !this.controlsLocked && this.input.pressed.has(k);
   }
 
   private pickAnim(a: Actor, candidates: string[]): void {
@@ -503,7 +618,7 @@ export class World {
           const wasGround = a.onGround;
           a.coyote = a.onGround ? 0.1 : a.coyote - dt;
           if (a.onGround) a.airJumps = b.doubleJump === true ? 1 : 0;
-          if (ctl && (this.input.pressed.has('up') || this.input.pressed.has('action'))) a.jumpBuffer = 0.12;
+          if (ctl && (this.pressedKey('up') || this.pressedKey('action'))) a.jumpBuffer = 0.12;
           else a.jumpBuffer -= dt;
           if (a.jumpBuffer > 0 && a.coyote > 0) {
             a.vy = -toNum(b.jump);
@@ -643,6 +758,11 @@ export class World {
           else if (bx.x + bx.w < 0) a.x += this.widthPx + bx.w;
           if (bx.y > this.heightPx) a.y -= this.heightPx + bx.h;
           else if (bx.y + bx.h < 0) a.y += this.heightPx + bx.h;
+          break;
+        }
+        case 'script': {
+          const hooks = this.scripts.behaviors.get(String(b.name ?? ''));
+          if (hooks?.update) this.scripts.run(`${b.name}.update`, hooks.update, this.scripts.handle(a), dt, b as Record<string, Value>);
           break;
         }
         case 'lifetime': {
@@ -846,6 +966,7 @@ export class World {
     if (a.destroyed) return;
     a.destroyed = true;
     this.fireObject(a, 'destroyed');
+    for (const sb of this.scriptBehaviors(a)) this.scripts.run(`${sb.name}.destroy`, sb.hooks.destroy, this.scripts.handle(a));
   }
 
   spawn(objectName: string, x: number, y: number, vx = 0, vy = 0): Actor | undefined {
@@ -936,12 +1057,9 @@ export class World {
         if (a) a.flashUntil = this.time + toNum(s.seconds);
         return;
       }
-      case 'gotoScene': {
-        const name = String(s.scene);
-        if (!this.bundle.scenes[name]) throw new Error(`no scene "${name}"`);
-        this.pendingScene = name;
+      case 'gotoScene':
+        this.gotoScene(String(s.scene));
         return;
-      }
       case 'restartScene':
         this.pendingScene = this.scene.name;
         return;
@@ -960,6 +1078,20 @@ export class World {
       }
       case 'emit':
         this.messages.push(String(s.message));
+        return;
+      case 'call': {
+        const name = String(s.function ?? '');
+        const fn = this.scripts.functions.get(name);
+        if (!fn) throw new Error(`no script function "${name}"`);
+        const arg = s.arg === undefined || s.arg === '' ? undefined : this.eval(s.arg, ctx);
+        this.scripts.run(`func ${name}`, fn, this.scripts.handle(ctx.self), this.scripts.handle(ctx.other), arg);
+        return;
+      }
+      case 'talk':
+        void this.scripts.openDialog(fmt(this.eval(s.text, ctx)), { speaker: String(s.speaker ?? '') });
+        return;
+      case 'lockControls':
+        this.controlsLocked = s.locked !== false;
         return;
       case 'save': {
         const k = String(s.var);
@@ -1213,12 +1345,15 @@ export function renderWorld(w: World, r: Renderer): void {
       hud.push(a);
       return;
     }
-    items.push({ z: a.z, order: 1000 + i, draw: () => drawActor(w, r, a, camX, camY) });
+    // y-sort: within the same z, instances lower on screen are drawn in front (top-down / RPG depth).
+    const order = scene.ySort ? 1000 + a.box().y + a.box().h + i / 10000 : 1000 + i;
+    items.push({ z: a.z, order, draw: () => drawActor(w, r, a, camX, camY) });
   });
   items.sort((p, q) => p.z - q.z || p.order - q.order);
   for (const it of items) it.draw();
   hud.sort((p, q) => p.z - q.z);
   for (const a of hud) drawActor(w, r, a, 0, 0);
+  w.scripts.draw(r, camX, camY);
 
   if (w.message && w.time < w.message.until) {
     const m = measureText(w.message.text);
@@ -1231,6 +1366,64 @@ export function renderWorld(w: World, r: Renderer): void {
     r.rect(bx, by, bw, 1, '#ffffff', 0.5);
     r.rect(bx, by + bh - 1, bw, 1, '#ffffff', 0.5);
     r.text(w.message.text, bx + 6, by + 6, '#ffffff', s);
+  }
+  drawDialog(w, r);
+}
+
+/** RPG-style dialog box with typewriter text, speaker name, portrait and choices. */
+function drawDialog(w: World, r: Renderer): void {
+  const d = w.scripts.dialog;
+  if (!d) return;
+  const vw = w.game.width;
+  const vh = w.game.height;
+  const portrait = d.portrait ? w.bundle.sprites[d.portrait] : undefined;
+  const pad = 6;
+  const pw = portrait ? Math.min(portrait.width, 48) + pad : 0;
+  const cols = Math.max(8, Math.floor((vw - 16 - pad * 2 - pw) / 4));
+  const lines = wrapText(d.text, cols);
+  const textH = Math.max(3, lines.length) * 6;
+  const bh = Math.max(textH, portrait ? Math.min(portrait.height, 48) : 0) + pad * 2;
+  const bx = 6;
+  const bw = vw - 12;
+  const by = vh - bh - 6;
+  const frame = (x: number, y: number, ww: number, hh: number) => {
+    r.rect(x, y, ww, hh, '#1a1c2c', 0.92);
+    r.rect(x, y, ww, 1, '#f4f4f4');
+    r.rect(x, y + hh - 1, ww, 1, '#f4f4f4');
+    r.rect(x, y, 1, hh, '#f4f4f4');
+    r.rect(x + ww - 1, y, 1, hh, '#f4f4f4');
+  };
+  frame(bx, by, bw, bh);
+  if (portrait && portrait.frames.length) {
+    const f = portrait.frames[0];
+    r.image(portrait.name, f.x, f.y, Math.min(f.w, 48), Math.min(f.h, 48), bx + pad, by + pad, { flipX: false, opacity: 1, angle: 0 });
+  }
+  if (d.speaker) {
+    const sw = d.speaker.length * 4 + 7;
+    frame(bx + 4, by - 9, sw, 11);
+    r.text(d.speaker, bx + 8, by - 6, '#ffcd75', 1);
+  }
+  let left = Math.floor(d.shown);
+  lines.forEach((line, i) => {
+    if (left <= 0) return;
+    const part = line.slice(0, left);
+    left -= line.length + 1;
+    r.text(part, bx + pad + pw, by + pad + i * 6, '#f4f4f4', 1);
+  });
+  const done = d.shown >= d.text.length;
+  if (done && d.choices) {
+    const cw = Math.max(...d.choices.map((c) => c.length)) * 4 + 18;
+    const ch = d.choices.length * 8 + 8;
+    const cx = vw - cw - 8;
+    const cy = by - ch - (d.speaker ? 11 : 3);
+    frame(cx, cy, cw, ch);
+    d.choices.forEach((c, i) => {
+      if (i === d.selected) r.text('>', cx + 4, cy + 5 + i * 8, '#ffcd75', 1);
+      r.text(c, cx + 11, cy + 5 + i * 8, i === d.selected ? '#ffcd75' : '#f4f4f4', 1);
+    });
+  } else if (done && Math.floor(w.clock * 3) % 2 === 0) {
+    r.rect(bx + bw - 9, by + bh - 7, 3, 2, '#f4f4f4');
+    r.rect(bx + bw - 8, by + bh - 5, 1, 1, '#f4f4f4');
   }
 }
 
@@ -1276,8 +1469,28 @@ export interface PlaytestResult {
   world: World;
 }
 
-export function runPlaytest(bundle: GameBundle, opts: { seconds: number; inputs?: PlaytestInput[]; scene?: string; seed?: number; sampleAt?: number[]; onSample?: (w: World) => void }): PlaytestResult {
-  const world = new World(bundle, { seed: opts.seed, scene: opts.scene });
+export interface PlaytestOptions {
+  seconds: number;
+  inputs?: PlaytestInput[];
+  scene?: string;
+  seed?: number;
+  sampleAt?: number[];
+  onSample?: (w: World) => void;
+  /** Answers for dialog menus, in order (default: first entry). */
+  choices?: number[];
+  /** Confirm dialogs automatically (default true). Set false to drive them with "action" inputs. */
+  autoDialog?: boolean;
+  evaluator?: EngineOptions['evaluator'];
+}
+
+/** Runs the game headless. Async so script continuations (await say/wait...) run between frames. */
+export async function runPlaytest(bundle: GameBundle, opts: PlaytestOptions): Promise<PlaytestResult> {
+  const world = new World(bundle, {
+    seed: opts.seed,
+    scene: opts.scene,
+    evaluator: opts.evaluator,
+    autoDialog: opts.autoDialog === false ? undefined : { choices: [...(opts.choices ?? [])], delay: 0.4 },
+  });
   const inputs = opts.inputs ?? [];
   const frames = Math.round(Math.min(600, Math.max(0, opts.seconds)) / STEP);
   const samples: PlaytestResult['samples'] = [];
@@ -1294,6 +1507,7 @@ export function runPlaytest(bundle: GameBundle, opts: { seconds: number; inputs?
     const pressed = new Set([...down].filter((k) => !prev.has(k)));
     const released = new Set([...prev].filter((k) => !down.has(k)));
     world.step({ down, pressed, released, clicks, pointer: clicks[0] ?? null });
+    await world.settle();
     prev = down;
     if (sampleFrames.has(f + 1)) {
       samples.push(world.snapshot());

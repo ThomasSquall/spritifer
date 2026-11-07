@@ -26,6 +26,9 @@ export interface SheetContext {
   animations: string[];
   /** Variable names for assignment suggestions. */
   variables: string[];
+  /** Names registered by the project scripts. */
+  functions: string[];
+  scriptBehaviors: string[];
 }
 
 const sounds = new SoundBoard();
@@ -81,6 +84,12 @@ export function paramInput(spec: ParamSpec, value: Value | undefined, onChange: 
       break;
     case 'choice':
       input = select(spec.options ?? [], String(v), onChange);
+      break;
+    case 'function':
+      input = select([['', ctx.functions.length ? '— function —' : '— no script functions —'], ...ctx.functions], String(v), onChange);
+      break;
+    case 'scriptBehavior':
+      input = select([['', ctx.scriptBehaviors.length ? '— script behavior —' : '— none in scripts —'], ...ctx.scriptBehaviors], String(v), onChange);
       break;
     case 'sound': {
       const wrap = h('span', { class: 'param-inline' });

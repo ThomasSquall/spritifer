@@ -12,6 +12,8 @@ import { type Renderer, World, renderWorld } from '../core/game/engine.js';
 import { type Problem, validateGame } from '../core/game/catalog.js';
 import type { GameBundle, GameProject, Scene, SpriteAsset } from '../core/game/types.js';
 import { encodePng } from './png.js';
+import { inspectScripts } from './scripts.js';
+import type { ScriptInfo } from '../core/game/script.js';
 import type { Workspace } from './store.js';
 
 /** Sprite names a game actually uses (objects, tilesets, backgrounds). */
@@ -60,6 +62,7 @@ export interface LoadedGame {
   bundle: GameBundle;
   sheets: Map<string, Bitmap>;
   problems: Problem[];
+  scriptInfo: ScriptInfo;
 }
 
 /** Loads the game, all scenes and the sprites they use from the workspace. */
@@ -77,8 +80,10 @@ export function loadGameBundle(ws: Workspace, opts: { images?: boolean } = {}): 
     sprites[name] = opts.images ? built.asset : { ...built.asset, image: undefined };
     sheets.set(name, built.sheet);
   }
-  const problems = validateGame(game, scenes, available);
-  return { bundle: { game, scenes: Object.fromEntries(scenes.map((s) => [s.name, s])), sprites }, sheets, problems };
+  const scripts = ws.loadScripts();
+  const scriptInfo = inspectScripts(scripts);
+  const problems = validateGame(game, scenes, available, scriptInfo);
+  return { bundle: { game, scenes: Object.fromEntries(scenes.map((s) => [s.name, s])), sprites, scripts }, sheets, problems, scriptInfo };
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +237,7 @@ export function renderScenePreview(loaded: LoadedGame, sceneName: string, opts: 
   const W = scene.cols * scene.tileSize;
   const H = scene.rows * scene.tileSize;
   const game: GameProject = { ...loaded.bundle.game, width: W, height: H };
-  const world = new World({ ...loaded.bundle, game }, { scene: sceneName });
+  const world = new World({ ...loaded.bundle, game, scripts: {} }, { scene: sceneName });
   world.camera = { x: 0, y: 0 };
   world.updateTexts();
   const r = new BitmapRenderer(W, H, loaded.sheets);
@@ -242,7 +247,7 @@ export function renderScenePreview(loaded: LoadedGame, sceneName: string, opts: 
     for (let y = 0; y < H; y += scene.tileSize) r.rect(0, y, W, 1, '#ffffff', 0.12);
   }
   // Starting viewport (where the camera begins).
-  const start = new World(loaded.bundle, { scene: sceneName });
+  const start = new World({ ...loaded.bundle, scripts: {} }, { scene: sceneName });
   start.step();
   const vw = loaded.bundle.game.width;
   const vh = loaded.bundle.game.height;

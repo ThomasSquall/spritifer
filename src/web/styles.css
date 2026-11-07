@@ -388,3 +388,53 @@ button.on { background: var(--accent); color: #181425; border-color: var(--accen
 .event-row.add { align-items: center; }
 .param.p-expr { flex: 1 1 240px; min-width: 0; }
 .param.p-expr input.expr { width: 100%; min-width: 120px; }
+.text-preview-row { display: flex; align-items: center; gap: 8px; }
+.text-preview { flex: 1; font: 12px var(--mono); color: var(--ok); padding: 4px 8px; background: #12141a; border-radius: 6px; border: 1px solid var(--line); white-space: pre-wrap; }
+.text-preview.err { color: #ff8a90; border-color: #6b2a31; }
+.text-box p { margin: 0; }
+.stale-server { max-width: 640px; margin: 80px auto; padding: 24px 28px; background: var(--panel); border: 1px solid var(--danger); border-radius: 12px; }
+.stale-server h2 { margin-top: 0; }
+
+/* projects */
+.appnav-project { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; margin-right: 8px; border-radius: 6px; border: 1px solid var(--line); color: var(--text); text-decoration: none; font-weight: 600; max-width: 220px; }
+.appnav-project span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.appnav-project:hover, .appnav-project.active { border-color: var(--accent); }
+.projects-grid { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+.project-card .thumb { height: 140px; background: #101217; overflow: hidden; }
+.project-card .thumb img { max-width: 100%; max-height: 100%; object-fit: contain; image-rendering: pixelated; }
+.project-card.current { border-color: var(--accent); }
+.project-card .path { font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.badge { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; background: var(--accent); color: #181425; border-radius: 4px; padding: 1px 5px; margin-left: 6px; vertical-align: 1px; }
+.badge.muted-badge { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
+.tpl-list { display: flex; flex-direction: column; gap: 6px; }
+.tpl-card { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; height: auto; padding: 8px 10px; text-align: left; white-space: normal; background: transparent; }
+.tpl-card.on { border-color: var(--accent); background: #2b2a22; color: var(--text); }
+
+/* scripts */
+.script-page { height: 100vh; }
+.script-layout { min-height: 0; flex: 1; }
+.script-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 14px 18px; gap: 10px; height: calc(100vh - 48px); }
+.script-head h2 { margin: 0; font-size: 18px; font-family: var(--mono); }
+.script-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
+.code-editor { display: grid; grid-template-columns: auto minmax(0, 1fr); min-height: 0; border: 1px solid var(--line); border-radius: 8px; background: #101217; overflow: hidden; }
+.code-gutter { margin: 0; padding: 10px 8px 10px 12px; color: #4f5668; text-align: right; user-select: none; overflow: hidden; border-right: 1px solid var(--line); }
+.code-area { position: relative; min-width: 0; min-height: 0; }
+.code-gutter, .code-hl, .code-input { font: 12.5px/1.55 var(--mono); tab-size: 2; }
+.code-hl, .code-input { position: absolute; inset: 0; margin: 0; padding: 10px 12px; white-space: pre; overflow: auto; border: 0; }
+.code-hl { color: #d6dae4; pointer-events: none; scrollbar-width: none; }
+.code-hl::-webkit-scrollbar { display: none; }
+.code-input { background: transparent; color: transparent; caret-color: var(--accent); resize: none; outline: none; }
+.code-input::selection { background: #feae3440; color: transparent; }
+.tk-c { color: #6b7590; font-style: italic; }
+.tk-s { color: #a7f070; }
+.tk-n { color: #ef7d57; }
+.tk-k { color: #b58cff; }
+.tk-a { color: #feae34; }
+.script-error { color: #ff8a90; background: #2c1a1e; border: 1px solid #6b2a31; border-radius: 6px; padding: 6px 10px; font: 12px var(--mono); }
+.script-ref-box { min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.script-ref-box summary { cursor: pointer; padding: 8px 12px; font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+.script-ref { margin: 0; padding: 0 12px 12px; font: 11px/1.5 var(--mono); white-space: pre-wrap; color: #c5cad6; }
+.reg-box { display: flex; flex-direction: column; gap: 4px; padding: 0 4px; }
+.reg-help { margin: 8px 4px; }
+@media (max-width: 1100px) { .script-body { grid-template-columns: 1fr; } .script-ref-box { max-height: 30vh; } }
+.obj-item.script-item { display: block; padding: 7px 10px; font-family: var(--mono); }

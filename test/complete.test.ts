@@ -57,6 +57,7 @@ describe('script autocompletion', () => {
     expect(labels("import { clamp } from '|'")).toEqual(['enemies/Health', 'utils/math']);
     expect(labels("import Health from './|'")).toEqual(['./Health', '../utils/math']);
     expect(labels("static params = {\n  target: '|'")).toContain('object');
+    expect(labels("emit('playerHit', 1)\nthis.on('pl|')")).toEqual(['playerHit']);
     const r = at("goto('to|wn')");
     expect(r).toMatchObject({ from: 6, to: 10 });
   });

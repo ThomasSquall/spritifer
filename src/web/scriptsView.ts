@@ -8,13 +8,14 @@ import { scriptBaseName, scriptDir, transformModule } from '../core/game/modules
 import { GLOBALS } from '../core/game/scriptApi.js';
 import type { ComponentInfo } from '../core/game/script.js';
 import { createCodeEditor } from './codeEditor.js';
-import { newComponentScript, paramSpec } from './componentsUi.js';
+import { addFromLibrary, newComponentScript, paramSpec } from './componentsUi.js';
+import { LIBRARY } from '../core/game/library.js';
 import { gameApi } from './gameApi.js';
 import { state } from './gameState.js';
 import { appNav } from './nav.js';
 import { openPlay, registerFlusher } from './play.js';
 import { type CompleteContext, complete, signatureAt } from './scriptComplete.js';
-import { clear, confirmDialog, h, icon, iconButton, promptText, toast } from './dom.js';
+import { clear, confirmDialog, h, icon, iconButton, linkScriptRefs, modal, promptText, toast } from './dom.js';
 
 const KEYWORDS = /^(async|await|break|case|catch|class|const|continue|default|delete|do|else|export|extends|false|finally|for|from|function|if|import|in|instanceof|let|new|null|of|return|static|super|switch|this|throw|true|try|typeof|undefined|var|void|while)$/;
 const API = new Set([...GLOBALS.map((g) => g.name), 'Behavior', 'behavior', 'ui']);
@@ -119,7 +120,7 @@ export function completionContext(path: string, scripts: string[]): CompleteCont
   };
 }
 
-export function renderScripts(root: HTMLElement, selected: string | null, go: (name: string | null) => void): { refresh: () => void; destroy: () => void } {
+export function renderScripts(root: HTMLElement, selected: string | null, go: (name: string | null) => void, line?: number): { refresh: () => void; destroy: () => void } {
   clear(root);
   const side = h('aside', { class: 'obj-side script-side' });
   const main = h('section', { class: 'script-main' });
@@ -191,6 +192,39 @@ export function renderScripts(root: HTMLElement, selected: string | null, go: (n
       toast((err as Error).message, 'error');
     }
   };
+  const openLibrary = async () => {
+    let added: string | null = null;
+    await modal('Component library', (close) => {
+      const have = new Set(state.scriptInfo.components.map((c) => c.name));
+      return h('div', { class: 'lib-list' },
+        h('p', { class: 'muted small' }, 'Ready-made components. Adding one copies its file into scripts/ (with the ones it needs): it is a normal script you can read and change. Then attach it in Objects → Components, in the scene inspector or to a scene.'),
+        ...LIBRARY.map((c) => h('div', { class: 'lib-card' },
+          h('div', { class: 'lib-head' },
+            h('span', { class: 'comp-icon' }, '◆'),
+            h('strong', {}, c.name),
+            h('span', { class: 'muted small' }, `scripts/${c.folder}/`),
+            c.requires ? h('span', { class: 'badge muted-badge' }, `+ ${c.requires.join(', ')}`) : null,
+            h('span', { class: 'spacer' }),
+            have.has(c.name)
+              ? h('span', { class: 'muted small' }, 'in the project')
+              : h('button', { class: 'small primary', onclick: async () => {
+                  if (await addFromLibrary([c.name])) {
+                    added = `${c.folder}/${c.name}`;
+                    close();
+                  }
+                } }, icon('plus', 12), 'Add'),
+          ),
+          h('p', { class: 'small' }, c.summary),
+          h('p', { class: 'muted small' }, c.usage),
+        )),
+      );
+    }, { wide: true });
+    if (added) {
+      const tree = await gameApi.scriptTree().catch(() => null);
+      const base = scriptBaseName(added);
+      go(tree?.files.map((f) => f.name).find((f) => scriptBaseName(f) === base) ?? added);
+    }
+  };
   const deleteFolder = async (folder: string) => {
     const inside = files.filter((f) => f.startsWith(folder + '/'));
     if (!(await confirmDialog('Delete folder', inside.length ? `Delete scripts/${folder}/ and the ${inside.length} script(s) in it?` : `Delete the empty folder scripts/${folder}/?`))) return;
@@ -217,6 +251,7 @@ export function renderScripts(root: HTMLElement, selected: string | null, go: (n
       h('button', { class: 'small primary', title: 'New component (a Behaviour class, one per file)', onclick: () => void newComponent() }, icon('plus', 13), 'Component'),
       h('button', { class: 'small', title: 'New plain script (helpers and data to import)', onclick: () => void newScript() }, icon('plus', 13), 'Script'),
       h('button', { class: 'small', title: 'New folder', onclick: () => void newFolder() }, icon('plus', 13), 'Folder'),
+      h('button', { class: 'small', title: 'Ready-made components: Health, Damage, Door, Spawner…', onclick: () => void openLibrary() }, icon('copy', 13), 'Library'),
     ),
     search,
     tree,
@@ -340,7 +375,7 @@ export function renderScripts(root: HTMLElement, selected: string | null, go: (n
       h('div', { class: 'small' }, h('b', {}, 'Components: '), comps.length ? String(comps.length) : '—'),
       legacy.length ? h('div', { class: 'small', title: 'Defined with behavior(name, {...}). They still work; move each to its own file (export default class Name extends Behaviour) to get inspector params and autocompletion.' }, h('b', {}, 'Legacy behaviors: '), legacy.map((c) => `${c.name}${c.definedIn ? ` (${c.definedIn}.js)` : ''}`).join(', ')) : null,
       info.functions.length ? h('div', { class: 'small' }, h('b', {}, 'Functions (func): '), info.functions.join(', ')) : null,
-      ...info.errors.map((e) => h('div', { class: 'small problem' }, e)),
+      ...info.errors.map((e) => h('div', { class: 'small problem' }, ...linkScriptRefs(e))),
       h('p', { class: 'muted small reg-help' }, 'Attach components in Objects → Components, per instance in the scene inspector, or to a scene / the whole game. Drag scripts onto folders to move them.'),
     );
   };
@@ -365,7 +400,7 @@ export function renderScripts(root: HTMLElement, selected: string | null, go: (n
     clear(panel);
     const comp = componentOf(name);
     const errs = errorsOf(name);
-    if (errs.length) panel.append(h('div', { class: 'comp-errors' }, ...errs.map((e) => h('div', { class: 'small problem' }, e.replace(`script ${name}: `, '')))));
+    if (errs.length) panel.append(h('div', { class: 'comp-errors' }, ...errs.map((e) => h('div', { class: 'small problem' }, ...linkScriptRefs(e.replace(`script ${name}: `, ''))))));
     const legacyHere = state.scriptInfo.components.filter((c) => c.legacy && c.definedIn === name);
     if (legacyHere.length) {
       add(panel,
@@ -474,6 +509,7 @@ export function renderScripts(root: HTMLElement, selected: string | null, go: (n
       h('div', { class: 'script-body' }, ed.el, panel),
     );
     ed.textarea.focus();
+    if (line) requestAnimationFrame(() => ed.gotoLine(line));
   };
 
   const refresh = () => {

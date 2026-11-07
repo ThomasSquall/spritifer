@@ -200,7 +200,9 @@ export class World {
   input: InputFrame = emptyInput();
   private nextId = 1;
   private pendingScene: string | null = null;
-  private messages: string[] = [];
+  private messages: { name: string; data: unknown }[] = [];
+  /** Screen fade for scene transitions: out (to color) → load the scene → in. */
+  fade: { phase: 'none' | 'out' | 'in'; t: number; dur: number; color: string; scene: string | null; restart: boolean } = { phase: 'none', t: 0, dur: 0, color: '#000000', scene: null, restart: false };
   private sceneTimers = new Map<number, number>();
   private rngState: number;
   private depth = 0;
@@ -428,15 +430,34 @@ export class World {
     }
   }
 
-  gotoScene(name: string): void {
+  /** Changes scene at the end of the frame; with `fade` (seconds) the screen fades out to `color`, then in. */
+  gotoScene(name: string, opts: { fade?: number; color?: string } = {}): void {
     if (!this.bundle.scenes[name]) throw new Error(`no scene "${name}"`);
+    if (this.startFade(name, false, opts)) return;
     this.pendingScene = name;
   }
 
   /** Restarts the current scene from scratch (a persistent scene forgets what happened). */
-  restartScene(): void {
+  restartScene(opts: { fade?: number; color?: string } = {}): void {
+    if (this.startFade(this.scene.name, true, opts)) return;
     this.resetPending = true;
     this.pendingScene = this.scene.name;
+  }
+
+  private startFade(scene: string, restart: boolean, opts: { fade?: number; color?: string }): boolean {
+    const dur = Math.min(5, Math.max(0, Number(opts.fade) || 0));
+    if (!dur) return false;
+    if (this.fade.phase === 'out') return true; // already leaving
+    this.fade = { phase: 'out', t: 0, dur, color: typeof opts.color === 'string' && opts.color ? opts.color : '#000000', scene, restart };
+    return true;
+  }
+
+  /** Opacity of the fade overlay (0 = none). */
+  get fadeAlpha(): number {
+    const f = this.fade;
+    if (f.phase === 'none' || !f.dur) return 0;
+    const k = Math.min(1, f.t / f.dur);
+    return f.phase === 'out' ? k : 1 - k;
   }
 
   /** Plays a dialogue (dialogues/*.dialogue). `self` is the instance that speaks, `other` usually the player. */
@@ -534,8 +555,9 @@ export class World {
     this.shake = { until: this.clock + dur, intensity: Math.max(0, Math.min(32, intensity)), duration: dur };
   }
 
-  emit(message: string): void {
-    this.messages.push(message);
+  /** Queues a message (with optional data) for events, onMessage hooks and on() listeners, delivered this frame. */
+  emit(message: string, data?: unknown): void {
+    this.messages.push({ name: message, data });
   }
 
   /** Lets pending script continuations run (call after step() when scripts use await). */
@@ -565,6 +587,25 @@ export class World {
 
     // Dialogs pause the game; the frame that closes one doesn't run gameplay either (the key press is used up).
     const confirm = input.pressed.has('action') || input.pressed.has('enter') || input.clicks.length > 0;
+    // Fading out to another scene: the game holds still until the screen is covered.
+    if (this.fade.phase === 'out') {
+      this.fade.t += dt;
+      this.scripts.tick(dt);
+      for (const a of this.actors) if (!a.destroyed) this.updateAnimation(a, dt);
+      this.clock += dt;
+      this.frame++;
+      if (this.fade.t >= this.fade.dur) {
+        const { scene, restart } = this.fade;
+        this.fade = { ...this.fade, phase: 'in', t: 0 };
+        if (restart) this.resetPending = true;
+        if (scene) this.loadScene(scene);
+      }
+      return;
+    }
+    if (this.fade.phase === 'in') {
+      this.fade.t += dt;
+      if (this.fade.t >= this.fade.dur) this.fade = { ...this.fade, phase: 'none', t: 0, scene: null };
+    }
     const inDialog = this.scripts.updateDialog(dt, confirm, input.pressed.has('up'), input.pressed.has('down'), this.opts.autoDialog ?? null);
     this.scripts.tick(dt);
     if (inDialog) {
@@ -647,9 +688,8 @@ export class World {
     this.runSceneEvents();
     for (let round = 0; round < 10 && this.messages.length; round++) {
       const msgs = this.messages.splice(0);
-      for (const m of msgs) {
-        for (const fn of this.scripts.messageHooks.get(m) ?? []) this.scripts.run(`onMessage(${m})`, fn, m);
-        sh.invokeAll(sh.all(), 'onMessage', m);
+      for (const { name: m, data } of msgs) {
+        sh.dispatch(m, data);
         for (const a of [...this.actors]) if (!a.destroyed) this.fireObject(a, 'message', (t) => t.message === m);
         this.fireScene('message', (t) => t.message === m);
       }
@@ -1293,10 +1333,10 @@ export class World {
         return;
       }
       case 'gotoScene':
-        this.gotoScene(String(s.scene));
+        this.gotoScene(String(s.scene), { fade: toNum(s.fade ?? 0) });
         return;
       case 'restartScene':
-        this.restartScene();
+        this.restartScene({ fade: toNum(s.fade ?? 0) });
         return;
       case 'sound':
         this.opts.sound?.(String(s.sound), toNum(s.volume ?? 0.5));
@@ -1312,7 +1352,7 @@ export class World {
         return;
       }
       case 'emit':
-        this.messages.push(String(s.message));
+        this.messages.push({ name: String(s.message), data: undefined });
         return;
       case 'call': {
         const name = String(s.function ?? '');
@@ -1620,6 +1660,8 @@ export function renderWorld(w: World, r: Renderer): void {
     r.rect(bx, by + bh - 1, bw, 1, '#ffffff', 0.5);
     r.text(w.message.text, bx + 6, by + 6, '#ffffff', s);
   }
+  const fa = w.fadeAlpha;
+  if (fa > 0) r.rect(0, 0, vw, vh, w.fade.color, fa);
   drawDialog(w, r);
 }
 

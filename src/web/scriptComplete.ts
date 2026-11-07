@@ -576,6 +576,12 @@ export function complete(src: string, pos: number, ctx: CompleteContext, explici
       const call = /([\w$]+)\s*\(\s*$/.exec(head);
       const kind = call ? FN_ARG[call[1]] : undefined;
       if (kind) items = STRING_ARGS[kind](ctx);
+      else if (call && ['emit', 'on', 'onMessage'].includes(call[1])) {
+        // Message names already used in this file (and the library's own messages).
+        const names = new Set(['died', 'collected', 'checkpoint', 'spawned']);
+        for (const m of src.matchAll(/\b(?:emit|on|onMessage)\s*\(\s*['"]([\w:.-]+)['"]/g)) names.add(m[1]);
+        items = [...names].map((n) => plain(n, 'value', 'message'));
+      }
       else if (/^\s*[\w$]+\s*:\s*$/.test(head) && /static\s+params\s*=\s*\{[^}]*$/.test(src.slice(Math.max(0, lineStart - 600), lineStart).replace(/\{[^{}]*\}/g, ''))) items = STRING_ARGS.type(ctx);
     }
     if (!items.length) return null;

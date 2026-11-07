@@ -66,6 +66,8 @@ export const gameApi = {
   getScript: (name: string) => req<{ name: string; code: string }>('GET', `${apiBase()}/scripts/${enc(name)}`),
   saveScript: (name: string, code: string) => req<{ ok: true; syntaxError: string | null }>('PUT', `${apiBase()}/scripts/${enc(name)}`, { code }),
   createScript: (name: string, kind: 'component' | 'script' = 'component') => req<{ name: string }>('POST', `${apiBase()}/scripts`, { name, kind }),
+  addLibrary: (names: string[]) => req<{ created: string[]; existing: string[] }>('POST', `${apiBase()}/scripts/_library`, { names }),
+  scriptSources: () => req<Record<string, string>>('GET', `${apiBase()}/scripts/_sources`),
   scriptTree: () => req<{ files: { name: string; size: number; updatedAt: number }[]; folders: string[] }>('GET', `${apiBase()}/scripts/_tree`),
   createScriptFolder: (name: string) => req<{ name: string }>('POST', `${apiBase()}/scripts/_folders`, { name }),
   deleteScriptFolder: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/scripts/_folders/${enc(name)}`),

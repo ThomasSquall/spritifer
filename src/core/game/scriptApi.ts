@@ -37,7 +37,7 @@ export const LIFECYCLE: ApiEntry[] = [
   hook('onCollisionExit', 'onCollisionExit(other: Instance): void', 'This instance stops touching `other` (or it was destroyed).'),
   hook('onInteract', 'onInteract(player: Instance): void | Promise<void>', 'The player pressed action (Space/Z) next to or facing this instance: talk, open, read, use.'),
   hook('onClick', 'onClick(): void', 'The player clicked/tapped this instance.'),
-  hook('onMessage', 'onMessage(message: string): void', 'An event or script emitted a message (emit("win")).'),
+  hook('onMessage', 'onMessage(message: string, data: any): void', 'Any message emitted by an event or a script: emit("win") or emit("hit", { damage: 2 }). For one message prefer this.on("hit", data => ...).'),
   hook('onSceneStart', 'onSceneStart(scene: string): void | Promise<void>', 'Global (game) components: a scene started. Scene and object components use start() instead.'),
   hook('onSceneEnd', 'onSceneEnd(scene: string): void', 'Global (game) components: the scene is about to change.'),
   hook('onDraw', 'onDraw(ui: Ui): void', 'Every frame, screen-space drawing on top of the game: HUDs, health bars (ui.toScreen(this.self.x, this.self.y)), menus.'),
@@ -59,6 +59,9 @@ export const BEHAVIOUR_MEMBERS: ApiEntry[] = [
   method('findComponent', 'findComponent<T = any>(type: ComponentName): T | null', 'First component of a type anywhere (game, scene or any instance), like FindObjectOfType.', "findComponent('$0')"),
   method('findComponents', 'findComponents<T = any>(type: ComponentName): T[]', 'Every component of a type anywhere.', "findComponents('$0')"),
   method('sendMessage', 'sendMessage(method: string, ...args: any[]): void', 'Calls `method` on every component of this instance that has it.', "sendMessage('$0')"),
+  method('on', 'on(message: string, fn: (data: any, message: string) => void): () => void', 'Listens to emit(message, data) while this component lives (removed automatically when destroyed). "*" listens to everything. Returns a function that stops listening.', "on('$0', (data) => {\n  \n})"),
+  method('emit', 'emit(message: string, data?: any): void', 'Sends a message with optional data to events (Message received), onMessage and on() listeners, at the end of this frame.', "emit('$0')"),
+  method('tween', "tween(target: object, props: Record<string, number>, seconds: number, ease?: EaseName | { ease?: EaseName; delay?: number }): Promise<void>", 'Animates numeric fields smoothly: await this.tween(this.self, { y: this.self.y - 8, opacity: 0 }, 0.4, "outQuad"). Works on instances, components, camera, any object. Stops if this component is destroyed. Ignores walls.', 'tween($0, {  }, 0.3)'),
   method('wait', 'wait(seconds: number): Promise<void>', 'Coroutine wait tied to this component: await this.wait(1). Stops (never resolves) if the component is destroyed.'),
   method('waitUntil', 'waitUntil(test: () => boolean): Promise<void>', 'Waits until test() is true, tied to this component.'),
   method('every', 'every(seconds: number, fn: () => void): () => void', 'Calls fn every N seconds while the component is alive and enabled. Returns a function that stops it.'),
@@ -126,6 +129,7 @@ export const SCENE_MEMBERS: ApiEntry[] = [
   prop('name', 'readonly name: string', 'Current scene name.'),
   prop('width', 'readonly width: number', 'Scene width in pixels.'),
   prop('height', 'readonly height: number', 'Scene height in pixels.'),
+  prop('tileSize', 'readonly tileSize: number', 'Tile size in pixels.'),
   prop('vars', 'readonly vars: Record<string, any>', 'Scene variables (reset when the scene starts).'),
 ];
 
@@ -157,11 +161,14 @@ export const GLOBALS: ApiEntry[] = [
   fn('spawn', 'spawn(object: ObjectName, x: number, y: number, props?: Record<string, any>): Instance | undefined', 'Creates an instance.', "spawn('$0')"),
   fn('findComponent', 'findComponent<T = any>(type: ComponentName): T | null', 'First component of a type anywhere (game, scene or instances).', "findComponent('$0')"),
   fn('findComponents', 'findComponents<T = any>(type: ComponentName): T[]', 'Every component of a type.', "findComponents('$0')"),
-  fn('goto', 'goto(scene: SceneName): void', 'Changes scene (at the end of the frame).', "goto('$0')"),
-  fn('restart', 'restart(): void', 'Restarts the current scene.'),
+  fn('goto', 'goto(scene: SceneName, opts?: { fade?: number; color?: string }): void', 'Changes scene (at the end of the frame). goto("dungeon", { fade: 0.4 }) fades to black and back.', "goto('$0')"),
+  fn('restart', 'restart(opts?: { fade?: number; color?: string }): void', 'Restarts the current scene (optionally with a fade).'),
   fn('sound', 'sound(name: SoundName, volume?: number): void', 'Plays a built-in sound.', "sound('$0')"),
   fn('shake', 'shake(intensity?: number, seconds?: number): void', 'Screen shake.'),
-  fn('emit', 'emit(message: string): void', 'Sends a message to events (Message received) and onMessage hooks.', "emit('$0')"),
+  fn('emit', 'emit(message: string, data?: any): void', 'Sends a message (with optional data) to events (Message received), onMessage hooks and on() listeners, at the end of this frame.', "emit('$0')"),
+  fn('on', 'on(message: string, fn: (data: any, message: string) => void): () => void', 'Plain scripts: listens to emit(message, data). In components use this.on (removed automatically).', "on('$0', (data) => {\n  \n})"),
+  fn('tween', "tween(target: object, props: Record<string, number>, seconds: number, ease?: EaseName | { ease?: EaseName; delay?: number }): Promise<void>", 'Animates numeric fields of any object (instance, camera, a component): await tween(camera, { x: 200 }, 1, "inOutSine"). In components prefer this.tween (stops with the component).', 'tween($0, {  }, 0.3)'),
+  fn('stopTweens', 'stopTweens(target: object): void', 'Stops every tween animating target.'),
   fn('log', 'log(...args: any[]): void', 'Writes to the game log (playtest reports, console).'),
   fn('key', 'key(name: KeyName): boolean', 'Key held: left, right, up, down, action, action2, a..z, 0..9.', "key('$0')"),
   fn('pressed', 'pressed(name: KeyName): boolean', 'Key pressed this frame.', "pressed('$0')"),
@@ -279,6 +286,11 @@ ${list(GLOBALS.filter((g) => g.kind !== 'class'))}
 UI (onDraw(ui), screen pixels, 4x6 pixel font)
 ${list(UI_MEMBERS, 'ui.')}
 
+MESSAGES, TWEENS, TRANSITIONS
+- emit('playerHit', { damage: 2 }) → this.on('playerHit', (data) => ...) in any component (auto-removed), onMessage(name, data), events "Message received"
+- await this.tween(this.self, { y: this.self.y - 12, opacity: 0 }, 0.4, 'outQuad')   easings: linear, inQuad, outQuad, inOutQuad, inCubic, outCubic, inOutCubic, inOutSine, outBack, outElastic, outBounce; { ease, delay }
+- goto('dungeon', { fade: 0.4, color: '#000000' }), restart({ fade: 0.3 })
+
 FROM EVENTS AND DIALOGUES
 - Event action "Call component method" (callMethod): target self/other, component, method, arg → comp.method(arg, other)
 - Event action "Run script function" (call) runs func(name, fn) from plain scripts.
@@ -330,6 +342,7 @@ type ObjectName = ${union(p.objects)};
 type SceneName = ${union(p.scenes)};
 type SoundName = ${union(p.sounds)};
 type DialogueName = ${union(p.dialogues)};
+type EaseName = 'linear' | 'inQuad' | 'outQuad' | 'inOutQuad' | 'inCubic' | 'outCubic' | 'inOutCubic' | 'inOutSine' | 'outBack' | 'outElastic' | 'outBounce';
 type KeyName = 'left' | 'right' | 'up' | 'down' | 'action' | 'action2' | 'space' | 'enter' | 'escape' | 'shift' | (string & {});
 
 interface ComponentMap {

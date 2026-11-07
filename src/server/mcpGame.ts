@@ -25,7 +25,8 @@ import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePrev
 import { encodePng } from './png.js';
 import { scaleBitmap } from '../core/draw.js';
 import type { Workspace } from './store.js';
-import { checkScriptSyntax, inspectScripts, nodeEvaluator, refreshScriptTypes } from './scripts.js';
+import { addLibraryComponents, checkScriptSyntax, inspectScripts, nodeEvaluator, refreshScriptTypes } from './scripts.js';
+import { LIBRARY } from '../core/game/library.js';
 import { scriptBaseName } from '../core/game/modules.js';
 import { SCRIPT_REFERENCE } from '../core/game/script.js';
 import { DIALOGUE_REFERENCE, buildDialogueBook, parseDialogues } from '../core/game/dialogue.js';
@@ -52,7 +53,7 @@ Model:
 - Scenes (create_scene) are tile maps (cols x rows, tileSize from the tileset sprite's grid) with tile layers (solid layers collide) and placed instances. Scenes have their own event sheet and variables.
 - Events: WHEN trigger IF conditions DO actions. Call game_reference for the full vocabulary (triggers, conditions, actions, behaviors, keys, sounds, expression syntax).
 - Dialogues (write_dialogue, dialogue_reference) are plain-text conversations: speakers, choices, conditions, variables, commands, jumps. NPCs: ONE object type with the behavior "dialogue" (+ solid), placed many times, each instance with its own name, optional sprite override and props { dialogue: "<name>" }. Never create one object type or script per NPC.
-- Scripts (write_script, script_reference) are JavaScript files in scripts/ (use folders: scripts/enemies/Patrol.js, scripts/ui/Hud.js, scripts/managers/GameManager.js) for logic events can't express well. Write COMPONENTS, Unity-style: ONE class per file named like the file (export default class Patrol extends Behaviour), public fields = inspector params, lifecycle awake/start/update/lateUpdate/onCollisionEnter/Stay/Exit/onInteract/onDraw/onDestroy, this.getComponent('Health') / findComponent('GameManager') to talk to other scripts, import for shared helpers. Attach them to object types ({ type: "script", name: "Patrol", speed: 60 } in behaviors), override params per placed instance (instances components: { Patrol: { speed: 80 } }), or attach managers to scenes (update_scene components) and to the whole game (set_game components). Never put several behaviours in one file.
+- Scripts (write_script, script_reference) are JavaScript files in scripts/ (use folders: scripts/enemies/Patrol.js, scripts/ui/Hud.js, scripts/managers/GameManager.js) for logic events can't express well. Write COMPONENTS, Unity-style: ONE class per file named like the file (export default class Patrol extends Behaviour), public fields = inspector params, lifecycle awake/start/update/lateUpdate/onCollisionEnter/Stay/Exit/onInteract/onDraw/onDestroy, this.getComponent('Health') / findComponent('GameManager') to talk to other scripts, import for shared helpers. Attach them to object types ({ type: "script", name: "Patrol", speed: 60 } in behaviors), override params per placed instance (instances components: { Patrol: { speed: 80 } }), or attach managers to scenes (update_scene components) and to the whole game (set_game components). Never put several behaviours in one file. For common mechanics first check component_library (Health, Damage, Shooter, Collectible, Door, Checkpoint, Respawn, Spawner, Countdown) and add them with add_library_component.
 - RPGs: top-down player (topdown + camera, sprite tags walk_<dir>/idle_<dir>), scene y_sort and persistent (towns remember chests/positions after battles), solid tile layers for walls, NPCs and chests via dialogues (~ self.opened = true), an intro via a scene event (start → dialogue), battles in a scene driven by a scene component (class Battle extends Behaviour { async start() {...} } attached to the battle scene).
 - Projects: list_projects / open_project / create_project switch between games; each project folder has its own sprites, scenes, scripts and game.json.
 
@@ -802,6 +803,19 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       const n = code.split(a.find).length - 1;
       if (n !== 1) throw new Error(n ? `The snippet appears ${n} times; include more context` : 'Snippet not found (read_script shows the current code)');
       return saveScript(a.name, code.replace(a.find, () => a.replace));
+    },
+  );
+
+  tool('component_library', 'Ready-made components you can add to the project instead of writing them: Health, Damage, Shooter, Collectible, Door, Checkpoint, Respawn, Spawner, Countdown (what each does, how to use it). Prefer them for common mechanics.', {}, () =>
+    text(LIBRARY.map((c) => `- ${c.name} (scripts/${c.folder}/${c.name}.js)${c.requires ? ` [needs ${c.requires.join(', ')}]` : ''}: ${c.summary}\n    ${c.usage}`).join('\n')), { readOnlyHint: true });
+
+  tool(
+    'add_library_component',
+    'Copy ready-made components (see component_library) into scripts/ — plus the ones they need — then attach them like any component (set_object behaviors { type: "script", name: "Health", max: 5 }). The files are normal scripts you can read and edit.',
+    { names: z.array(z.string()).min(1).describe('e.g. ["Health", "Damage", "Collectible"]') },
+    (a) => {
+      const r = addLibraryComponents(ws, a.names);
+      return text(`${r.created.length ? `Created ${r.created.map((p) => `scripts/${p}.js`).join(', ')}.` : 'Nothing new to create.'}${r.existing.length ? ` Already in the project: ${r.existing.join(', ')}.` : ''}\n${scriptSummary()}`);
     },
   );
 

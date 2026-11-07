@@ -13,6 +13,7 @@ import { renderGameSettings } from './gameView.js';
 import { type SceneEditorHandle, mountSceneEditor } from './sceneEditor.js';
 import { renderProjects } from './projectsView.js';
 import { renderScripts } from './scriptsView.js';
+import { pushScriptsToPlay } from './play.js';
 import { renderDialogues } from './dialoguesView.js';
 import { currentProjectId } from './api.js';
 
@@ -104,7 +105,9 @@ async function route(): Promise<void> {
   if ((m = /^#\/scripts(?:\/(.+))?$/.exec(hash))) {
     page = 'scripts';
     document.title = 'Scripts · Spritifer';
-    scriptsPage = renderScripts(root, m[1] ? decodeURIComponent(m[1]) : null, (name) => go(name ? `#/scripts/${encodeURIComponent(name)}` : '#/scripts'));
+    // "#/scripts/<path>:<line>" opens the script at a line (links in errors).
+    const target = m[1] ? /^(.*?)(?::(\d+))?$/.exec(decodeURIComponent(m[1]))! : null;
+    scriptsPage = renderScripts(root, target ? target[1] : null, (name) => go(name ? `#/scripts/${encodeURIComponent(name)}` : '#/scripts'), target?.[2] ? Number(target[2]) : undefined);
     refreshPage = scriptsPage.refresh;
     return;
   }
@@ -177,6 +180,7 @@ async function onRemoteChange(e: ChangeEvent): Promise<void> {
     return;
   }
   if (kind === 'script') {
+    void pushScriptsToPlay();
     await state.remote('script', e.rev);
     if (page === 'scripts') refreshSoon();
     return;

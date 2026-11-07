@@ -11,6 +11,7 @@ import { gameApi } from './gameApi.js';
 import { state } from './gameState.js';
 import { clear, h, icon, iconButton, promptText, toast } from './dom.js';
 import { SOUNDS, KEYS } from '../core/game/catalog.js';
+import { LIBRARY } from '../core/game/library.js';
 
 export function paramSpec(p: ComponentParam): ParamSpec {
   return { name: p.name, type: p.type, default: p.default, label: p.label ?? p.name, help: p.help, options: p.options, min: p.min, max: p.max, step: p.step };
@@ -68,19 +69,39 @@ export function componentPicker(label: string, exclude: string[], onPick: (name:
     const dir = c.path.includes('/') ? c.path.slice(0, c.path.lastIndexOf('/')) : c.legacy ? 'legacy' : '(root)';
     groups.set(dir, [...(groups.get(dir) ?? []), c]);
   }
+  // Library components not in the project yet: picking one copies its script (and what it needs) first.
+  const have = new Set(state.scriptInfo.components.map((c) => c.name));
+  const lib = LIBRARY.filter((c) => !have.has(c.name) && !exclude.includes(c.name));
   const sel = h('select', { class: 'comp-picker', onchange: async () => {
     const v = sel.value;
     sel.value = '';
     if (v === '__new') {
       const n = await newComponentScript();
       if (n) onPick(n);
+    } else if (v.startsWith('lib:')) {
+      const n = await addFromLibrary([v.slice(4)]);
+      if (n) onPick(v.slice(4));
     } else if (v) onPick(v);
   } },
     h('option', { value: '' }, label),
     ...[...groups].sort(([a], [b]) => a.localeCompare(b)).map(([dir, list]) => h('optgroup', { label: dir }, ...list.map((c) => h('option', { value: c.name }, c.name)))),
+    lib.length ? h('optgroup', { label: 'Library (adds the script)' }, ...lib.map((c) => h('option', { value: `lib:${c.name}`, title: c.summary }, `${c.name} — ${c.summary}`))) : null,
     h('option', { value: '__new' }, '＋ New component script…'),
   );
   return sel;
+}
+
+/** Copies library components into the project's scripts/ and refreshes what the editor knows. */
+export async function addFromLibrary(names: string[]): Promise<boolean> {
+  try {
+    const r = await gameApi.addLibrary(names);
+    state.scriptInfo = await gameApi.scriptInfo();
+    if (r.created.length) toast(`Added ${r.created.map((p) => `scripts/${p}.js`).join(', ')}`);
+    return true;
+  } catch (err) {
+    toast((err as Error).message, 'error');
+    return false;
+  }
 }
 
 /** Asks for a path ("enemies/Patrol"), creates the component file from the template, refreshes the script info. */

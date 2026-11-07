@@ -17,6 +17,15 @@ Oltre a quanto richiesto (un behaviour per file, cartelle, ciclo di vita, parame
 - **Rinomina sicura**: rinominare o spostare un file componente aggiorna classe, oggetti, istanze, scene, gioco ed eventi.
 - **`spritifer.d.ts` + `jsconfig.json` generati**: autocompletamento anche in VS Code e JetBrains, con i tipi restituiti da `getComponent('Nome')`.
 
+## Fatto nel secondo giro
+
+- **1. Libreria di componenti pronti**: Health, Damage, Shooter, Collectible, Door, Checkpoint, Respawn, Spawner, Countdown (`src/core/game/library.ts`). Si aggiungono dalla scheda Scripts (*Library*), da "+ Add component" o con gli strumenti MCP `component_library` / `add_library_component`.
+- **2. Errori cliccabili con file e riga + hot reload** nel Play.
+- **4. Event bus con dati**: `emit(name, data)`, `this.on(name, fn)`, `on(name, fn)`, `onMessage(name, data)`.
+- **6. Tween ed easing**: `this.tween(...)`, `tween(...)`, `stopTweens(target)`.
+- **7. (in parte) Transizioni**: `goto(scene, { fade })`, `restart({ fade })` e il campo *fade* nelle azioni evento. Zoom e dead-zone della camera restano da fare.
+- **9. (in parte) Gamepad**: c'era già nel runtime (croce/stick, A, B, Start). Manca la mappatura configurabile delle azioni.
+
 ## Prossimi passi consigliati (in ordine)
 
 | # | Funzionalità | Perché | Sforzo |

@@ -8,6 +8,7 @@ import { SOUNDS } from '../core/game/catalog.js';
 import { buildDialogueBook } from '../core/game/dialogue.js';
 import type { Value } from '../core/game/types.js';
 import type { Workspace } from './store.js';
+import { LIBRARY_MAP } from '../core/game/library.js';
 import type { World } from '../core/game/engine.js';
 
 /**
@@ -94,3 +95,29 @@ self: Nice weather today!
 * Say goodbye
   self: See you around!
 `;
+
+/**
+ * Copies ready-made components (and the ones they need, e.g. Damage → Health) into scripts/<folder>/.
+ * Components that already exist (same name, any folder) are left alone. Returns the created paths.
+ */
+export function addLibraryComponents(ws: Workspace, names: string[]): { created: string[]; existing: string[] } {
+  const have = new Set(ws.listScripts().map((s) => scriptBaseName(s.name)));
+  const created: string[] = [];
+  const existing: string[] = [];
+  const add = (name: string) => {
+    const c = LIBRARY_MAP.get(name);
+    if (!c) throw new Error(`No library component "${name}". Available: ${[...LIBRARY_MAP.keys()].join(', ')}`);
+    for (const r of c.requires ?? []) add(r);
+    if (have.has(name)) {
+      if (!existing.includes(name) && !created.some((p) => scriptBaseName(p) === name)) existing.push(name);
+      return;
+    }
+    const path = `${c.folder}/${c.name}`;
+    ws.writeScript(path, c.code);
+    have.add(name);
+    created.push(path);
+  };
+  for (const n of names) add(n);
+  if (created.length) refreshScriptTypes(ws);
+  return { created, existing };
+}

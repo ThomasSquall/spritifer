@@ -149,3 +149,21 @@ export async function confirmDialog(title: string, message: string, okLabel = 'D
   );
   return ok;
 }
+
+/**
+ * Text with "scripts/<path>.js:<line>" references turned into links that open the script at that line.
+ * `onOpen` runs before navigating (e.g. to close the Play overlay).
+ */
+export function linkScriptRefs(text: string, onOpen?: () => void): (Node | string)[] {
+  const out: (Node | string)[] = [];
+  const re = /scripts\/([\w/-]+)\.js(?::(\d+))?/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    out.push(text.slice(last, m.index));
+    const href = `#/scripts/${encodeURIComponent(m[1])}${m[2] ? `:${m[2]}` : ''}`;
+    out.push(h('a', { class: 'script-ref-link', href, title: 'Open the script at this line', onclick: () => onOpen?.() }, m[0]));
+    last = m.index + m[0].length;
+  }
+  out.push(text.slice(last));
+  return out;
+}

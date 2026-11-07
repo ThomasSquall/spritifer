@@ -12,7 +12,7 @@ import { ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
 import { createScene, normalizeGame, normalizeScene } from '../core/game/types.js';
 import { buildGameHtml, exportGame, loadGameBundle, loadRuntime, renderScenePreview } from './game.js';
 import { renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
-import { checkScriptSyntax, inspectScripts, refreshScriptTypes, scriptTemplate } from './scripts.js';
+import { addLibraryComponents, checkScriptSyntax, inspectScripts, refreshScriptTypes, scriptTemplate } from './scripts.js';
 import { scriptBaseName } from '../core/game/modules.js';
 import { renameComponentRefs } from '../core/game/refactor.js';
 import { SCRIPT_REFERENCE } from '../core/game/script.js';
@@ -363,6 +363,11 @@ async function handleScripts(ws: Workspace, req: http.IncomingMessage, res: http
   }
   if (name === '_info' && method === 'GET') return sendJson(res, 200, inspectScripts(ws.loadScripts()));
   if (name === '_reference' && method === 'GET') return sendJson(res, 200, { reference: SCRIPT_REFERENCE });
+  if (name === '_library' && method === 'POST') {
+    const body = (await readJson(req)) as { names: string[] };
+    return sendJson(res, 200, addLibraryComponents(ws, Array.isArray(body.names) ? body.names.map(String) : []));
+  }
+  if (name === '_sources' && method === 'GET') return sendJson(res, 200, ws.loadScripts());
   if (name === '_tree' && method === 'GET') return sendJson(res, 200, { files: ws.listScripts(), folders: ws.listScriptFolders() });
   if (name === '_folders') {
     if (method === 'POST' && !parts[1]) {

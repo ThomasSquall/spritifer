@@ -6,7 +6,7 @@ import { gameApi } from './gameApi.js';
 import { state } from './gameState.js';
 import { appNav } from './nav.js';
 import { openExport, openPlay } from './play.js';
-import { clear, h, icon, iconButton, promptText, toast } from './dom.js';
+import { clear, h, icon, iconButton, linkScriptRefs, promptText, toast } from './dom.js';
 import { componentListCard } from './componentsUi.js';
 import { sheetContext } from './objectsView.js';
 
@@ -53,7 +53,7 @@ export function renderGameSettings(root: HTMLElement): () => void {
     void gameApi.problems().then((ps) => {
       clear(problems);
       if (!ps.length) problems.append(h('p', { class: 'ok-line' }, '✓ No problems found'));
-      for (const p of ps) problems.append(h('div', { class: 'problem' }, h('code', {}, p.where), ' ', p.message));
+      for (const p of ps) problems.append(h('div', { class: 'problem' }, h('code', {}, p.where), ' ', ...linkScriptRefs(p.message)));
     }).catch((err: Error) => toast(err.message, 'error'));
 
     body.append(

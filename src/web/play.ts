@@ -2,7 +2,7 @@
 
 import { gameApi } from './gameApi.js';
 import { state } from './gameState.js';
-import { h, icon, iconButton, modal, toast } from './dom.js';
+import { h, icon, iconButton, linkScriptRefs, modal, toast } from './dom.js';
 
 const flushers = new Set<() => Promise<void>>();
 
@@ -18,6 +18,21 @@ async function flushAll(): Promise<void> {
 }
 
 let open = false;
+/** The game iframe while the Play overlay is open (for hot reload). */
+let playFrame: HTMLIFrameElement | null = null;
+let hotReload = true;
+
+/** Sends the current scripts to the running game, which swaps the code in place (components keep their state). */
+export async function pushScriptsToPlay(): Promise<void> {
+  const frame = playFrame;
+  if (!frame?.contentWindow || !hotReload) return;
+  try {
+    const scripts = await gameApi.scriptSources();
+    frame.contentWindow.postMessage({ source: 'spritifer-editor', type: 'scripts', scripts }, '*');
+  } catch {
+    // The next Restart picks the scripts up anyway.
+  }
+}
 
 export async function openPlay(scene?: string): Promise<void> {
   if (open) return;
@@ -39,7 +54,7 @@ export async function openPlay(scene?: string): Promise<void> {
       errors++;
       errCount.textContent = `${errors} error${errors === 1 ? '' : 's'}`;
     }
-    logs.append(h('div', { class: isErr ? 'err' : '' }, msg));
+    logs.append(h('div', { class: isErr ? 'err' : '' }, ...linkScriptRefs(msg, () => close())));
     while (logs.childElementCount > 300) logs.firstElementChild?.remove();
     logs.scrollTop = logs.scrollHeight;
   };
@@ -57,6 +72,7 @@ export async function openPlay(scene?: string): Promise<void> {
     frame.src = gameApi.playUrl(scene, debug);
   };
   const close = () => {
+    playFrame = null;
     window.removeEventListener('message', onMsg);
     document.removeEventListener('keydown', onKey, true);
     overlay.remove();
@@ -69,6 +85,7 @@ export async function openPlay(scene?: string): Promise<void> {
     }
   };
   document.addEventListener('keydown', onKey, true);
+  const hotBtn = h('button', { class: `small${hotReload ? ' on' : ''}`, title: 'Apply script changes to the running game without restarting (components keep their state)', onclick: () => { hotReload = !hotReload; hotBtn.classList.toggle('on', hotReload); } }, 'Hot reload');
   const hitBtn = h('button', { class: 'small', title: 'Show collision boxes (F2 in game)', onclick: () => { debug = !debug; hitBtn.classList.toggle('on', debug); reload(); } }, 'Hitboxes');
   const overlay = h('div', { class: 'play-overlay' },
     h('header', { class: 'play-head' },
@@ -76,6 +93,7 @@ export async function openPlay(scene?: string): Promise<void> {
       h('span', { class: 'muted small' }, 'Arrows/WASD move · Space/Z jump & action · X action 2 · Esc closes'),
       h('span', { class: 'spacer' }),
       errCount,
+      hotBtn,
       hitBtn,
       h('button', { class: 'small', onclick: reload }, 'Restart'),
       h('button', { class: 'small', onclick: () => window.open(gameApi.playUrl(scene), '_blank') }, 'New tab'),
@@ -84,6 +102,7 @@ export async function openPlay(scene?: string): Promise<void> {
     h('div', { class: 'play-body' }, frame, logs),
   );
   document.body.append(overlay);
+  playFrame = frame;
   frame.addEventListener('load', () => frame.focus());
 }
 

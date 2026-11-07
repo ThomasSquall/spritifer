@@ -548,3 +548,9 @@ button.on { background: var(--accent); color: #181425; border-color: var(--accen
 .add-row select { flex: 1; min-width: 0; }
 .param.overridden .param-name { color: var(--accent); }
 .inst-comps .comp-card { padding: 6px 8px; }
+.lib-list { display: flex; flex-direction: column; gap: 8px; max-height: 70vh; overflow-y: auto; }
+.lib-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel-2); }
+.lib-card p { margin: 4px 0 0; }
+.lib-head { display: flex; align-items: center; gap: 6px; }
+.script-toolbar button { flex: 1 1 40%; }
+a.script-ref-link { color: #73eff7; font-family: var(--mono); }

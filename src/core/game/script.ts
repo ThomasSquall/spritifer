@@ -33,15 +33,78 @@ export interface BehaviorHooks {
 /** Script view of an instance: fields (x, y, vx...) plus its properties (self.hp) and methods. */
 export type Handle = Record<string, unknown> & { readonly __actor: Actor };
 
-/** Turns source code + API into registrations. The server swaps in a node:vm based evaluator. */
-export type ScriptEvaluator = (code: string, api: Record<string, unknown>, filename: string) => void;
+/**
+ * Turns source code + API into registrations. The server swaps in a node:vm based evaluator.
+ * `lineOffset`: lines the evaluator's wrapper adds before the code (to report file:line in errors).
+ */
+export type ScriptEvaluator = ((code: string, api: Record<string, unknown>, filename: string) => void) & { lineOffset?: number };
 
-export const defaultEvaluator: ScriptEvaluator = (code, api, filename) => {
-  const names = Object.keys(api);
-  // eslint-disable-next-line @typescript-eslint/no-implied-eval
-  const fn = new Function(...names, `"use strict";\n${code}\n//# sourceURL=${filename}`) as (...a: unknown[]) => void;
-  fn(...names.map((n) => api[n]));
+export const defaultEvaluator: ScriptEvaluator = Object.assign(
+  (code: string, api: Record<string, unknown>, filename: string) => {
+    const names = Object.keys(api);
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    const fn = new Function(...names, `"use strict";\n${code}\n//# sourceURL=${filename}`) as (...a: unknown[]) => void;
+    fn(...names.map((n) => api[n]));
+  },
+  // V8 puts "function anonymous(...\n) {\n" before the body, and the body starts with "use strict".
+  { lineOffset: 3 },
+);
+
+/** Errors thrown inside node:vm come from another realm: `instanceof Error` is false for them. */
+const isErrorLike = (err: unknown): err is { message: string; stack?: string } => !!err && typeof err === 'object' && typeof (err as { message?: unknown }).message === 'string';
+
+export function errorMessage(err: unknown): string {
+  return isErrorLike(err) ? err.message : String(err);
+}
+
+/** "scripts/enemies/Patrol.js:12" from an error's stack (first frame inside a game script). */
+export function scriptLocation(err: unknown, lineOffset = 0): { file: string; line: number } | null {
+  const stack = isErrorLike(err) ? String(err.stack ?? '') : '';
+  const m = /scripts\/([\w/-]+)\.js:(\d+)/.exec(stack);
+  if (!m) return null;
+  return { file: m[1], line: Math.max(1, Number(m[2]) - lineOffset) };
+}
+
+const EASINGS: Record<string, (t: number) => number> = {
+  linear: (t) => t,
+  inQuad: (t) => t * t,
+  outQuad: (t) => t * (2 - t),
+  inOutQuad: (t) => (t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t),
+  inCubic: (t) => t * t * t,
+  outCubic: (t) => 1 - (1 - t) ** 3,
+  inOutCubic: (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2),
+  inOutSine: (t) => -(Math.cos(Math.PI * t) - 1) / 2,
+  outBack: (t) => 1 + 2.70158 * (t - 1) ** 3 + 1.70158 * (t - 1) ** 2,
+  outElastic: (t) => (t === 0 || t === 1 ? t : 2 ** (-10 * t) * Math.sin((t * 10 - 0.75) * ((2 * Math.PI) / 3)) + 1),
+  outBounce: (t) => {
+    const n = 7.5625;
+    const d = 2.75;
+    if (t < 1 / d) return n * t * t;
+    if (t < 2 / d) return n * (t -= 1.5 / d) * t + 0.75;
+    if (t < 2.5 / d) return n * (t -= 2.25 / d) * t + 0.9375;
+    return n * (t -= 2.625 / d) * t + 0.984375;
+  },
 };
+export const EASING_NAMES = Object.keys(EASINGS);
+
+interface Tween {
+  target: Record<string, unknown>;
+  to: Record<string, number>;
+  from: Record<string, number> | null;
+  start: number;
+  dur: number;
+  ease: (t: number) => number;
+  resolve: () => void;
+  owner: ComponentState | null;
+  persistent: boolean;
+}
+
+interface Listener {
+  name: string;
+  fn: (data: unknown, name: string) => unknown;
+  /** Component that registered it (removed with it), or null (plain script / module level). */
+  owner: ComponentState | null;
+}
 
 // ---------------------------------------------------------------------------
 // Components
@@ -208,6 +271,22 @@ export class Behaviour {
     if (!s) return;
     if (s.actor) s.host.world.destroy(s.actor);
     else s.host.remove(this);
+  }
+
+  /** Listens to emit(name, data) while this component lives. Returns a function that stops listening. */
+  on(name: string, fn: (data: unknown, name: string) => unknown): () => void {
+    const s = stateOf(this);
+    return s ? s.host.listen(String(name), fn.bind(this), s) : () => {};
+  }
+
+  emit(name: string, data?: unknown): void {
+    stateOf(this)?.host.world.emit(String(name), data);
+  }
+
+  /** Animates numeric fields of `target` (an instance, a component, camera...) over `seconds`. */
+  tween(target: object, props: Record<string, number>, seconds: number, ease: string | ((t: number) => number) | { ease?: string | ((t: number) => number); delay?: number } = 'outQuad'): Promise<void> {
+    const s = stateOf(this);
+    return s ? s.host.tween(target, props, seconds, ease, s) : Promise.resolve();
   }
 
   log(...args: unknown[]): void {
@@ -384,6 +463,9 @@ export class ScriptHost {
   private reported = new Set<string>();
   /** Awoken components waiting for their start() (Unity calls Start before the first Update). */
   private unstarted: Behaviour[] = [];
+  private listeners: Listener[] = [];
+  private tweens: Tween[] = [];
+  private evaluator: ScriptEvaluator = defaultEvaluator;
 
   constructor(readonly world: World) {}
 
@@ -396,6 +478,7 @@ export class ScriptHost {
 
   /** Evaluates every script as a module (imports first), then registers the component classes. */
   load(scripts: Record<string, string>, evaluate: ScriptEvaluator = defaultEvaluator): void {
+    this.evaluator = evaluate;
     const api = this.api();
     const failed = new Set<string>();
     const req = (name: string, from: string): Record<string, unknown> => {
@@ -419,7 +502,8 @@ export class ScriptHost {
         }, `scripts/${name}.js`);
       } catch (err) {
         failed.add(name);
-        const msg = `script ${name}: ${err instanceof Error ? err.message : String(err)}`;
+        const loc = scriptLocation(err, evaluate.lineOffset ?? 0);
+        const msg = `script ${name}: ${errorMessage(err)}${loc ? ` (at scripts/${loc.file}.js:${loc.line})` : ''}`;
         this.errors.push(msg);
         this.world.log(`ERROR ${msg}`);
         if (from) throw new Error(`import "${name}" failed`);
@@ -470,7 +554,7 @@ export class ScriptHost {
         pending = { state: { host: this, def, actor: null, scope: 'object', enabled: false, awoken: false, started: false, destroyed: true, config: {} }, params: {} };
         probe = new cls() as unknown as Record<string, unknown>;
       } catch (err) {
-        warnings.push(`fields could not be read (a field initializer threw: ${err instanceof Error ? err.message : String(err)}); move that code to awake()`);
+        warnings.push(`fields could not be read (a field initializer threw: ${errorMessage(err)}); move that code to awake()`);
       } finally {
         pending = null;
       }
@@ -657,6 +741,7 @@ export class ScriptHost {
       this.call(c, 'onDestroy');
     }
     s.destroyed = true;
+    this.forget(s);
     const list = this.container(s);
     const i = list.indexOf(c);
     if (i >= 0) list.splice(i, 1);
@@ -669,8 +754,147 @@ export class ScriptHost {
   drop(list: readonly Behaviour[]): void {
     for (const c of list) {
       const s = stateOf(c);
-      if (s) s.destroyed = true;
+      if (s) {
+        s.destroyed = true;
+        this.forget(s);
+      }
     }
+  }
+
+  /** Removes a destroyed component's listeners and tweens. */
+  private forget(s: ComponentState): void {
+    if (this.listeners.some((l) => l.owner === s)) this.listeners = this.listeners.filter((l) => l.owner !== s);
+    if (this.tweens.some((t) => t.owner === s)) this.tweens = this.tweens.filter((t) => t.owner !== s);
+  }
+
+  // ------------------------------------------------------------------ messages
+
+  listen(name: string, fn: (data: unknown, name: string) => unknown, owner: ComponentState | null): () => void {
+    const l: Listener = { name, fn, owner };
+    this.listeners.push(l);
+    return () => {
+      this.listeners = this.listeners.filter((x) => x !== l);
+    };
+  }
+
+  /** Delivers an emitted message: plain onMessage hooks, component onMessage(name, data), on() listeners. */
+  dispatch(name: string, data: unknown): void {
+    for (const fn of this.messageHooks.get(name) ?? []) this.run(`onMessage(${name})`, fn, name, data);
+    this.invokeAll(this.all(), 'onMessage', name, data);
+    for (const l of [...this.listeners]) {
+      if (l.name !== name && l.name !== '*') continue;
+      if (l.owner && (l.owner.destroyed || !l.owner.enabled)) continue;
+      this.run(`on(${name})`, l.fn, data, name);
+    }
+  }
+
+  // ------------------------------------------------------------------ tweens
+
+  tween(target: object, props: Record<string, number>, seconds: number, ease: string | ((t: number) => number) | { ease?: string | ((t: number) => number); delay?: number } = 'outQuad', owner: ComponentState | null = null): Promise<void> {
+    const opts = typeof ease === 'object' && ease !== null ? ease : { ease };
+    const e = opts.ease ?? 'outQuad';
+    const fn = typeof e === 'function' ? e : EASINGS[e];
+    if (!fn) return Promise.reject(new Error(`unknown easing "${String(e)}" (use ${EASING_NAMES.join(', ')})`));
+    if (!target || typeof target !== 'object') return Promise.reject(new Error('tween needs an object to animate'));
+    const to: Record<string, number> = {};
+    for (const [k, v] of Object.entries(props ?? {})) if (typeof v === 'number' && Number.isFinite(v)) to[k] = v;
+    return new Promise<void>((resolve) => {
+      this.tweens.push({
+        target: target as Record<string, unknown>,
+        to,
+        from: null,
+        start: this.world.clock + Math.max(0, Number(opts.delay) || 0),
+        dur: Math.max(0, Number(seconds) || 0),
+        ease: fn,
+        resolve,
+        owner,
+        persistent: owner?.scope === 'game',
+      });
+    });
+  }
+
+  /** Stops the tweens animating `target` (their promises resolve). */
+  stopTweens(target: object): void {
+    const stop = this.tweens.filter((t) => t.target === target);
+    this.tweens = this.tweens.filter((t) => t.target !== target);
+    for (const t of stop) t.resolve();
+  }
+
+  private tickTweens(): void {
+    if (!this.tweens.length) return;
+    const now = this.world.clock;
+    const keep: Tween[] = [];
+    const done: Tween[] = [];
+    for (const t of this.tweens) {
+      if (now < t.start) {
+        keep.push(t);
+        continue;
+      }
+      // Start from wherever the target is when the tween begins (chained tweens follow each other).
+      t.from ??= Object.fromEntries(Object.keys(t.to).map((k) => [k, Number(t.target[k]) || 0]));
+      const k = t.dur > 0 ? Math.min(1, (now - t.start) / t.dur) : 1;
+      const e = t.ease(k);
+      try {
+        for (const [p, v] of Object.entries(t.to)) t.target[p] = t.from[p] + (v - t.from[p]) * e;
+      } catch (err) {
+        this.report('tween', err);
+        done.push(t);
+        continue;
+      }
+      if (k >= 1) done.push(t);
+      else keep.push(t);
+    }
+    this.tweens = keep;
+    for (const t of done) t.resolve();
+  }
+
+  // ------------------------------------------------------------------ hot reload
+
+  /**
+   * Re-evaluates the scripts while the game runs: components keep their state (fields) and get the new
+   * methods; plain-script hooks are replaced (onStart doesn't run again). Returns the loading errors.
+   */
+  hotReload(scripts: Record<string, string>): string[] {
+    const live = [...new Set([...this.all(), ...this.unstarted])];
+    const oldDefs = new Map(this.components);
+    this.modules.clear();
+    this.components.clear();
+    this.functions.clear();
+    this.startHooks.length = 0;
+    this.sceneHooks.length = 0;
+    this.updateHooks.length = 0;
+    this.drawHooks.length = 0;
+    this.messageHooks.clear();
+    this.errors.length = 0;
+    this.reported.clear();
+    this.listeners = this.listeners.filter((l) => l.owner);
+    this.load(scripts, this.evaluator);
+    // Static state (GameManager.instance) carries over to the new class.
+    for (const [name, def] of this.components) {
+      const prev = oldDefs.get(name)?.cls as unknown as Record<string, unknown> | undefined;
+      if (!prev) continue;
+      const next = def.cls as unknown as Record<string, unknown>;
+      for (const k of Object.getOwnPropertyNames(prev)) {
+        if (['prototype', 'length', 'name', 'params'].includes(k) || typeof prev[k] === 'function' || Object.prototype.hasOwnProperty.call(next, k)) continue;
+        next[k] = prev[k];
+      }
+    }
+    let swapped = 0;
+    for (const c of live) {
+      const st = stateOf(c);
+      if (!st || st.destroyed) continue;
+      const def = this.components.get(st.def.name);
+      if (!def) {
+        this.world.log(`WARN hot reload: component "${st.def.name}" no longer exists; the old code keeps running until the scene restarts`);
+        continue;
+      }
+      Object.setPrototypeOf(c, def.cls.prototype);
+      st.def = def;
+      for (const p of def.params) if (!(p.name in c)) define(c, p.name, p.default);
+      swapped++;
+    }
+    this.world.log(`scripts reloaded (${swapped} live component${swapped === 1 ? '' : 's'} updated${this.errors.length ? `, ${this.errors.length} error${this.errors.length === 1 ? '' : 's'}` : ''})`);
+    return [...this.errors];
   }
 
   /** Adds a component at runtime (addComponent). */
@@ -720,7 +944,8 @@ export class ScriptHost {
   }
 
   private report(where: string, err: unknown): void {
-    const msg = `script ${where}: ${err instanceof Error ? err.message : String(err)}`;
+    const loc = scriptLocation(err, this.evaluator.lineOffset ?? 0);
+    const msg = `script ${where}: ${errorMessage(err)}${loc ? ` (at scripts/${loc.file}.js:${loc.line})` : ''}`;
     if (this.reported.has(msg)) return;
     this.reported.add(msg);
     this.world.log(`ERROR ${msg}`);
@@ -860,6 +1085,7 @@ export class ScriptHost {
 
   /** Resolves waits, waitUntil conditions and moveTo movements. Called every frame. */
   tick(dt: number): void {
+    this.tickTweens();
     const now = this.world.clock;
     if (this.timers.length) {
       const due = this.timers.filter((t) => t.at <= now);
@@ -931,6 +1157,7 @@ export class ScriptHost {
     this.timers = this.timers.filter((t) => t.persistent);
     this.conditions = this.conditions.filter((c) => c.persistent);
     this.movers = [];
+    this.tweens = this.tweens.filter((t) => t.persistent);
   }
 
   // ------------------------------------------------------------------ drawing
@@ -1030,6 +1257,9 @@ export class ScriptHost {
       onSceneStart: (scene: string | Fn, fn?: Fn) => (typeof scene === 'function' ? this.sceneHooks.push({ scene: null, fn: scene }) : this.sceneHooks.push({ scene, fn: fn! })),
       onUpdate: (fn: Fn) => register(this.updateHooks, fn),
       onDraw: (fn: Fn) => register(this.drawHooks, fn),
+      on: (name: string, fn: (data: unknown, name: string) => unknown) => this.listen(String(name), fn, null),
+      tween: (target: object, props: Record<string, number>, seconds: number, ease?: string | ((t: number) => number) | { ease?: string; delay?: number }) => this.tween(target, props, seconds, ease),
+      stopTweens: (target: object) => this.stopTweens(target),
       onMessage: (msg: string, fn: Fn) => {
         const l = this.messageHooks.get(msg) ?? [];
         l.push(fn);
@@ -1047,6 +1277,7 @@ export class ScriptHost {
         get name() { return w.scene.name; },
         get width() { return w.widthPx; },
         get height() { return w.heightPx; },
+        get tileSize() { return w.tileSize; },
         vars: varsProxy(() => w.sceneVars),
       },
       game: {
@@ -1072,11 +1303,11 @@ export class ScriptHost {
         return this.handle(a);
       },
       // world
-      goto: (scene: string) => w.gotoScene(String(scene)),
-      restart: () => w.restartScene(),
+      goto: (scene: string, opts: { fade?: number; color?: string } = {}) => w.gotoScene(String(scene), opts ?? {}),
+      restart: (opts: { fade?: number; color?: string } = {}) => w.restartScene(opts ?? {}),
       sound: (name: string, volume = 0.5) => w.opts.sound?.(String(name), volume),
       shake: (intensity = 3, seconds = 0.3) => w.startShake(intensity, seconds),
-      emit: (msg: string) => w.emit(String(msg)),
+      emit: (msg: string, data?: unknown) => w.emit(String(msg), data),
       lockControls: (on = true) => (w.controlsLocked = !!on),
       log: (...args: unknown[]) => w.log(args.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')),
       key: (name: string) => w.input.down.has(String(name)),

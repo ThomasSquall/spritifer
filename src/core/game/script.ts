@@ -416,6 +416,46 @@ export interface UiApi {
   measure(text: string, size?: number): { width: number; height: number };
   /** Converts world coordinates (instance x/y) to screen coordinates. */
   toScreen(x: number, y: number): { x: number; y: number };
+  // Widgets (input since the last draw: no double presses).
+  /** Key pressed since the last draw; consume = true hides it from the widgets drawn after. */
+  pressed(key: string, consume?: boolean): boolean;
+  mouse: { x: number; y: number; clicked: boolean; inside(x: number, y: number, w: number, h: number): boolean };
+  button(label: string, x: number, y: number, opts?: ButtonOptions): boolean;
+  menu(id: string, items: (string | MenuItem)[], x: number, y: number, opts?: MenuOptions): number | null;
+  menuIndex(id: string, set?: number): number;
+  window(x: number, y: number, w: number, h: number, title?: string, opts?: { color?: string; border?: string; alpha?: number }): void;
+}
+
+export interface ButtonOptions {
+  w?: number;
+  h?: number;
+  color?: string;
+  textColor?: string;
+  /** A key that also presses it ("enter", "x"). */
+  key?: string;
+  disabled?: boolean;
+}
+
+export interface MenuItem {
+  label: string;
+  /** Text aligned to the right (prices, quantities). */
+  right?: string;
+  disabled?: boolean;
+}
+
+export interface MenuOptions {
+  w?: number;
+  /** Row height in px (default 9). */
+  rowHeight?: number;
+  title?: string;
+  /** Escape / action2 return -1. */
+  cancel?: boolean;
+  /** Draw a panel behind (default true). */
+  panel?: boolean;
+  /** Keyboard input on (default true): turn off for menus that only react to the mouse. */
+  keys?: boolean;
+  color?: string;
+  selectedColor?: string;
 }
 
 /** Wraps lines to `maxCols` characters (the pixel font is monospaced). */
@@ -1219,10 +1259,25 @@ export class ScriptHost {
 
   // ------------------------------------------------------------------ drawing
 
+  /** Input gathered since the last draw, for widgets (several steps may run per draw, or none). */
+  private uiInput = { pressed: new Set<string>(), clicks: [] as [number, number][], pointer: null as [number, number] | null };
+  private menus = new Map<string, number>();
+
+  latchInput(input: { pressed: Set<string>; clicks: [number, number][]; pointer: [number, number] | null }): void {
+    for (const k of input.pressed) this.uiInput.pressed.add(k);
+    this.uiInput.clicks.push(...input.clicks);
+    if (input.pointer) this.uiInput.pointer = input.pointer;
+  }
+
   draw(r: Renderer, camX: number, camY: number, zoom = 1): void {
     const drawers = this.all().filter((c) => this.has(c, 'onDraw'));
+    const latch = this.uiInput;
+    this.uiInput = { pressed: new Set(), clicks: [], pointer: latch.pointer };
     if (!this.drawHooks.length && !drawers.length) return;
     const w = this.world;
+    const inside = (px: number, py: number, x: number, y: number, ww: number, hh: number) => px >= x && px < x + ww && py >= y && py < y + hh;
+    const clickIn = (x: number, y: number, ww: number, hh: number) => latch.clicks.some(([cx, cy]) => inside(cx, cy, x, y, ww, hh));
+    const hover = (x: number, y: number, ww: number, hh: number) => !!latch.pointer && inside(latch.pointer[0], latch.pointer[1], x, y, ww, hh);
     const ui: UiApi = {
       width: w.game.width,
       height: w.game.height,
@@ -1269,6 +1324,84 @@ export class ScriptHost {
         return { width: m.width * size, height: m.height * size };
       },
       toScreen: (x, y) => ({ x: Math.round((x - camX) * zoom), y: Math.round((y - camY) * zoom) }),
+      pressed: (key, consume = false) => {
+        const k = String(key);
+        const hit = latch.pressed.has(k);
+        if (hit && consume) latch.pressed.delete(k);
+        return hit;
+      },
+      mouse: {
+        x: latch.pointer?.[0] ?? -1,
+        y: latch.pointer?.[1] ?? -1,
+        clicked: latch.clicks.length > 0,
+        inside: (x, y, ww, hh) => hover(x, y, ww, hh),
+      },
+      window: (x, y, ww, hh, title, o = {}) => {
+        ui.panel(x, y, ww, hh, o);
+        if (title) {
+          r.rect(x + 1, y + 1, ww - 2, 9, o.border ?? '#f4f4f4', 0.15);
+          ui.text(String(title), x + 4, y + 3, { color: '#ffcd75' });
+        }
+      },
+      button: (label, x, y, o = {}) => {
+        const t = String(label);
+        const m = measureText(t);
+        const ww = o.w ?? m.width + 10;
+        const hh = o.h ?? 11;
+        const hot = !o.disabled && hover(x, y, ww, hh);
+        r.rect(x, y, ww, hh, o.disabled ? '#333c57' : hot ? '#3b5dc9' : (o.color ?? '#29366f'), 0.95);
+        r.rect(x, y + hh - 1, ww, 1, '#000000', 0.5);
+        ui.text(t, x + Math.round(ww / 2), y + Math.round((hh - 6) / 2), { align: 'center', color: o.disabled ? '#5a6988' : (o.textColor ?? '#f4f4f4') });
+        if (o.disabled) return false;
+        return clickIn(x, y, ww, hh) || (!!o.key && latch.pressed.has(o.key));
+      },
+      menuIndex: (id, set) => {
+        if (typeof set === 'number') this.menus.set(String(id), set);
+        return this.menus.get(String(id)) ?? 0;
+      },
+      menu: (id, items, x, y, o = {}) => {
+        const list: MenuItem[] = items.map((it) => (typeof it === 'string' ? { label: it } : { ...it, label: String(it.label) }));
+        if (!list.length) return null;
+        const rh = o.rowHeight ?? 9;
+        const top = o.title ? 12 : 4;
+        const ww = o.w ?? Math.max(...list.map((it) => measureText(it.label).width + (it.right ? measureText(it.right).width + 8 : 0))) + 22;
+        const hh = top + list.length * rh + 3;
+        let sel = Math.max(0, Math.min(list.length - 1, this.menus.get(String(id)) ?? 0));
+        const enabled = (i: number) => !list[i].disabled;
+        const step = (d: number) => {
+          for (let k = 1; k <= list.length; k++) {
+            const i = (sel + d * k + list.length * k) % list.length;
+            if (enabled(i)) return i;
+          }
+          return sel;
+        };
+        let result: number | null = null;
+        if (o.keys !== false) {
+          if (latch.pressed.has('down')) sel = step(1);
+          if (latch.pressed.has('up')) sel = step(-1);
+          if ((latch.pressed.has('action') || latch.pressed.has('enter')) && enabled(sel)) result = sel;
+          if (o.cancel && (latch.pressed.has('action2') || latch.pressed.has('escape'))) result = -1;
+        }
+        list.forEach((_, i) => {
+          const ry = y + top + i * rh - 1;
+          if (enabled(i) && hover(x, ry, ww, rh)) sel = i;
+          if (enabled(i) && clickIn(x, ry, ww, rh)) result = i;
+        });
+        this.menus.set(String(id), sel);
+        if (o.panel !== false) ui.window(x, y, ww, hh, o.title);
+        list.forEach((it, i) => {
+          const ry = y + top + i * rh;
+          const isSel = i === sel;
+          const color = it.disabled ? '#5a6988' : isSel ? (o.selectedColor ?? '#ffcd75') : (o.color ?? '#f4f4f4');
+          if (isSel) {
+            r.rect(x + 2, ry - 1, ww - 4, rh - 1, '#ffffff', 0.08);
+            ui.text('>', x + 4, ry, { color });
+          }
+          ui.text(it.label, x + 11, ry, { color });
+          if (it.right) ui.text(it.right, x + ww - 5, ry, { align: 'right', color });
+        });
+        return result;
+      },
     };
     // Instances first (health bars), then scene and game components (HUD on top), then plain onDraw hooks.
     const order = (c: Behaviour) => { const st = stateOf(c)!; return st.actor ? 0 : st.scope === 'scene' ? 1 : 2; };
@@ -1345,6 +1478,8 @@ export class ScriptHost {
         get time() { return w.time; },
         get clock() { return w.clock; },
         get dialogOpen() { return !!host.dialog; },
+        get paused() { return w.paused; },
+        get music() { return w.music; },
       },
       camera: {
         get x() { return w.camera.x; },
@@ -1391,6 +1526,7 @@ export class ScriptHost {
         const hit = w.raycast(Number(x1), Number(y1), Number(x2), Number(y2), { ...this.filter(f), solids: o.solids, instances: o.instances });
         return hit ? { x: hit.x, y: hit.y, distance: hit.distance, normalX: hit.normalX, normalY: hit.normalY, tile: hit.tile, instance: this.handle(hit.actor ?? undefined) ?? null } : null;
       },
+      particles: (x: number, y: number, preset: unknown = 'sparks', overrides: Record<string, unknown> = {}) => w.particles.burst(Number(x), Number(y), preset as string, (overrides ?? {}) as object),
       findPath: (x1: number, y1: number, x2: number, y2: number, opts: { diagonal?: boolean; partial?: boolean } = {}) => w.findPath(Number(x1), Number(y1), Number(x2), Number(y2), opts ?? {}),
       player: () => this.handle(w.actors.find((a) => !a.destroyed && a.behaviors.some((b) => (b.type === 'platformer' || b.type === 'topdown') && b.controls !== false))),
       spawn: (name: string, x: number, y: number, props: Record<string, Value> = {}) => {
@@ -1405,6 +1541,10 @@ export class ScriptHost {
       shake: (intensity = 3, seconds = 0.3) => w.startShake(intensity, seconds),
       emit: (msg: string, data?: unknown) => w.emit(String(msg), data),
       lockControls: (on = true) => (w.controlsLocked = !!on),
+      pause: (on = true) => (w.paused = !!on),
+      music: (name: string, opts: { volume?: number; loop?: boolean; fade?: number } = {}) => w.playMusic(String(name), opts ?? {}),
+      stopMusic: (fade = 1) => w.stopMusic(Number(fade)),
+      setVolume: (channel: 'music' | 'sfx', value: number) => w.setVolume(channel, value),
       log: (...args: unknown[]) => w.log(args.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')),
       key: (name: string) => w.input.down.has(String(name)),
       pressed: (name: string) => w.input.pressed.has(String(name)),

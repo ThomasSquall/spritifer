@@ -58,6 +58,8 @@ export interface CompleteContext {
   properties: string[];
   /** Group tags of object types. */
   tags?: string[];
+  /** Audio files (audio/). */
+  audio?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +494,8 @@ const STRING_ARGS: Record<string, (c: CompleteContext) => CompletionItem[]> = {
   component: (c) => c.components.map((x) => ({ label: x.name, kind: 'component', detail: x.path ? `scripts/${x.path}.js` : 'legacy behavior', doc: x.doc ?? `params: ${x.params.map((p) => p.name).join(', ') || 'none'}`, insert: x.name })),
   object: (c) => c.objects.map((o) => plain(o, 'value', 'object type')),
   scene: (c) => c.scenes.map((o) => plain(o, 'value', 'scene')),
-  sound: (c) => c.sounds.map((o) => plain(o, 'value', 'sound')),
+  sound: (c) => [...c.sounds.map((o) => plain(o, 'value', 'sound')), ...(c.audio ?? []).map((o) => plain(o, 'value', 'audio file'))],
+  music: (c) => (c.audio ?? []).map((o) => plain(o, 'value', 'audio file')),
   dialogue: (c) => c.dialogues.map((o) => plain(o, 'value', 'dialogue')),
   sprite: (c) => c.sprites.map((o) => plain(o, 'value', 'sprite')),
   key: (c) => c.keys.map((o) => plain(o, 'value', 'key')),
@@ -508,6 +511,7 @@ const FN_ARG: Record<string, keyof typeof STRING_ARGS> = {
   goto: 'scene', onSceneStart: 'scene',
   sound: 'sound', dialogue: 'dialogue', sprite: 'sprite', key: 'key', pressed: 'key', sendMessage: 'method',
   findWithTag: 'tag', hasTag: 'tag', addTag: 'tag', removeTag: 'tag', isA: 'object',
+  music: 'music',
   saveGame: 'slot', loadGame: 'slot', hasSave: 'slot', deleteSave: 'slot',
 };
 

@@ -138,6 +138,29 @@ export default class Patrol extends Behaviour {
 - `await this.tween(this.self, { y: this.self.y - 12, opacity: 0 }, 0.4, 'outQuad')` anima qualsiasi campo numerico: istanze, camera, componenti. Easing disponibili: `linear`, `inQuad`, `outQuad`, `inOutQuad`, `inCubic`, `outCubic`, `inOutCubic`, `inOutSine`, `outBack`, `outElastic`, `outBounce`.
 - `goto('dungeon', { fade: 0.4 })` e `restart({ fade: 0.3 })` fanno una dissolvenza in nero (o del colore scelto). Anche le azioni evento *Go to scene* e *Restart scene* hanno il campo *fade*.
 
+**Particelle.** `particles(x, y, 'dust')` crea una raffica di particelle. Preset: `dust`, `sparks`, `hit`, `explosion`, `smoke`, `magic`, `leaves`, `splash`, `confetti`, `heal`. Si possono anche definire da zero (`{ color, speed, angle, spread, life, size, gravity, drag, fade, shrink, behind }`). Negli eventi c'è l'azione **Particles**; in libreria `fx/ParticleEmitter` produce particelle di continuo (polvere sotto i piedi, torce, aure).
+
+**Eventi sui frame delle animazioni.** Nell'editor degli sprite, il campo ⚑ accanto alla durata assegna degli eventi a un frame, per esempio `hit` sul frame del colpo di spada o `step` sui passi. Quando quel frame compare, i componenti ricevono `onAnimationEvent(evento, animazione)` e negli eventi scatta il trigger **Animation event**.
+
+**Interfaccia e pausa.** Dentro `onDraw(ui)`:
+
+- `ui.menu(id, voci, x, y, { title, cancel })` è una lista con cursore, gestita da tastiera, gamepad e mouse, con voci disabilitate e testo a destra (prezzi). Restituisce l'indice scelto.
+- `ui.button(testo, x, y)` restituisce `true` quando viene cliccato.
+- Ci sono anche `ui.window(...)`, `ui.mouse` e `ui.pressed(tasto, consuma)`.
+
+`pause(true)` ferma il gioco per i menu di pausa e gli inventari: si fermano movimento, tempo e timer, mentre `onDraw` e l'hook `pausedUpdate` continuano a girare. Negli eventi c'è l'azione **Pause game**.
+
+**Musica e audio.** Nella pagina Game, **Audio** importa file mp3, ogg, wav e m4a (cartella `audio/`). Si usano così:
+
+- `sound('nome')` per gli effetti;
+- `music('nome', { fade })` cambia brano con una dissolvenza incrociata;
+- `stopMusic()` e `setVolume('music' | 'sfx', v)`;
+- ogni scena può avere la sua musica (scheda *Scene*), e negli eventi ci sono **Play music** e **Stop music**.
+
+I file finiscono dentro l'HTML esportato.
+
+**Azioni di input.** Nella pagina Game, **Input actions** assegna un nome ai comandi (`jump`, `attack`, `menu`) e li collega a tasti e pulsanti del gamepad (`pad:a`, `pad:b`, `pad:start`…). Script ed eventi usano il nome come un tasto: `pressed('attack')`, trigger *Key pressed attack*. Un'azione con il nome di un tasto predefinito (`action`, `up`…) lo rimappa.
+
 **Varianti di tipo.** Come i *prefab variant* di Unity: dalla pagina di un oggetto, **Variant** crea un tipo basato su quello (oppure si sceglie *Based on*).
 
 - La variante eredita sprite, hitbox, proprietà, tag, componenti ed eventi, e salva solo quello che cambia. Per esempio `red_slime` con un altro sprite e `Health.max = 6`.
@@ -273,6 +296,7 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Gioco | `game_reference` (vocabolario completo di trigger, condizioni, azioni, comportamenti ed espressioni), `get_game`, `set_game`, `set_object`, `delete_object`, `set_events` |
 | Scene | `create_scene`, `get_scene` (anche la mappa come griglia di caratteri), `update_scene`, `delete_scene`, `set_tile_layer`, `paint_tiles` (righe + legenda come `draw_pixels`, o rettangoli), `place_instances`, `update_instances`, `tileset_preview` (indici dei tile) |
 | Dialoghi | `dialogue_reference`, `list_dialogues`, `read_dialogue`, `write_dialogue` (controllato prima di salvare), `edit_dialogue`, `delete_dialogue`; `place_instances` / `update_instances` con nome, sprite e `props.dialogue` per istanza |
+| Audio e input | `list_audio`, `import_audio` (da un file sul computer), `delete_audio`; `update_scene` con `music`; `set_game` con `actions`; `set_frame_events` (eventi sui frame) |
 | Script | `set_object` / `place_instances` / `update_instances` con `tags`; `component_library` / `add_library_component` (componenti pronti), `script_reference` (componenti, ciclo di vita, API completa con esempio), `list_scripts` (cartelle, componenti con parametri/hook/metodi), `read_script`, `write_script` (percorsi con cartelle, controllo della sintassi), `edit_script`, `move_script` (sposta/rinomina file e cartelle aggiornando i riferimenti), `delete_script`; `place_instances`/`update_instances` (`components`), `update_scene` e `set_game` (`components`) attaccano i componenti |
 | Progetti | `list_projects`, `open_project`, `create_project` (vuoto, platformer, rpg) |
 | Verifica ed export del gioco | `validate_game`, `preview_scene`, `playtest` (gioco headless con input scriptati e risposte ai menu: log, dialoghi, stato, screenshot), `export_game` (HTML unico per il web), `undo_game_change` |

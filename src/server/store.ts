@@ -16,6 +16,7 @@ export const GAME_FILE = 'game.json';
 
 export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script' | 'dialogue';
 const SCRIPT_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+const AUDIO_MIME: Record<string, string> = { mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4' };
 /** Script names are paths in scripts/ without .js: "enemies/Patrol". */
 const SCRIPT_PATH_RE = /^(?:[A-Za-z_][A-Za-z0-9_-]{0,63}\/){0,8}[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
 
@@ -297,6 +298,46 @@ export class Workspace {
     fs.mkdirSync(this.scriptsDir, { recursive: true });
     fs.writeFileSync(f, content);
     return true;
+  }
+
+  // ------------------------------------------------------------------ audio
+
+  get audioDir(): string {
+    return path.join(this.dir, 'audio');
+  }
+
+  /** Audio files in audio/ (music and sound effects): name = file name without the extension. */
+  listAudio(): { name: string; file: string; size: number; mime: string }[] {
+    if (!fs.existsSync(this.audioDir)) return [];
+    return fs
+      .readdirSync(this.audioDir)
+      .map((f) => ({ f, m: /^([A-Za-z_][A-Za-z0-9_-]{0,63})\.(mp3|ogg|wav|m4a)$/i.exec(f) }))
+      .filter((x) => x.m)
+      .map(({ f, m }) => ({ name: m![1], file: f, size: fs.statSync(path.join(this.audioDir, f)).size, mime: AUDIO_MIME[m![2].toLowerCase()] }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  readAudio(name: string): { data: Buffer; mime: string } {
+    const a = this.listAudio().find((x) => x.name === name);
+    if (!a) throw new Error(`Audio "${name}" not found.`);
+    return { data: fs.readFileSync(path.join(this.audioDir, a.file)), mime: a.mime };
+  }
+
+  /** Saves an audio file (replacing one with the same name, whatever its extension). */
+  writeAudio(name: string, ext: string, data: Buffer): void {
+    if (!SCRIPT_RE.test(name)) throw new Error(`Invalid audio name "${name}". Use letters, digits, "_" and "-".`);
+    const e = ext.toLowerCase().replace(/^\./, '');
+    if (!AUDIO_MIME[e]) throw new Error(`Unsupported audio format ".${e}" (use mp3, ogg, wav or m4a)`);
+    if (data.length > 20 * 1024 * 1024) throw new Error('Audio files are limited to 20 MB');
+    fs.mkdirSync(this.audioDir, { recursive: true });
+    for (const a of this.listAudio()) if (a.name === name) fs.rmSync(path.join(this.audioDir, a.file));
+    fs.writeFileSync(path.join(this.audioDir, `${name}.${e}`), data);
+  }
+
+  removeAudio(name: string): void {
+    const a = this.listAudio().find((x) => x.name === name);
+    if (!a) throw new Error(`Audio "${name}" not found.`);
+    fs.rmSync(path.join(this.audioDir, a.file));
   }
 
   // ------------------------------------------------------------------ dialogues

@@ -38,7 +38,15 @@ Oltre a quanto richiesto (un behaviour per file, cartelle, ciclo di vita, parame
 - **10. Pathfinding**: `findPath`, `self.pathTo`, `self.stopMoving`, più i componenti di libreria `Roam` e `ChasePath`.
 - **11. Varianti di tipo**: `extends`, con ereditarietà di sprite, hitbox, proprietà, tag, componenti (override dei parametri) ed eventi; query e collisioni sul tipo padre includono le varianti.
 
-Restano: mappatura delle azioni (9), musica e audio importato (12). Idee nuove: particelle, widget per l'interfaccia (pulsanti, liste), eventi legati ai frame delle animazioni.
+## Fatto nel quinto giro
+
+- **9. Mappatura delle azioni**: azioni con nome collegate a tasti e pulsanti del gamepad, nella pagina Game e in `set_game`.
+- **12. Musica e audio importato**: cartella `audio/`, effetti da file, musica con dissolvenza incrociata, musica per scena, volumi separati, file inclusi nell'export.
+- **Particelle**: preset e opzioni, azione evento, componente `ParticleEmitter`.
+- **Widget per l'interfaccia**: `ui.menu`, `ui.button`, `ui.window`, `ui.mouse`, `pause()` con `pausedUpdate`.
+- **Eventi sui frame delle animazioni**: campo ⚑ nell'editor degli sprite, `set_frame_events`, `onAnimationEvent` e il trigger *Animation event*.
+
+Tutte le proposte di questo documento sono state realizzate.
 
 ## Prossimi passi consigliati (in ordine)
 

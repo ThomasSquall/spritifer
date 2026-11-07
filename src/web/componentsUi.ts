@@ -179,7 +179,7 @@ function overrideInput(p: ComponentParam, cur: Value | undefined, inherited: Val
       break;
     }
     default: {
-      const values = p.type === 'choice' ? (p.options ?? []) : p.type === 'object' ? (ctx.game?.objects.map((o) => o.name) ?? []) : p.type === 'scene' ? ctx.scenes.map((s) => s.name) : p.type === 'sound' ? SOUNDS : p.type === 'sprite' ? ctx.sprites.map((s) => s.name) : p.type === 'dialogue' ? ctx.dialogueInfo.nodes : p.type === 'key' ? KEYS : [];
+      const values = p.type === 'choice' ? (p.options ?? []) : p.type === 'object' ? (ctx.game?.objects.map((o) => o.name) ?? []) : p.type === 'scene' ? ctx.scenes.map((s) => s.name) : p.type === 'sound' ? [...SOUNDS, ...ctx.audio] : p.type === 'sprite' ? ctx.sprites.map((s) => s.name) : p.type === 'dialogue' ? ctx.dialogueInfo.nodes : p.type === 'key' ? [...Object.keys(ctx.game?.actions ?? {}), ...KEYS] : [];
       const s = h('select', { onchange: () => onChange(s.value === '' ? undefined : s.value) }, ...opts(values));
       input = s;
     }

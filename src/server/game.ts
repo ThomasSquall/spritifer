@@ -48,7 +48,10 @@ export function buildAsset(sprite: Sprite, withImage: boolean): BuiltAsset {
         name: sprite.name,
         width: sprite.width,
         height: sprite.height,
-        frames: meta.frames.map((f) => ({ x: f.frame.x, y: f.frame.y, w: f.frame.w, h: f.frame.h, duration: f.duration })),
+        frames: meta.frames.map((f, i) => {
+          const ev = sprite.frames[Number(/ (\d+)$/.exec(f.filename)?.[1] ?? i)]?.events;
+          return { x: f.frame.x, y: f.frame.y, w: f.frame.w, h: f.frame.h, duration: f.duration, ...(ev?.length ? { events: [...ev] } : {}) };
+        }),
         tags: sprite.tags.map((t) => ({ name: t.name, from: t.from, to: t.to, direction: t.direction })),
         grid: sprite.grid,
       },
@@ -95,8 +98,11 @@ export function loadGameBundle(ws: Workspace, opts: { images?: boolean } = {}): 
   const dialogues = dialogueSources;
   const book = buildDialogueBook(dialogues);
   const dialogueInfo = { nodes: [...book.nodes.keys()].sort(), errors: book.errors };
-  const problems = validateGame(game, scenes, available, scriptInfo, dialogueInfo);
-  return { bundle: { game, scenes: Object.fromEntries(scenes.map((s) => [s.name, s])), sprites, scripts, dialogues }, sheets, problems, scriptInfo, dialogueInfo };
+  const problems = validateGame(game, scenes, available, scriptInfo, dialogueInfo, ws.listAudio().map((a) => a.name));
+  const audioList = ws.listAudio();
+  // Played/exported games carry the files as data URLs; headless runs only need the names.
+  const audio = Object.fromEntries(audioList.map((a) => [a.name, opts.images ? `data:${a.mime};base64,${ws.readAudio(a.name).data.toString('base64')}` : '']));
+  return { bundle: { game, scenes: Object.fromEntries(scenes.map((s) => [s.name, s])), sprites, scripts, dialogues, ...(audioList.length ? { audio } : {}) }, sheets, problems, scriptInfo, dialogueInfo };
 }
 
 // ---------------------------------------------------------------------------

@@ -46,6 +46,8 @@ export function sheetContext(obj: ObjectType | null, animations: string[]): Shee
     scriptBehaviors: state.scriptInfo.behaviors,
     dialogues: state.dialogueInfo.nodes,
     sprites: state.sprites.map((s) => s.name),
+    audio: state.audio,
+    actions: Object.keys(g.actions ?? {}),
   };
 }
 

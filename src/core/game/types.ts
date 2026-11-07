@@ -136,6 +136,8 @@ export interface Scene {
   ySort?: boolean;
   /** Remember placed instances when leaving the scene (positions, properties, destroyed ones): RPG towns. Restarting the scene forgets. */
   persistent?: boolean;
+  /** Music when the scene starts: an audio file name, "-" for silence; absent = keep what plays. */
+  music?: string;
   /** Scene variables (reset when the scene starts). Read as `scene.name`. */
   variables: Record<string, Value>;
   /** Scene components (managers, level logic, HUD): `{ type: "script", name, ...params }`. */
@@ -164,6 +166,11 @@ export interface GameProject {
   objects: ObjectType[];
   /** Global components, alive for the whole game across scenes (GameManager, Inventory, HUD). */
   components?: Behavior[];
+  /**
+   * Input actions: name → keys/buttons ("jump": ["space", "w", "pad:a"]). Scripts and events use the name
+   * like a key. A name like "action" or "up" remaps that built-in key.
+   */
+  actions?: Record<string, string[]>;
   rev: string;
   updatedBy?: string;
 }
@@ -286,9 +293,22 @@ export function normalizeGame(v: unknown): GameProject {
     variables: vars(o.variables),
     objects: Array.isArray(o.objects) ? o.objects.map(normalizeObject) : [],
     ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
+    ...(normalizeActions(o.actions) ? { actions: normalizeActions(o.actions) } : {}),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
   };
+}
+
+/** Input actions: identifier → unique key names (lowercase, e.g. "space", "arrowup", "pad:a"). */
+export function normalizeActions(v: unknown): Record<string, string[]> | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const out: Record<string, string[]> = {};
+  for (const [k, keys] of Object.entries(v)) {
+    if (!GAME_NAME_RE.test(k)) continue;
+    const list = (Array.isArray(keys) ? keys : typeof keys === 'string' ? keys.split(',') : []).map((x) => String(x).trim().toLowerCase()).filter((x) => /^[a-z0-9:_-]{1,24}$/.test(x));
+    out[k] = [...new Set(list)];
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 export function normalizeScene(v: unknown): Scene {
@@ -344,6 +364,7 @@ export function normalizeScene(v: unknown): Scene {
     events: normalizeEvents(o.events),
     ...(o.ySort === true ? { ySort: true } : {}),
     ...(o.persistent === true ? { persistent: true } : {}),
+    ...(typeof o.music === 'string' && o.music ? { music: o.music } : {}),
     variables: vars(o.variables),
     ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
     rev: str(o.rev, newGameId()),
@@ -379,6 +400,8 @@ export interface AssetFrame {
   w: number;
   h: number;
   duration: number;
+  /** Animation events of this frame. */
+  events?: string[];
 }
 
 export interface AssetTag {
@@ -409,4 +432,6 @@ export interface GameBundle {
   scripts?: Record<string, string>;
   /** Dialogue sources by file name (dialogues/<name>.dialogue). */
   dialogues?: Record<string, string>;
+  /** Audio files by name (audio/<name>.mp3...): data URLs in played/exported games, "" in headless runs. */
+  audio?: Record<string, string>;
 }

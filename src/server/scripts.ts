@@ -77,6 +77,7 @@ export function refreshScriptTypes(ws: Workspace, info?: ScriptInfo): boolean {
       variables: game.variables,
       properties,
       tags: [...new Set(game.objects.flatMap((o) => o.tags ?? []))].sort(),
+      audio: ws.listAudio().map((a) => a.name),
     });
     const a = ws.writeScriptSupportFile('jsconfig.json', JSCONFIG);
     const b = ws.writeScriptSupportFile('spritifer.d.ts', dts);

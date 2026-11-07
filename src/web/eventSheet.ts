@@ -16,6 +16,7 @@ import { checkExpr } from '../core/game/expr.js';
 import type { EventStep, GameEvent, Value } from '../core/game/types.js';
 import { SoundBoard } from '../runtime/audio.js';
 import { clear, h, icon, iconButton } from './dom.js';
+import { apiBase } from './api.js';
 
 export interface SheetContext {
   objects: string[];
@@ -33,6 +34,20 @@ export interface SheetContext {
   dialogues: string[];
   /** Sprite names (component params of type sprite). */
   sprites?: string[];
+  /** Audio files of the project (audio/). */
+  audio?: string[];
+  /** Input action names (Game tab). */
+  actions?: string[];
+}
+
+/** Plays a built-in sound or an audio file of the project (editor previews). */
+export function previewSound(name: string, audio: string[] = []): void {
+  if (audio.includes(name)) {
+    void new Audio(`${apiBase()}/audio/${encodeURIComponent(name)}`).play().catch(() => {});
+    return;
+  }
+  sounds.unlock();
+  sounds.play(name, 0.5);
 }
 
 const sounds = new SoundBoard();
@@ -74,7 +89,7 @@ export function paramInput(spec: ParamSpec, value: Value | undefined, onChange: 
       break;
     }
     case 'key':
-      input = select(KEYS, String(v), onChange);
+      input = select([...(ctx.actions ?? []).map((a): [string, string] => [a, `${a} (action)`]), ...KEYS.filter((k) => !ctx.actions?.includes(k))], String(v), onChange);
       break;
     case 'object':
       input = select([['', '— object —'], ...ctx.objects], String(v), onChange);
@@ -112,8 +127,18 @@ export function paramInput(spec: ParamSpec, value: Value | undefined, onChange: 
       const wrap = h('span', { class: 'param-inline' });
       let cur = String(v);
       wrap.append(
-        select(SOUNDS, cur, (x) => { cur = x; onChange(x); }),
-        h('button', { class: 'icon-btn tiny', title: 'Preview sound', type: 'button', onclick: () => { sounds.unlock(); sounds.play(cur, 0.5); } }, icon('play', 12)),
+        select([...SOUNDS, ...(ctx.audio ?? [])], cur, (x) => { cur = x; onChange(x); }),
+        h('button', { class: 'icon-btn tiny', title: 'Preview sound', type: 'button', onclick: () => previewSound(cur, ctx.audio) }, icon('play', 12)),
+      );
+      input = wrap;
+      break;
+    }
+    case 'music': {
+      const wrap = h('span', { class: 'param-inline' });
+      let cur = String(v);
+      wrap.append(
+        select([['', (ctx.audio ?? []).length ? '— music —' : '— no audio files (Game tab) —'], ...(ctx.audio ?? [])], cur, (x) => { cur = x; onChange(x); }),
+        h('button', { class: 'icon-btn tiny', title: 'Listen', type: 'button', onclick: () => cur && previewSound(cur, ctx.audio) }, icon('play', 12)),
       );
       input = wrap;
       break;

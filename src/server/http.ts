@@ -185,6 +185,7 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
   if (parts[1] === 'scenes') return handleScenes(ws, req, res, parts.slice(2), url);
   if (parts[1] === 'scripts') return handleScripts(ws, req, res, parts.slice(2));
   if (parts[1] === 'dialogues') return handleDialogues(ws, req, res, parts.slice(2));
+  if (parts[1] === 'audio') return handleAudio(ws, req, res, parts.slice(2));
 
   if (parts[1] !== 'sprites') throw new HttpError(404, 'Not found');
   const name = parts[2];
@@ -406,6 +407,32 @@ async function handleScripts(ws: Workspace, req: http.IncomingMessage, res: http
     return sendJson(res, 200, { name: body.to });
   }
   throw new HttpError(404, 'Not found');
+}
+
+/** Audio files of the project (audio/): list, play, upload (base64 JSON), delete. */
+async function handleAudio(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {
+  const method = req.method ?? 'GET';
+  const name = parts[0];
+  if (!name) {
+    if (method === 'GET') return sendJson(res, 200, ws.listAudio().map(({ name: n, size, mime }) => ({ name: n, size, mime })));
+    if (method === 'POST') {
+      const body = (await readJson(req)) as { name: string; ext: string; data: string };
+      ws.writeAudio(String(body.name), String(body.ext), Buffer.from(String(body.data ?? ''), 'base64'));
+      return sendJson(res, 201, { name: body.name });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (method === 'GET') {
+    const a = ws.readAudio(name);
+    res.writeHead(200, { 'content-type': a.mime, 'content-length': a.data.length, 'cache-control': 'no-cache' });
+    res.end(a.data);
+    return;
+  }
+  if (method === 'DELETE') {
+    ws.removeAudio(name);
+    return sendJson(res, 200, { ok: true });
+  }
+  throw new HttpError(405, 'Method not allowed');
 }
 
 async function handleDialogues(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {

@@ -11,6 +11,7 @@ import type { Behavior, ComponentOverrides, EventStep, GameBundle, GameEvent, Ga
 import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, fieldsOf, wrapText } from './script.js';
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
 import { resolveObjectTypes } from './variants.js';
+import { ParticleSystem } from './particles.js';
 
 export const STEP = 1 / 60;
 
@@ -33,7 +34,10 @@ export interface EngineOptions {
   seed?: number;
   /** Persisted variables (save action). */
   storage?: { get(key: string): string | null; set(key: string, value: string): void };
+  /** Plays a sound effect: a built-in synth sound or an audio file name. */
   sound?: (name: string, volume: number) => void;
+  /** Music commands for the player (crossfades and volumes are its job). */
+  music?: (cmd: MusicCommand) => void;
   log?: (message: string) => void;
   /** Start in this scene instead of game.startScene. */
   scene?: string;
@@ -97,7 +101,9 @@ export class Actor {
   /** Instances touched last frame (for "collision" = start of touch). */
   touching = new Set<Actor>();
   /** One-frame trigger flags. */
-  flags = { landed: false, hitWall: false, leftScene: false, animEnd: '' as string | null };
+  flags = { landed: false, hitWall: false, leftScene: false, animEnd: '' as string | null, animEvents: [] as string[] };
+  /** Animation + position of the last frame whose events fired. */
+  lastFrameKey = '';
   /** Whether the instance was outside the scene last frame (null = not checked yet). */
   outside: boolean | null = null;
   timers = new Map<number, number>();
@@ -199,6 +205,11 @@ export interface SaveData extends SaveSummary {
   gameComponents: { name: string; fields: Record<string, Value> }[];
 }
 
+export type MusicCommand =
+  | { type: 'play'; name: string; volume: number; loop: boolean; fade: number }
+  | { type: 'stop'; fade: number }
+  | { type: 'volume'; channel: 'music' | 'sfx'; value: number };
+
 export interface QueryFilter {
   tag?: string;
   object?: string;
@@ -240,6 +251,8 @@ export class World {
   cameraBounds: Rect | null = null;
   /** Scripts: the instance the camera follows (undefined = the one with the Camera behavior, null = none). */
   cameraTarget: Actor | null | undefined = undefined;
+  /** Visual particles (world space). */
+  readonly particles = new ParticleSystem(() => this.random());
   /** Smoothed look-ahead offset of the camera (px). */
   private lookX = 0;
   /** Screen shake, timed with `clock` (keeps running while dialogs pause the scene, so it always ends). */
@@ -286,6 +299,59 @@ export class World {
   private talking = new Set<Actor>();
   /** Player controls ignore input (cutscenes, battles). */
   controlsLocked = false;
+  /** Pause menus: the game stands still (clock, movement, timers); onDraw and pausedUpdate keep running. */
+  paused = false;
+  /** The music playing ("" = none). */
+  music = '';
+  volumes = { music: 1, sfx: 1 };
+
+  private actionsDown = new Set<string>();
+
+  /** Adds the game's input actions to the frame's keys (an action named like a built-in key replaces it). */
+  private mapActions(input: InputFrame): InputFrame {
+    const actions = this.game.actions;
+    if (!actions) return input;
+    const down = new Set(input.down);
+    const pressed = new Set(input.pressed);
+    const released = new Set(input.released);
+    const now = new Set<string>();
+    for (const [name, keys] of Object.entries(actions)) {
+      down.delete(name);
+      pressed.delete(name);
+      released.delete(name);
+      if (keys.some((k) => input.down.has(k) || input.pressed.has(k))) {
+        down.add(name);
+        now.add(name);
+        if (!this.actionsDown.has(name)) pressed.add(name);
+      } else if (this.actionsDown.has(name)) released.add(name);
+    }
+    this.actionsDown = now;
+    return { ...input, down, pressed, released };
+  }
+
+  /** Plays a music track (same track: keeps playing). Unknown names are reported. */
+  playMusic(name: string, opts: { volume?: number; loop?: boolean; fade?: number } = {}): void {
+    const n = String(name);
+    if (!n || n === '-') return this.stopMusic(opts.fade);
+    if (this.bundle.audio && !(n in this.bundle.audio)) throw new Error(`no audio "${n}" (import it in the Game tab, audio/ folder)`);
+    if (n === this.music) return;
+    this.music = n;
+    this.log(`music: ${n}`);
+    this.opts.music?.({ type: 'play', name: n, volume: opts.volume ?? 0.6, loop: opts.loop !== false, fade: opts.fade ?? 1 });
+  }
+
+  stopMusic(fade = 1): void {
+    if (!this.music) return;
+    this.music = '';
+    this.log('music stopped');
+    this.opts.music?.({ type: 'stop', fade: Number(fade) || 0 });
+  }
+
+  setVolume(channel: 'music' | 'sfx', value: number): void {
+    const v = Math.max(0, Math.min(1, Number(value) || 0));
+    this.volumes[channel === 'music' ? 'music' : 'sfx'] = v;
+    this.opts.music?.({ type: 'volume', channel: channel === 'music' ? 'music' : 'sfx', value: v });
+  }
 
   constructor(bundle: GameBundle, opts: EngineOptions = {}) {
     this.bundle = bundle;
@@ -388,6 +454,8 @@ export class World {
     this.message = null;
     this.shake = { until: 0, intensity: 0, duration: 0 };
     this.camera = { x: 0, y: 0, zoom: 1 };
+    this.paused = false;
+    this.particles?.clear();
     this.cameraBounds = null;
     this.cameraTarget = undefined;
     this.lookX = 0;
@@ -566,6 +634,14 @@ export class World {
       if (e.trigger.type === 'timer') this.sceneTimers.set(i, this.time + Math.max(0.01, toNum(e.trigger.seconds ?? 1)));
     });
     const firstScene = !this.gameStarted;
+    // Scene music: a track (crossfade if different), "-" = silence, nothing = keep playing.
+    if (this.scene.music) {
+      try {
+        this.playMusic(this.scene.music);
+      } catch (err) {
+        this.error(`scene ${this.scene.name} music`, err);
+      }
+    }
     // Create every component first (so awake() can find the others), then awake them: game, scene, instances.
     if (firstScene) this.gameComponents = this.makeComponents(this.game.components, 'game');
     this.sceneComponents = this.makeComponents(this.scene.components, 'scene');
@@ -765,8 +841,18 @@ export class World {
   // ------------------------------------------------------------------ main loop
 
   step(input: InputFrame = emptyInput(), dt = STEP): void {
+    input = this.mapActions(input);
     this.input = input;
     if (!this.started) this.begin();
+    this.scripts.latchInput(input);
+    // Paused (pause menus, inventories): nothing moves; components get pausedUpdate, onDraw still runs.
+    if (this.paused) {
+      this.scripts.invokeAll(this.scripts.all(), 'pausedUpdate', dt);
+      this.frame++;
+      this.applyPendingScene();
+      return;
+    }
+    this.particles.tick(dt);
 
     // Dialogs pause the game; the frame that closes one doesn't run gameplay either (the key press is used up).
     const confirm = input.pressed.has('action') || input.pressed.has('enter') || input.clicks.length > 0;
@@ -807,6 +893,7 @@ export class World {
     for (const a of this.actors) {
       a.flags.landed = a.flags.hitWall = a.flags.leftScene = false;
       a.flags.animEnd = null;
+      a.flags.animEvents = [];
     }
 
     for (const a of this.actors) if (!a.destroyed) this.updateBehaviors(a, dt);
@@ -1508,6 +1595,20 @@ export class World {
   }
 
   private updateAnimation(a: Actor, dt: number): void {
+    this.advanceAnimation(a, dt);
+    // Frame events ("hit", "step") when a new frame of the animation shows.
+    const key = `${a.anim}:${a.seqIdx}`;
+    if (key === a.lastFrameKey || a.destroyed) return;
+    a.lastFrameKey = key;
+    const events = a.asset?.frames[a.frameIndex()]?.events;
+    if (!events?.length) return;
+    for (const ev of events) {
+      a.flags.animEvents.push(ev);
+      this.scripts.invokeAll(a.components, 'onAnimationEvent', ev, a.anim);
+    }
+  }
+
+  private advanceAnimation(a: Actor, dt: number): void {
     const asset = a.asset;
     if (!asset || asset.frames.length < 1) return;
     const seq = a.sequence();
@@ -1640,6 +1741,9 @@ export class World {
         case 'landed': return a.flags.landed ? run() : undefined;
         case 'hitWall': return a.flags.hitWall ? run() : undefined;
         case 'leftScene': return a.flags.leftScene ? run() : undefined;
+        case 'animationEvent':
+          for (const ev of a.flags.animEvents) if (!t.event || t.event === ev) { run(); if (a.destroyed) return; }
+          return;
         case 'animationEnd': return a.flags.animEnd !== null && (!t.animation || t.animation === a.flags.animEnd) ? run() : undefined;
         default: return;
       }
@@ -1866,11 +1970,29 @@ export class World {
       case 'talk':
         void this.scripts.openDialog(fmt(this.eval(s.text, ctx)), { speaker: String(s.speaker ?? '') });
         return;
+      case 'particles': {
+        const a = this.target(ctx, s.target);
+        const b = a?.box();
+        const x = (b ? b.x + b.w / 2 : this.camera.x + this.viewWidth / 2) + toNum(this.eval(s.dx ?? 0, ctx));
+        const y = (b ? b.y + b.h / 2 : this.camera.y + this.viewHeight / 2) + toNum(this.eval(s.dy ?? 0, ctx));
+        const count = toNum(s.count ?? 0);
+        this.particles.burst(x, y, String(s.preset || 'sparks'), count > 0 ? { count } : {});
+        return;
+      }
       case 'saveGame':
         this.saveGame(String(s.slot || 'auto'));
         return;
       case 'loadGame':
         if (!this.loadGame(String(s.slot || 'auto'))) this.log(`no save in slot "${s.slot || 'auto'}"`);
+        return;
+      case 'playMusic':
+        this.playMusic(String(s.music ?? ''), { fade: toNum(s.fade ?? 1), volume: toNum(s.volume ?? 0.6) });
+        return;
+      case 'stopMusic':
+        this.stopMusic(toNum(s.fade ?? 1));
+        return;
+      case 'pauseGame':
+        this.paused = s.paused !== false;
         return;
       case 'lockControls':
         this.controlsLocked = s.locked !== false;
@@ -2064,6 +2186,9 @@ export interface Renderer {
   text(text: string, x: number, y: number, color: string, scale: number): void;
 }
 
+/** A renderer that draws nothing (headless UI). */
+export const NULL_RENDERER: Renderer = { clear() {}, image() {}, rect() {}, text() {} };
+
 /** Draws the current world state with the camera applied. Coordinates are viewport pixels. */
 export function renderWorld(w: World, r: Renderer): void {
   const scene = w.scene;
@@ -2133,6 +2258,9 @@ export function renderWorld(w: World, r: Renderer): void {
     });
   });
 
+  // Particles: behind the instances (above tiles), and in front of them.
+  items.push({ z: -1, order: 1e9, draw: () => w.particles.draw(r, camX, camY, zoom, true) });
+  items.push({ z: 50, order: 1e9, draw: () => w.particles.draw(r, camX, camY, zoom, false) });
   const hud: Actor[] = [];
   w.actors.forEach((a, i) => {
     if (a.type.hud) {
@@ -2303,6 +2431,9 @@ export async function runPlaytest(bundle: GameBundle, opts: PlaytestOptions): Pr
     const pressed = new Set([...down].filter((k) => !prev.has(k)));
     const released = new Set([...prev].filter((k) => !down.has(k)));
     world.step({ down, pressed, released, clicks, pointer: clicks[0] ?? null });
+    await world.settle();
+    // Headless: run the UI code too (menus and buttons in onDraw react to input there).
+    world.scripts.draw(NULL_RENDERER, world.camera.x, world.camera.y, world.zoom);
     await world.settle();
     prev = down;
     if (sampleFrames.has(f + 1)) {

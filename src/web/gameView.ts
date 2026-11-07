@@ -1,7 +1,8 @@
 /** Game page: settings, global variables, validation and export. */
 
-import type { Value } from '../core/game/types.js';
-import { GAME_NAME_RE } from '../core/game/types.js';
+import type { GameProject, Value } from '../core/game/types.js';
+import { GAME_NAME_RE, normalizeActions } from '../core/game/types.js';
+import { previewSound } from './eventSheet.js';
 import { gameApi } from './gameApi.js';
 import { state } from './gameState.js';
 import { appNav } from './nav.js';
@@ -18,6 +19,91 @@ const RESOLUTIONS: [number, number, string][] = [
   [480, 270, '16:9 large'],
   [640, 360, '16:9 HD'],
 ];
+
+const KEY_HINT = 'Keys: a–z, 0–9, space, enter, escape, shift, arrowleft/right/up/down, left/right/up/down (arrows + WASD), action, action2; gamepad: pad:a, pad:b, pad:x, pad:y, pad:lb, pad:rb, pad:lt, pad:rt, pad:start, pad:select, pad:up/down/left/right';
+
+/** Input actions: name → keys and gamepad buttons. */
+function actionsCard(g: GameProject, changed: () => void, rerender: () => void): HTMLElement {
+  const rows = h('div', { class: 'props' });
+  for (const [name, keys] of Object.entries(g.actions ?? {})) {
+    const inp = h('input', { type: 'text', value: keys.join(', '), spellcheck: false, placeholder: 'space, w, pad:a', onchange: () => {
+      g.actions = normalizeActions({ ...g.actions, [name]: inp.value }) ?? {};
+      inp.value = (g.actions[name] ?? []).join(', ');
+      changed();
+    } });
+    rows.append(h('div', { class: 'prop-row' }, h('code', {}, name), inp, iconButton('close', 'Remove', () => {
+      delete g.actions![name];
+      if (!Object.keys(g.actions!).length) delete g.actions;
+      changed();
+      rerender();
+    }, { class: 'icon-btn tiny' })));
+  }
+  if (!Object.keys(g.actions ?? {}).length) rows.append(h('p', { class: 'muted small' }, 'Name actions (jump, attack, menu) and bind keys and gamepad buttons to them. Events and scripts use the name like a key: pressed("attack"). An action named action, up, left… remaps that built-in key.'));
+  return h('div', { class: 'card' },
+    h('h3', {}, 'Input actions'),
+    rows,
+    h('p', { class: 'muted small' }, KEY_HINT),
+    h('button', { class: 'small', onclick: async () => {
+      const name = await promptText('New input action', 'Name (e.g. jump, attack, menu)', '');
+      if (!name) return;
+      if (!GAME_NAME_RE.test(name)) return toast('Invalid name', 'error');
+      g.actions = { ...(g.actions ?? {}), [name]: [] };
+      changed();
+      rerender();
+    } }, icon('plus', 13), 'Action'),
+  );
+}
+
+/** Audio files of the project: upload, listen, delete. */
+function audioCard(rerender: () => void): HTMLElement {
+  const list = h('div', { class: 'audio-list' });
+  const draw = () => {
+    clear(list);
+    if (!state.audio.length) list.append(h('p', { class: 'muted small' }, 'Music and sound effects (mp3, ogg, wav, m4a). Use them with sound("name"), music("name"), the Scene tab (music of a scene) and the events Play sound / Play music.'));
+    for (const name of state.audio) {
+      list.append(h('div', { class: 'prop-row' },
+        h('code', {}, name),
+        h('span', { class: 'param-inline' },
+          iconButton('play', 'Listen', () => previewSound(name, state.audio), { class: 'icon-btn tiny' }),
+          iconButton('trash', 'Delete', async () => {
+            try {
+              await gameApi.deleteAudio(name);
+              state.audio = state.audio.filter((x) => x !== name);
+              draw();
+            } catch (err) {
+              toast((err as Error).message, 'error');
+            }
+          }, { class: 'icon-btn tiny' })),
+        h('span', {}),
+      ));
+    }
+  };
+  const file = h('input', { type: 'file', accept: '.mp3,.ogg,.wav,.m4a,audio/*', multiple: true, hidden: true, onchange: async () => {
+    for (const f of [...(file.files ?? [])]) {
+      const m = /^(.*)\.(mp3|ogg|wav|m4a)$/i.exec(f.name);
+      if (!m) {
+        toast(`${f.name}: use mp3, ogg, wav or m4a`, 'error');
+        continue;
+      }
+      const name = m[1].replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^([^A-Za-z_])/, '_$1').slice(0, 64);
+      try {
+        const buf = new Uint8Array(await f.arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+        await gameApi.uploadAudio(name, m[2], btoa(bin));
+        if (!state.audio.includes(name)) state.audio = [...state.audio, name].sort();
+        toast(`Added audio/${name}.${m[2].toLowerCase()}`);
+      } catch (err) {
+        toast((err as Error).message, 'error');
+      }
+    }
+    file.value = '';
+    draw();
+    void rerender;
+  } });
+  draw();
+  return h('div', { class: 'card' }, h('h3', {}, 'Audio'), list, file, h('button', { class: 'small', onclick: () => file.click() }, icon('plus', 13), 'Import audio files'));
+}
 
 export function renderGameSettings(root: HTMLElement): () => void {
   clear(root);
@@ -89,6 +175,8 @@ export function renderGameSettings(root: HTMLElement): () => void {
           h('h3', {}, 'Global components'),
           componentListCard('', 'Created when the game starts and kept across scenes: a GameManager, an inventory, a HUD on every scene. They get onSceneStart(name) / onSceneEnd(name).', () => g.components, (list) => { if (list?.length) g.components = list; else delete g.components; }, () => sheetContext(null, []), changed),
         ),
+        audioCard(render),
+        actionsCard(g, changed, render),
         h('div', { class: 'card' },
           h('h3', {}, 'Checks'),
           problems,

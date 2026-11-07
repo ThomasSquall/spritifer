@@ -31,10 +31,10 @@ export interface Player {
 /** Physical key code → logical keys. Letters keep their own name and WASD also act as arrows. */
 function logicalKeys(code: string): string[] {
   switch (code) {
-    case 'ArrowLeft': return ['left'];
-    case 'ArrowRight': return ['right'];
-    case 'ArrowUp': return ['up'];
-    case 'ArrowDown': return ['down'];
+    case 'ArrowLeft': return ['arrowleft', 'left'];
+    case 'ArrowRight': return ['arrowright', 'right'];
+    case 'ArrowUp': return ['arrowup', 'up'];
+    case 'ArrowDown': return ['arrowdown', 'down'];
     case 'KeyA': return ['a', 'left'];
     case 'KeyD': return ['d', 'right'];
     case 'KeyW': return ['w', 'up'];
@@ -159,6 +159,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
   const renderer = new CanvasRenderer(ctx, images, game.width, game.height);
 
   const sound = new SoundBoard();
+  sound.setFiles(bundle.audio);
   const storagePrefix = `spritifer:${game.title}:`;
   const storage = {
     get: (k: string) => {
@@ -168,7 +169,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       try { localStorage.setItem(storagePrefix + k, v); } catch { /* storage unavailable */ }
     },
   };
-  const makeWorld = (scene?: string) => new World(bundle, { scene, storage, sound: (n, v) => sound.play(n, v), log: opts.onLog, seed: (Math.random() * 2 ** 31) | 0 });
+  const makeWorld = (scene?: string) => new World(bundle, { scene, storage, sound: (n, v) => sound.play(n, v), music: (cmd) => sound.music(cmd), log: opts.onLog, seed: (Math.random() * 2 ** 31) | 0 });
   let world: World;
   try {
     world = makeWorld(opts.scene);
@@ -280,7 +281,11 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     root.append(layer);
   }
 
-  /** Standard-mapping gamepads: d-pad / left stick = arrows, A = action, B = action2, Start = enter. */
+  /**
+   * Standard-mapping gamepads: d-pad / left stick = arrows, A = action, B/X = action2, Start = enter,
+   * plus every button by name (pad:a, pad:b, pad:x, pad:y, pad:lb, pad:rb, pad:lt, pad:rt, pad:select, pad:start, pad:up...) for input actions.
+   */
+  const PAD_BUTTONS = ['pad:a', 'pad:b', 'pad:x', 'pad:y', 'pad:lb', 'pad:rb', 'pad:lt', 'pad:rt', 'pad:select', 'pad:start', 'pad:l3', 'pad:r3', 'pad:up', 'pad:down', 'pad:left', 'pad:right'];
   const padKeys = (): string[] => {
     const out: string[] = [];
     const pads = typeof navigator.getGamepads === 'function' ? navigator.getGamepads() : [];
@@ -289,6 +294,11 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       const b = (i: number) => !!p.buttons[i]?.pressed;
       const ax = p.axes[0] ?? 0;
       const ay = p.axes[1] ?? 0;
+      PAD_BUTTONS.forEach((name, i) => b(i) && out.push(name));
+      if (ax < -0.4) out.push('pad:left');
+      if (ax > 0.4) out.push('pad:right');
+      if (ay < -0.4) out.push('pad:up');
+      if (ay > 0.4) out.push('pad:down');
       if (b(14) || ax < -0.4) out.push('left');
       if (b(15) || ax > 0.4) out.push('right');
       if (b(12) || ay < -0.4) out.push('up');

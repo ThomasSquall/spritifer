@@ -14,6 +14,8 @@ class GameState {
   saved = false;
   sprites: SpriteSummary[] = [];
   scenes: SceneSummary[] = [];
+  /** Audio files of the project (audio/). */
+  audio: string[] = [];
   /** What the project scripts register (for dropdowns) and their loading errors. */
   scriptInfo: ScriptInfo = { behaviors: [], functions: [], errors: [], components: [] };
   /** Dialogue names and parse errors (Dialogues tab). */
@@ -24,13 +26,15 @@ class GameState {
   private dirty = false;
 
   async load(): Promise<void> {
-    const [game, sprites, scenes, scriptInfo, dialogueInfo] = await Promise.all([
+    const [game, sprites, scenes, scriptInfo, dialogueInfo, audio] = await Promise.all([
       gameApi.getGame(),
       api.list(),
       gameApi.listScenes(),
       gameApi.scriptInfo().catch(() => this.scriptInfo),
       gameApi.dialogueInfo().catch(() => this.dialogueInfo),
+      gameApi.listAudio().catch(() => []),
     ]);
+    this.audio = audio.map((a) => a.name);
     this.scriptInfo = scriptInfo;
     this.dialogueInfo = dialogueInfo;
     this.saved = game.saved;

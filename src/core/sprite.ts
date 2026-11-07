@@ -22,6 +22,8 @@ export interface Frame {
   duration: number;
   /** Rig pose rendered into the rig layer of this frame (see core/rig.ts). */
   pose?: Pose;
+  /** Animation events fired when the game shows this frame ("hit", "step"): onAnimationEvent / event trigger. */
+  events?: string[];
 }
 
 // ---------------------------------------------------------------------------

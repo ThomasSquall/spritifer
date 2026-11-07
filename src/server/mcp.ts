@@ -239,7 +239,7 @@ export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string 
       `Frames: ${s.frames
         .map((f, i) => {
           const filled = s.layers.filter((l) => getCel(s, l.id, f.id)?.some((v, k) => k % 4 === 3 && v > 0)).length;
-          return `[${i}] ${f.duration}ms${filled ? '' : ' (empty)'}`;
+          return `[${i}] ${f.duration}ms${f.events?.length ? ` events ${f.events.join('+')}` : ''}${filled ? '' : ' (empty)'}`;
         })
         .join(', ')}`,
       `Tags: ${s.tags.length ? s.tags.map((t) => `${t.name} ${t.from}-${t.to} ${t.direction}`).join(', ') : 'none'}`,
@@ -436,6 +436,32 @@ export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string 
         for (let i = t.from; i <= t.to; i++) idx.push(i);
       }
       for (const i of idx) resolveFrame(s, i).duration = a.duration;
+    });
+    return text(describe(sprite));
+  });
+
+  tool('set_frame_events', 'Set animation events on frames ("hit" on the swing frame of attack, "step" on footsteps). In games, components get onAnimationEvent(event, animation) and object events the trigger "Animation event" when that frame shows. An empty list clears them.', {
+    sprite: P.sprite,
+    events: z.array(z.string()).describe('e.g. ["hit"]; [] clears'),
+    frames: z.array(z.number().int().min(0)).optional().describe('Frame indices'),
+    tag: z.string().optional().describe('Or: the frame `index_in_tag` of this tag'),
+    index_in_tag: z.number().int().min(0).optional().describe('With tag: which frame of the animation (0 = first)'),
+  }, (a) => {
+    const { sprite } = mutate(a.sprite, (s) => {
+      let idx = a.frames ?? [];
+      if (a.tag) {
+        const t = s.tags.find((x) => x.name === a.tag);
+        if (!t) throw new Error(`No tag named "${a.tag}"`);
+        idx = [t.from + (a.index_in_tag ?? 0)];
+        if (idx[0] > t.to) throw new Error(`Tag "${a.tag}" has only ${t.to - t.from + 1} frames`);
+      }
+      if (!idx.length) throw new Error('Give frames or tag');
+      const list = [...new Set(a.events.map((e) => e.trim()).filter(Boolean))];
+      for (const i of idx) {
+        const f = resolveFrame(s, i);
+        if (list.length) f.events = list;
+        else delete f.events;
+      }
     });
     return text(describe(sprite));
   });

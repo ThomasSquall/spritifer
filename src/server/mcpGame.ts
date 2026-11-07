@@ -1,8 +1,9 @@
 /** MCP tools for building games: project settings, object types, scenes, tiles, instances, events, playtests, export. */
 
+import fs from 'node:fs';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { BEHAVIOR_MAP, catalogReference, describeEvent, describeStep } from '../core/game/catalog.js';
+import { BEHAVIOR_MAP, SOUNDS, catalogReference, describeEvent, describeStep } from '../core/game/catalog.js';
 import { type PlaytestInput, runPlaytest } from '../core/game/engine.js';
 import { renameComponentRefs, renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
 import {
@@ -18,6 +19,7 @@ import {
   normalizeComponents,
   normalizeGame,
   normalizeTags,
+  normalizeActions,
   normalizeObject,
   normalizeScene,
   resizeScene,
@@ -56,6 +58,8 @@ Model:
 - Dialogues (write_dialogue, dialogue_reference) are plain-text conversations: speakers, choices, conditions, variables, commands, jumps. NPCs: ONE object type with the behavior "dialogue" (+ solid), placed many times, each instance with its own name, optional sprite override and props { dialogue: "<name>" }. Never create one object type or script per NPC.
 - Scripts (write_script, script_reference) are JavaScript files in scripts/ (use folders: scripts/enemies/Patrol.js, scripts/ui/Hud.js, scripts/managers/GameManager.js) for logic events can't express well. Write COMPONENTS, Unity-style: ONE class per file named like the file (export default class Patrol extends Behaviour), public fields = inspector params, lifecycle awake/start/update/lateUpdate/onCollisionEnter/Stay/Exit/onInteract/onDraw/onDestroy, this.getComponent('Health') / findComponent('GameManager') to talk to other scripts, import for shared helpers. Attach them to object types ({ type: "script", name: "Patrol", speed: 60 } in behaviors), override params per placed instance (instances components: { Patrol: { speed: 80 } }), or attach managers to scenes (update_scene components) and to the whole game (set_game components). Never put several behaviours in one file. For common mechanics first check component_library (Health, Damage, Shooter, Collectible, Door, Checkpoint, Respawn, Roam, ChasePath, Spawner, Countdown) and add them with add_library_component.
 - RPGs: top-down player (topdown + camera, sprite tags walk_<dir>/idle_<dir>), scene y_sort and persistent (towns remember chests/positions after battles), solid tile layers for walls, NPCs and chests via dialogues (~ self.opened = true), an intro via a scene event (start → dialogue), battles in a scene driven by a scene component (class Battle extends Behaviour { async start() {...} } attached to the battle scene).
+- Juice and polish: particles(x, y, "dust"|"sparks"|"explosion"...) or the event action Particles (and the ParticleEmitter component), animation events on frames (set_frame_events: "hit" on the swing frame → onAnimationEvent / trigger "Animation event"), music per scene (import_audio, update_scene music, music("name")), camera zoom/dead zone/look ahead, tweens, fades.
+- Menus and HUD: inside onDraw use ui.menu / ui.button / ui.window (keyboard, gamepad and mouse ready) and pause(true) for pause menus and inventories. Input actions (set_game actions: { attack: ["x", "pad:b"] }) give controls names usable everywhere like keys.
 - Projects: list_projects / open_project / create_project switch between games; each project folder has its own sprites, scenes, scripts and game.json.
 
 Workflow that works:
@@ -174,6 +178,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       touch_controls: z.boolean().optional(),
       variables: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       components: z.array(stepSchema).optional().describe('Global components alive for the whole game across scenes (replace the list): [{ type: "script", name: "GameManager" }]'),
+      actions: z.record(z.string(), z.union([z.array(z.string()), z.null()])).optional().describe('Input actions: name → keys/gamepad buttons, merged (null deletes): { jump: ["space", "w", "pad:a"], attack: ["x", "pad:b"] }. Events and scripts use the name like a key; a name like "action" or "up" remaps that built-in key. Keys: a-z, 0-9, space, enter, escape, shift, arrowleft/right/up/down, left/right/up/down, action, action2, pad:a/b/x/y/lb/rb/lt/rt/start/select/up/down/left/right.'),
     },
     (a) => {
       const { game } = mutateGame((g) => {
@@ -181,6 +186,16 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           const list = normalizeComponents(a.components.map((b) => ({ ...b, type: 'script' })));
           if (list) g.components = list;
           else delete g.components;
+        }
+        if (a.actions) {
+          const merged: Record<string, unknown> = { ...(g.actions ?? {}) };
+          for (const [k, v] of Object.entries(a.actions)) {
+            if (v === null) delete merged[k];
+            else merged[k] = v;
+          }
+          const n = normalizeActions(merged);
+          if (n) g.actions = n;
+          else delete g.actions;
         }
         if (a.title !== undefined) g.title = a.title;
         if (a.width !== undefined) g.width = a.width;
@@ -436,6 +451,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       y_sort: z.boolean().optional().describe('Draw instances lower on screen in front (top-down / RPG depth)'),
       persistent: z.boolean().optional().describe('Remember instances when leaving (positions, properties, destroyed ones), e.g. an RPG town you come back to after a battle'),
       components: z.array(stepSchema).optional().describe('Scene components (replace the list): [{ type: "script", name: "Battle", foeHp: 12 }] — managers, level logic, HUD'),
+      music: z.string().nullable().optional().describe('Music when the scene starts: an audio file name (list_audio), "-" for silence, null = keep what plays'),
     },
     (a) => {
       const { scene } = mutateScene(a.scene, (s) => {
@@ -458,6 +474,13 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           }
         }
         if (a.background !== undefined) s.background = a.background;
+        if (a.music !== undefined) {
+          if (a.music === null || a.music === '') delete s.music;
+          else {
+            if (a.music !== '-' && !ws.listAudio().some((x) => x.name === a.music)) throw new Error(`No audio "${a.music}". Import it with import_audio.`);
+            s.music = a.music;
+          }
+        }
         if (a.components) {
           const list = normalizeComponents(a.components.map((b) => ({ ...b, type: 'script' })));
           if (list) s.components = list;
@@ -830,6 +853,28 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       return saveScript(a.name, code.replace(a.find, () => a.replace));
     },
   );
+
+  tool('list_audio', 'List the audio files of the project (audio/: music and sound effects). Use them with sound("name"), music("name"), update_scene music, and the events Play sound / Play music.', {}, () => {
+    const list = ws.listAudio();
+    return text(list.length ? list.map((x) => `${x.name} (${x.file}, ${Math.round(x.size / 1024)} KB)`).join('\n') : 'No audio files yet. Import mp3/ogg/wav/m4a files with import_audio (the built-in retro sounds always work: ' + SOUNDS.join(', ') + ').');
+  }, { readOnlyHint: true });
+
+  tool('import_audio', 'Copy an audio file (mp3, ogg, wav, m4a) from the computer into the project (audio/<name>.<ext>), e.g. music the user gives you. Then play it with music("name") / sound("name") or set it as scene music.', {
+    path: z.string().describe('Absolute path of the file on this computer'),
+    name: z.string().optional().describe('Name in the game (default: the file name)'),
+  }, (a) => {
+    const m = /([^/\\]+)\.(mp3|ogg|wav|m4a)$/i.exec(a.path);
+    if (!m) throw new Error('Use an mp3, ogg, wav or m4a file');
+    if (!fs.existsSync(a.path)) throw new Error(`File not found: ${a.path}`);
+    const name = a.name ?? m[1].replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^([^A-Za-z_])/, '_$1').slice(0, 64);
+    ws.writeAudio(name, m[2], fs.readFileSync(a.path));
+    return text(`Imported audio/${name}.${m[2].toLowerCase()}. Use music("${name}") or sound("${name}").`);
+  });
+
+  tool('delete_audio', 'Delete an audio file of the project.', { name: z.string() }, (a) => {
+    ws.removeAudio(a.name);
+    return text(`Deleted audio "${a.name}".`);
+  }, { destructiveHint: true });
 
   tool('component_library', 'Ready-made components you can add to the project instead of writing them: Health, Damage, Shooter, Collectible, Door, Checkpoint, Respawn, Roam, ChasePath, Spawner, Countdown (what each does, how to use it). Prefer them for common mechanics.', {}, () =>
     text(LIBRARY.map((c) => `- ${c.name} (scripts/${c.folder}/${c.name}.js)${c.requires ? ` [needs ${c.requires.join(', ')}]` : ''}: ${c.summary}\n    ${c.usage}`).join('\n')), { readOnlyHint: true });

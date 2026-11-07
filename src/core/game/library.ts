@@ -625,6 +625,58 @@ export default class ChasePath extends Behaviour {
 }
 `;
 
+const PARTICLE_EMITTER = `/**
+ * Emits particles continuously from the instance (or a scene position): dust trails, torches,
+ * auras, smoke. With onlyWhenMoving it makes footstep dust.
+ */
+export default class ParticleEmitter extends Behaviour {
+  preset = 'dust'
+  rate = 10
+  onlyWhenMoving = false
+  offsetX = 0
+  offsetY = 0
+  behind = false
+
+  static params = {
+    preset: ['dust', 'sparks', 'hit', 'explosion', 'smoke', 'magic', 'leaves', 'splash', 'confetti', 'heal'],
+    rate: { min: 0, help: 'Particles per second' },
+    onlyWhenMoving: { help: 'Only while the instance moves (footstep dust)' },
+    offsetX: { help: 'From the center of the instance (px); on a scene: the position' },
+    offsetY: { help: 'From the bottom of the instance (px)' },
+    behind: { help: 'Draw behind the instances' },
+  }
+
+  _acc = 0
+  _lastX = 0
+  _lastY = 0
+
+  start() {
+    if (this.self) {
+      this._lastX = this.self.x
+      this._lastY = this.self.y
+    }
+  }
+
+  update(dt) {
+    const s = this.self
+    let moving = true
+    if (s) {
+      moving = Math.abs(s.x - this._lastX) + Math.abs(s.y - this._lastY) > 0.05
+      this._lastX = s.x
+      this._lastY = s.y
+    }
+    if (this.onlyWhenMoving && !moving) return
+    this._acc += this.rate * dt
+    const n = Math.floor(this._acc)
+    if (n < 1) return
+    this._acc -= n
+    const x = s ? s.centerX + this.offsetX : this.offsetX
+    const y = s ? s.y + s.height + this.offsetY : this.offsetY
+    particles(x, y, this.preset, { count: n, behind: this.behind })
+  }
+}
+`;
+
 export const LIBRARY: LibraryComponent[] = [
   { name: 'Health', folder: 'combat', summary: 'Hit points with invincibility, sounds, death and an optional HP bar.', usage: 'Put it on the player and on enemies. Damage, bullets and scripts call getComponent("Health").damage(n).', code: HEALTH },
   { name: 'Damage', folder: 'combat', summary: 'Hurts what it touches (spikes, enemies, bullets), with knockback.', requires: ['Health'], usage: 'Put it on hazards and enemies; the victim needs Health. On bullets turn on destroyOnHit.', code: DAMAGE },
@@ -635,6 +687,7 @@ export const LIBRARY: LibraryComponent[] = [
   { name: 'Respawn', folder: 'player', summary: 'At 0 HP: back at the last checkpoint, with lives and game over.', requires: ['Health'], usage: 'Put it on the player together with Health.', code: RESPAWN },
   { name: 'Roam', folder: 'ai', summary: 'Wanders to random spots around its home, around walls, with pauses.', usage: 'Put it on villagers and animals (top-down). It stops while dialogs are open.', code: ROAM },
   { name: 'ChasePath', folder: 'ai', summary: 'Chases a target around walls with pathfinding; gives up when far.', usage: 'Put it on enemies in top-down games; add Damage to hurt on contact.', code: CHASE_PATH },
+  { name: 'ParticleEmitter', folder: 'fx', summary: 'Emits particles continuously: dust trails, torches, auras, smoke.', usage: 'Put it on the player (dust, onlyWhenMoving), on torches (sparks) or magic items (magic).', code: PARTICLE_EMITTER },
   { name: 'Spawner', folder: 'level', summary: 'Spawns an object every few seconds, up to a maximum.', usage: 'Put it on an invisible marker object, or on a scene with offsetX/offsetY.', code: SPAWNER },
   { name: 'Countdown', folder: 'level', summary: 'Level timer: counts down, shows it, then restarts or changes scene.', usage: 'Put it on a scene.', code: COUNTDOWN },
 ];

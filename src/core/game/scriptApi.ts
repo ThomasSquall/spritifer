@@ -37,10 +37,12 @@ export const LIFECYCLE: ApiEntry[] = [
   hook('onCollisionExit', 'onCollisionExit(other: Instance): void', 'This instance stops touching `other` (or it was destroyed).'),
   hook('onInteract', 'onInteract(player: Instance): void | Promise<void>', 'The player pressed action (Space/Z) next to or facing this instance: talk, open, read, use.'),
   hook('onClick', 'onClick(): void', 'The player clicked/tapped this instance.'),
+  hook('onAnimationEvent', 'onAnimationEvent(event: string, animation: string): void', 'A frame with this event shows (events are set on frames in the sprite editor): do the damage on the "hit" frame of attack, play "step" sounds.'),
   hook('onMessage', 'onMessage(message: string, data: any): void', 'Any message emitted by an event or a script: emit("win") or emit("hit", { damage: 2 }). For one message prefer this.on("hit", data => ...).'),
   hook('onSceneStart', 'onSceneStart(scene: string): void | Promise<void>', 'Global (game) components: a scene started. Scene and object components use start() instead.'),
   hook('onSceneEnd', 'onSceneEnd(scene: string): void', 'Global (game) components: the scene is about to change.'),
   hook('onDraw', 'onDraw(ui: Ui): void', 'Every frame, screen-space drawing on top of the game: HUDs, health bars (ui.toScreen(this.self.x, this.self.y)), menus.'),
+  hook('pausedUpdate', 'pausedUpdate(dt: number): void', 'Every frame while the game is paused with pause(true) (pause menus): update() is not called then.'),
   hook('onDisable', 'onDisable(): void', 'When the component gets disabled (enabled = false) or before it is destroyed.'),
   hook('onDestroy', 'onDestroy(): void', 'When the instance (or this component) is destroyed.'),
 ];
@@ -130,6 +132,12 @@ export const UI_MEMBERS: ApiEntry[] = [
   method('sprite', 'sprite(name: string, x: number, y: number, opts?: { frame?: number; animation?: string; flipX?: boolean; opacity?: number; scale?: number }): void', 'Draws a sprite (icons, portraits).', "sprite('$0')"),
   method('measure', 'measure(text: string, size?: number): { width: number; height: number }', 'Size of a text in pixels.'),
   method('toScreen', 'toScreen(x: number, y: number): { x: number; y: number }', 'World position → screen position (draw over an instance).'),
+  method('window', 'window(x: number, y: number, w: number, h: number, title?: string, opts?: { color?: string; border?: string; alpha?: number }): void', 'A panel with a title bar.'),
+  method('menu', "menu(id: string, items: (string | { label: string; right?: string; disabled?: boolean })[], x: number, y: number, opts?: { w?: number; rowHeight?: number; title?: string; cancel?: boolean; panel?: boolean; keys?: boolean; color?: string; selectedColor?: string }): number | null", 'A list with a cursor: Up/Down + action/Enter, or mouse hover + click. Returns the chosen index the frame it is chosen (-1 = cancelled with Escape/X when cancel: true), else null. The highlighted row is remembered per id.', "menu('$0', [], 8, 8)"),
+  method('menuIndex', 'menuIndex(id: string, set?: number): number', 'Highlighted row of a menu (and set it).'),
+  method('button', 'button(label: string, x: number, y: number, opts?: { w?: number; h?: number; color?: string; textColor?: string; key?: string; disabled?: boolean }): boolean', 'A clickable button: true the frame it is clicked (or its key pressed).', "button('$0', 8, 8)"),
+  method('pressed', 'pressed(key: KeyName, consume?: boolean): boolean', 'Key pressed since the last draw (use in onDraw instead of the global pressed()). consume: true hides it from the widgets drawn after (one key, one action).'),
+  prop('mouse', 'readonly mouse: { x: number; y: number; clicked: boolean; inside(x: number, y: number, w: number, h: number): boolean }', 'Pointer in screen pixels.'),
 ];
 
 export const SCENE_MEMBERS: ApiEntry[] = [
@@ -146,6 +154,8 @@ export const GAME_MEMBERS: ApiEntry[] = [
   prop('height', 'readonly height: number', 'Screen height.'),
   prop('time', 'readonly time: number', 'Seconds since the scene started.'),
   prop('clock', 'readonly clock: number', 'Seconds since the game started.'),
+  prop('paused', 'readonly paused: boolean', 'The game is paused with pause(true).'),
+  prop('music', 'readonly music: string', 'The music track playing ("" = none).'),
   prop('dialogOpen', 'readonly dialogOpen: boolean', 'A dialog box is open (the game is paused).'),
 ];
 
@@ -169,6 +179,10 @@ export const GLOBALS: ApiEntry[] = [
   fn('wait', 'wait(seconds: number): Promise<void>', 'Waits (game clock). In components prefer this.wait (stops when destroyed).'),
   fn('waitUntil', 'waitUntil(test: () => boolean): Promise<void>', 'Waits until test() is true.'),
   fn('lockControls', 'lockControls(locked?: boolean): void', 'Freezes player controls (cutscenes, battles).'),
+  fn('music', 'music(name: AudioName, opts?: { volume?: number; loop?: boolean; fade?: number }): void', 'Plays a music track from audio/ (crossfades from the current one; the same track keeps playing). Scenes can also set their music in the Scene tab.', "music('$0')"),
+  fn('stopMusic', 'stopMusic(fade?: number): void', 'Fades the music out (seconds).'),
+  fn('setVolume', "setVolume(channel: 'music' | 'sfx', value: number): void", 'Volume 0..1 for music or sound effects (options menus).', "setVolume('$0', 1)"),
+  fn('pause', 'pause(on?: boolean): void', 'Pauses the game (pause menus, inventories): nothing moves, timers stop; onDraw and pausedUpdate keep running. Changing scene resumes.'),
   val('vars', 'vars: GameVars', 'Global variables (declared in the Game tab), kept across scenes: vars.score += 1'),
   ns('scene', 'scene: SceneInfo', 'Current scene: scene.name, scene.width, scene.height, scene.vars'),
   ns('game', 'game: GameInfo', 'game.title, game.width, game.height, game.time, game.clock'),
@@ -182,13 +196,14 @@ export const GLOBALS: ApiEntry[] = [
   fn('overlapBox', 'overlapBox(x: number, y: number, w: number, h: number, filter?: QueryFilter): Instance[]', 'Instances whose hitbox overlaps a rectangle (world pixels): area attacks, sensors.'),
   fn('overlapCircle', 'overlapCircle(x: number, y: number, radius: number, filter?: QueryFilter): Instance[]', 'Instances whose hitbox touches a circle: explosions, auras.'),
   fn('raycast', 'raycast(x1: number, y1: number, x2: number, y2: number, filter?: QueryFilter & { solids?: boolean; instances?: boolean }): RayHit | null', 'First thing on the segment: solid tiles and solid instances, plus instances matching { tag, object } (or any with instances: true). null = clear. Line of sight: raycast(me.centerX, me.centerY, p.centerX, p.centerY, { object: "player", ignore: me })?.instance === p'),
+  fn('particles', "particles(x: number, y: number, preset?: ParticlePreset | ParticleOptions, overrides?: ParticleOptions): void", 'A burst of pixel particles: particles(self.centerX, self.y, "dust"), particles(x, y, "explosion", { count: 60 }), or your own { color: ["#fff", "#ff0"], speed: [20, 60], angle: -90, spread: 90, life: 0.5, size: [1, 2], gravity: 100, drag: 1, fade: true, shrink: true, behind: false }.', "particles($0)"),
   fn('findPath', 'findPath(x1: number, y1: number, x2: number, y2: number, opts?: { diagonal?: boolean; partial?: boolean }): { x: number; y: number }[] | null', 'Waypoints from one point to another around solid tiles and instances (null = no way; partial: as close as possible).'),
   fn('isSolidAt', 'isSolidAt(x: number, y: number): boolean', 'A solid tile or solid instance at a world point (ledge checks, placement).'),
   fn('findComponent', 'findComponent<T = any>(type: ComponentName): T | null', 'First component of a type anywhere (game, scene or instances).', "findComponent('$0')"),
   fn('findComponents', 'findComponents<T = any>(type: ComponentName): T[]', 'Every component of a type.', "findComponents('$0')"),
   fn('goto', 'goto(scene: SceneName, opts?: { fade?: number; color?: string }): void', 'Changes scene (at the end of the frame). goto("dungeon", { fade: 0.4 }) fades to black and back.', "goto('$0')"),
   fn('restart', 'restart(opts?: { fade?: number; color?: string }): void', 'Restarts the current scene (optionally with a fade).'),
-  fn('sound', 'sound(name: SoundName, volume?: number): void', 'Plays a built-in sound.', "sound('$0')"),
+  fn('sound', 'sound(name: SoundName | AudioName, volume?: number): void', 'Plays a sound: a built-in retro sound or an audio file from audio/.', "sound('$0')"),
   fn('shake', 'shake(intensity?: number, seconds?: number): void', 'Screen shake.'),
   fn('emit', 'emit(message: string, data?: any): void', 'Sends a message (with optional data) to events (Message received), onMessage hooks and on() listeners, at the end of this frame.', "emit('$0')"),
   fn('on', 'on(message: string, fn: (data: any, message: string) => void): () => void', 'Plain scripts: listens to emit(message, data). In components use this.on (removed automatically).', "on('$0', (data) => {\n  \n})"),
@@ -316,6 +331,16 @@ ${list(GLOBALS.filter((g) => g.kind !== 'class'))}
 UI (onDraw(ui), screen pixels, 4x6 pixel font)
 ${list(UI_MEMBERS, 'ui.')}
 
+UI WIDGETS AND PAUSE (inside onDraw(ui))
+- const i = ui.menu('shop', ['Potion', { label: 'Sword', right: '50G', disabled: vars.gold < 50 }, 'Leave'], 8, 8, { title: 'SHOP', cancel: true })  → index chosen this frame, -1 cancelled, null
+- if (ui.button('OK', 140, 120)) ...   ui.window(x, y, w, h, 'TITLE')   ui.pressed('escape')   ui.mouse.x / y / clicked
+- pause(true) / pause(false): freeze the game for menus; pausedUpdate(dt) runs while paused
+  Example pause menu (a global component): onDraw(ui) { if (!game.paused) { if (ui.pressed('escape', true)) pause(true); return } const c = ui.menu('pause', ['Resume', 'Restart'], 120, 60, { title: 'PAUSED', cancel: true }); if (c === 0 || c === -1) pause(false); if (c === 1) restart() }
+
+PARTICLES AND ANIMATION EVENTS
+- particles(x, y, 'dust' | 'sparks' | 'hit' | 'explosion' | 'smoke' | 'magic' | 'leaves' | 'splash' | 'confetti' | 'heal', { count, color, speed, angle, spread, life, size, gravity, drag, fade, shrink, behind })
+- Frames can carry events (sprite editor ⚑ field, MCP set_frame_events): onAnimationEvent(event, animation) in components, trigger "Animation event" in events
+
 PATHS, CAMERA, VARIANTS
 - await self.pathTo(x, y, speed, { diagonal, maxSteps }) walks around walls (A* on tiles); self.stopMoving(); findPath(x1, y1, x2, y2) → waypoints | null
 - camera.zoom = 2, camera.follow(boss), camera.setBounds(x, y, w, h) / clearBounds(), camera.toWorld(sx, sy); Camera behavior params: deadZoneX/Y, lookAhead, zoom
@@ -369,6 +394,8 @@ export interface ProjectTypeInfo {
   properties: Record<string, string | number | boolean>;
   /** Group tags used by the object types. */
   tags?: string[];
+  /** Audio files (audio/). */
+  audio?: string[];
 }
 
 const tsType = (v: unknown) => (typeof v === 'number' ? 'number' : typeof v === 'boolean' ? 'boolean' : 'string');
@@ -382,9 +409,12 @@ export function buildTypeDefinitions(p: ProjectTypeInfo, relativeToScripts = './
 // Regenerated when scripts change.
 
 type ObjectName = ${union(p.objects)};
+type AudioName = ${union(p.audio ?? [])};
 type SceneName = ${union(p.scenes)};
 type SoundName = ${union(p.sounds)};
 type DialogueName = ${union(p.dialogues)};
+type ParticlePreset = 'dust' | 'sparks' | 'hit' | 'explosion' | 'smoke' | 'magic' | 'leaves' | 'splash' | 'confetti' | 'heal';
+interface ParticleOptions { count?: number; color?: string | string[]; speed?: number | [number, number]; angle?: number; spread?: number; life?: number | [number, number]; size?: number | [number, number]; gravity?: number; drag?: number; fade?: boolean; shrink?: boolean; areaW?: number; areaH?: number; behind?: boolean }
 type EaseName = 'linear' | 'inQuad' | 'outQuad' | 'inOutQuad' | 'inCubic' | 'outCubic' | 'inOutCubic' | 'inOutSine' | 'outBack' | 'outElastic' | 'outBounce';
 type TagName = ${union(p.tags ?? [])};
 interface QueryFilter { tag?: TagName; object?: ObjectName; ignore?: Instance | Instance[] }

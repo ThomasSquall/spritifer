@@ -323,6 +323,18 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
     const [a, b] = ed.range ?? [ed.frame, ed.frame];
     ed.edit((s) => { for (let i = a; i <= b; i++) s.frames[i].duration = d; });
   };
+  // Animation events of the current frame ("hit", "step"): scripts get onAnimationEvent, events the "Animation event" trigger.
+  const eventsIn = h('input', { type: 'text', class: 'events-in', placeholder: 'events', spellcheck: false, title: 'Animation events of this frame, comma separated (e.g. hit, step): the game fires them when the frame shows' });
+  eventsIn.onchange = () => {
+    const list = [...new Set(eventsIn.value.split(',').map((x) => x.trim()).filter((x) => /^[A-Za-z_][\w-]{0,31}$/.test(x)))];
+    const [a, b] = ed.range ?? [ed.frame, ed.frame];
+    ed.edit((s) => {
+      for (let i = a; i <= b; i++) {
+        if (list.length) s.frames[i].events = list;
+        else delete s.frames[i].events;
+      }
+    });
+  };
   const playBtn = iconButton('play', 'Play / pause (Enter)', togglePlay);
   const playTagSel = h('select', { title: 'Animation to play', onchange: () => { ed.playTag = playTagSel.value || null; ed.emit('view'); } });
   const thumbs: HTMLCanvasElement[] = [];
@@ -351,6 +363,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
           h('div', { class: 'thumb-box checker' }, c),
           h('span', { class: 'frame-idx' }, String(i)),
           h('span', { class: 'frame-dur' }, `${f.duration}`),
+          f.events?.length ? h('span', { class: 'frame-ev', title: `Events: ${f.events.join(', ')}` }, '⚑') : null,
         ),
       );
     });
@@ -394,6 +407,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
   function renderFrameInfo() {
     frameLabel.textContent = `${ed.frame + 1} / ${ed.sprite.frames.length}`;
     if (document.activeElement !== durationIn) durationIn.value = String(ed.sprite.frames[ed.frame]?.duration ?? 100);
+    if (document.activeElement !== eventsIn) eventsIn.value = (ed.sprite.frames[ed.frame]?.events ?? []).join(', ');
     for (const [i, cell] of [...frameStrip.children].entries()) {
       cell.classList.toggle('current', i === ed.frame);
       cell.classList.toggle('ranged', !!ed.range && i >= ed.range[0] && i <= ed.range[1]);
@@ -418,6 +432,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
     iconButton('next', 'Next frame (→)', () => stepFrame(1)),
     frameLabel,
     h('label', { class: 'inline small' }, 'ms', durationIn),
+    h('label', { class: 'inline small' }, '⚑', eventsIn),
     h('div', { class: 'sep' }),
     iconButton('plus', 'New empty frame (N)', () => ed.edit((s) => { addFrame(s, ed.frame + 1); ed.frame++; ed.range = null; })),
     iconButton('copy', 'Duplicate frame (D)', duplicateFrame),

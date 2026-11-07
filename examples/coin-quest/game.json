@@ -176,9 +176,9 @@
    "animation": "idle",
    "hitbox": {
     "x": 4,
-    "y": 2,
+    "y": 3,
     "w": 8,
-    "h": 14
+    "h": 12
    }
   },
   {
@@ -320,6 +320,6 @@
    "hud": true
   }
  ],
- "rev": "cz3xf17u",
- "updatedBy": "claude"
+ "rev": "qvoax74a",
+ "updatedBy": "editor"
 }

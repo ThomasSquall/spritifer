@@ -20,7 +20,9 @@ export type ParamType =
   | 'instance' // self | other
   | 'function' // script function name
   | 'dialogue' // dialogue name
-  | 'scriptBehavior' // script behavior name
+  | 'scriptBehavior' // script component name
+  | 'sprite' // sprite name
+  | 'color' // #rrggbb
   | 'choice';
 
 export interface ParamSpec {
@@ -31,6 +33,9 @@ export interface ParamSpec {
   options?: string[];
   help?: string;
   optional?: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 export interface StepSpec {
@@ -98,6 +103,7 @@ export const ACTIONS: StepSpec[] = [
   { type: 'say', label: 'Show message', help: 'Show a centered message box for N seconds (0 = until the next message). Text is an expression.', params: [{ name: 'text', type: 'expr', default: '"Hello!"' }, { name: 'seconds', type: 'number', default: 2 }] },
   { type: 'emit', label: 'Send message', help: 'Trigger "message received" events everywhere.', params: [{ name: 'message', type: 'text', default: 'win' }] },
   { type: 'call', label: 'Run script function', help: 'Call a function registered in a script with func(name, fn). It receives (self, other, arg).', params: [{ name: 'function', type: 'function', default: '' }, { name: 'arg', type: 'expr', default: '', optional: true }] },
+  { type: 'callMethod', label: 'Call component method', help: 'Call a method of a script component: on self/other (empty component = every component with that method), or on scene/game components from a scene sheet. It receives (arg, other).', params: [{ name: 'target', type: 'instance', default: 'self' }, { name: 'component', type: 'scriptBehavior', default: '', optional: true }, { name: 'method', type: 'text', default: '' }, { name: 'arg', type: 'expr', default: '', optional: true }] },
   { type: 'dialogue', label: 'Start dialogue', help: 'Play a dialogue written in the Dialogues tab (lines, choices, conditions). "self" in the dialogue is this instance.', params: [{ name: 'dialogue', type: 'dialogue', default: '' }] },
   { type: 'talk', label: 'Show one line', help: 'Open an RPG dialog box (typewriter text, waits for the player). The game pauses while it is open. For conversations with choices use a script.', params: [{ name: 'text', type: 'expr', default: '"Hello!"' }, { name: 'speaker', type: 'text', default: '', optional: true }] },
   { type: 'lockControls', label: 'Lock player controls', help: 'Stop (or give back) player control, for cutscenes.', params: [{ name: 'locked', type: 'bool', default: true }] },
@@ -117,7 +123,7 @@ export const BEHAVIORS: StepSpec[] = [
   { type: 'bounded', label: 'Stay in scene', help: 'Cannot leave the scene rectangle.', params: [] },
   { type: 'lifetime', label: 'Lifetime', help: 'Destroyed after N seconds.', params: [{ name: 'seconds', type: 'number', default: 2 }] },
   { type: 'dialogue', label: 'Talks (dialogue)', help: 'The player talks to it by pressing action next to it. Plays the dialogue set on each placed instance (property "dialogue" in the scene inspector), or this default. One NPC type, many characters.', params: [{ name: 'dialogue', type: 'dialogue', default: '' }] },
-  { type: 'script', label: 'Script behavior', help: 'Runs a behavior written in a script with behavior(name, { create, update, collide, interact, destroy }). Extra params are passed to the hooks.', params: [{ name: 'name', type: 'scriptBehavior', default: '' }] },
+  { type: 'script', label: 'Script component', help: 'A component written in scripts/<folder>/<Name>.js (export default class Name extends Behaviour). Its public fields are the params; set them here or per instance in the scene inspector.', params: [{ name: 'name', type: 'scriptBehavior', default: '' }] },
   { type: 'wrap', label: 'Wrap around', help: 'Leaving one side of the scene re-enters from the other (Asteroids).', params: [] },
 ];
 
@@ -145,6 +151,11 @@ export function withDefaults<T extends EventStep | Behavior>(step: T, spec: Step
 /** Human-readable one-liner of a step, used by the editor and MCP summaries. */
 export function describeStep(step: EventStep, spec: StepSpec | undefined): string {
   if (!spec) return `${step.type}?`;
+  if (step.type === 'script') {
+    // Component params are not in the catalog: show them all.
+    const params = Object.entries(step).filter(([k]) => k !== 'type' && k !== 'name').map(([k, v]) => `${k}=${JSON.stringify(v)}`);
+    return `component ${step.name}${params.length ? ' ' + params.join(' ') : ''}`;
+  }
   const all = spec.params.filter((p) => step[p.name] !== undefined && step[p.name] !== '').map((p) => `${p.name}=${JSON.stringify(step[p.name])}`);
   return `${step.type}${all.length ? ' ' + all.join(' ') : ''}`;
 }
@@ -186,7 +197,50 @@ export interface Problem {
   message: string;
 }
 
-function checkSteps(where: string, steps: EventStep[], specs: Map<string, StepSpec>, ctx: { objects: Set<string>; scenes: Set<string>; object: boolean; functions?: string[]; dialogues?: string[] }, out: Problem[]): void {
+/** What validation needs to know about script components. */
+export interface ComponentShape {
+  name: string;
+  legacy?: boolean;
+  params: { name: string; type: string; options?: string[] }[];
+}
+
+export interface ScriptShape {
+  behaviors: string[];
+  functions: string[];
+  errors: string[];
+  components?: ComponentShape[];
+}
+
+/** Checks one component use: it exists, its params exist and reference real objects, scenes, sprites... */
+function checkComponent(where: string, name: string, config: Record<string, Value>, scripts: ScriptShape, refs: { objects: Set<string>; scenes: Set<string>; sprites: Set<string>; dialogues?: string[] }, out: Problem[]): void {
+  const comp = scripts.components?.find((c) => c.name === name);
+  if (!comp) {
+    if (!scripts.behaviors.includes(name)) out.push({ where, message: name ? `no component "${name}" (create scripts/${name}.js: export default class ${name} extends Behaviour)` : 'component without a name' });
+    return;
+  }
+  if (comp.legacy) return;
+  for (const [k, v] of Object.entries(config)) {
+    if (k === 'enabled') continue;
+    const p = comp.params.find((x) => x.name === k);
+    if (!p) {
+      out.push({ where, message: `${name} has no param "${k}" (params: ${comp.params.map((x) => x.name).join(', ') || 'none'})` });
+      continue;
+    }
+    const sv = String(v);
+    if (v === '' && p.type !== 'number') continue;
+    if (p.type === 'object' && !refs.objects.has(sv)) out.push({ where: `${where}.${k}`, message: `no object type "${sv}"` });
+    else if (p.type === 'scene' && !refs.scenes.has(sv)) out.push({ where: `${where}.${k}`, message: `no scene "${sv}"` });
+    else if (p.type === 'sprite' && !refs.sprites.has(sv)) out.push({ where: `${where}.${k}`, message: `sprite "${sv}" not found` });
+    else if (p.type === 'sound' && !SOUNDS.includes(sv)) out.push({ where: `${where}.${k}`, message: `unknown sound "${sv}"` });
+    else if (p.type === 'key' && !KEYS.includes(sv)) out.push({ where: `${where}.${k}`, message: `unknown key "${sv}"` });
+    else if (p.type === 'dialogue' && refs.dialogues && !refs.dialogues.includes(sv)) out.push({ where: `${where}.${k}`, message: `no dialogue "${sv}"` });
+    else if (p.type === 'choice' && p.options && !p.options.includes(sv)) out.push({ where: `${where}.${k}`, message: `"${sv}" is not one of ${p.options.join(', ')}` });
+    else if (p.type === 'number' && typeof v !== 'number') out.push({ where: `${where}.${k}`, message: 'must be a number' });
+    else if (p.type === 'bool' && typeof v !== 'boolean') out.push({ where: `${where}.${k}`, message: 'must be true or false' });
+  }
+}
+
+function checkSteps(where: string, steps: EventStep[], specs: Map<string, StepSpec>, ctx: { objects: Set<string>; scenes: Set<string>; object: boolean; functions?: string[]; dialogues?: string[]; components?: string[] }, out: Problem[]): void {
   steps.forEach((s, i) => {
     const spec = specs.get(s.type);
     const at = `${where}[${i}] ${s.type}`;
@@ -215,6 +269,8 @@ function checkSteps(where: string, steps: EventStep[], specs: Map<string, StepSp
         out.push({ where: `${at}.${p.name}`, message: `no dialogue "${v}"` });
       } else if (p.type === 'function' && ctx.functions && !ctx.functions.includes(String(v))) {
         out.push({ where: `${at}.${p.name}`, message: `no script function "${v}" (define it with func("${v}", ...))` });
+      } else if (p.type === 'scriptBehavior' && v !== '' && ctx.components && !ctx.components.includes(String(v))) {
+        out.push({ where: `${at}.${p.name}`, message: `no component "${v}"` });
       } else if (p.type === 'number' && typeof v !== 'number') {
         out.push({ where: `${at}.${p.name}`, message: 'must be a number' });
       }
@@ -222,7 +278,7 @@ function checkSteps(where: string, steps: EventStep[], specs: Map<string, StepSp
   });
 }
 
-function checkEvents(where: string, events: GameEvent[], ctx: { objects: Set<string>; scenes: Set<string>; object: boolean; functions?: string[]; dialogues?: string[] }, out: Problem[]): void {
+function checkEvents(where: string, events: GameEvent[], ctx: { objects: Set<string>; scenes: Set<string>; object: boolean; functions?: string[]; dialogues?: string[]; components?: string[] }, out: Problem[]): void {
   events.forEach((e, i) => {
     const w = `${where} event ${i}`;
     checkSteps(`${w} trigger`, [e.trigger], TRIGGER_MAP, ctx, out);
@@ -232,7 +288,7 @@ function checkEvents(where: string, events: GameEvent[], ctx: { objects: Set<str
 }
 
 /** Static checks: unknown types, bad expressions, missing objects/scenes/sprites. */
-export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<string>, scripts?: { behaviors: string[]; functions: string[]; errors: string[] }, dialogues?: { nodes: string[]; errors: { file: string; line: number; message: string }[] }): Problem[] {
+export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<string>, scripts?: ScriptShape, dialogues?: { nodes: string[]; errors: { file: string; line: number; message: string }[] }): Problem[] {
   const out: Problem[] = [];
   for (const e of dialogues?.errors ?? []) out.push({ where: `dialogues/${e.file}.dialogue line ${e.line}`, message: e.message });
   const talkers = new Set(game.objects.filter((o) => o.behaviors.some((b) => b.type === 'dialogue')).map((o) => o.name));
@@ -249,8 +305,21 @@ export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<st
     }
   }
   for (const e of scripts?.errors ?? []) out.push({ where: 'scripts', message: e });
+  for (const c of scripts?.components ?? []) for (const wmsg of (c as { warnings?: string[] }).warnings ?? []) out.push({ where: `component ${c.name}`, message: wmsg });
   const objects = new Set(game.objects.map((o) => o.name));
   const sceneNames = new Set(scenes.map((s) => s.name));
+  const refs = { objects, scenes: sceneNames, sprites, dialogues: dialogues?.nodes };
+  const compNames = scripts?.behaviors;
+  const params = (b: Record<string, Value>) => Object.fromEntries(Object.entries(b).filter(([k]) => k !== 'type' && k !== 'name'));
+  if (scripts) {
+    (game.components ?? []).forEach((b, i) => checkComponent(`game component ${i} ${b.name}`, String(b.name ?? ''), params(b), scripts, refs, out));
+    for (const s of scenes) {
+      (s.components ?? []).forEach((b, i) => checkComponent(`scene ${s.name} component ${i} ${b.name}`, String(b.name ?? ''), params(b), scripts, refs, out));
+      for (const inst of s.instances) {
+        for (const [n, cfg] of Object.entries(inst.components ?? {})) checkComponent(`scene ${s.name} instance ${inst.name ?? inst.object} component ${n}`, n, cfg, scripts, refs, out);
+      }
+    }
+  }
   if (!scenes.length) out.push({ where: 'game', message: 'no scenes yet' });
   else if (!sceneNames.has(game.startScene)) out.push({ where: 'game.startScene', message: `no scene "${game.startScene}" (the first scene will be used)` });
   for (const o of game.objects) {
@@ -260,21 +329,21 @@ export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<st
       const spec = BEHAVIOR_MAP.get(b.type);
       if (!spec) out.push({ where: `object ${o.name} behavior ${i}`, message: `unknown behavior "${b.type}"` });
       else if (b.type === 'chase' && !objects.has(String(b.target ?? 'player'))) out.push({ where: `object ${o.name} behavior chase`, message: `no object type "${b.target}"` });
-      else if (b.type === 'script' && scripts && !scripts.behaviors.includes(String(b.name ?? ''))) out.push({ where: `object ${o.name} behavior script`, message: `no script behavior "${b.name}" (define it with behavior("${b.name}", {...}))` });
+      else if (b.type === 'script' && scripts) checkComponent(`object ${o.name} component ${b.name}`, String(b.name ?? ''), params(b), scripts, refs, out);
     });
     if (o.text !== undefined) {
       const err = checkExpr(o.text);
       if (err) out.push({ where: `object ${o.name}.text`, message: err });
     }
     for (const b of o.behaviors) if (b.type === 'dialogue' && b.dialogue && dialogues && !dialogues.nodes.includes(String(b.dialogue))) out.push({ where: `object ${o.name} behavior Talks`, message: `no dialogue "${b.dialogue}"` });
-    checkEvents(`object ${o.name}`, o.events, { objects, scenes: sceneNames, object: true, functions: scripts?.functions, dialogues: dialogues?.nodes }, out);
+    checkEvents(`object ${o.name}`, o.events, { objects, scenes: sceneNames, object: true, functions: scripts?.functions, dialogues: dialogues?.nodes, components: compNames }, out);
   }
   for (const s of scenes) {
     if (s.tileset && !sprites.has(s.tileset)) out.push({ where: `scene ${s.name}`, message: `tileset sprite "${s.tileset}" not found` });
     for (const b of s.backgrounds) if (!sprites.has(b.sprite)) out.push({ where: `scene ${s.name} background`, message: `sprite "${b.sprite}" not found` });
     const missing = new Set(s.instances.filter((i) => !objects.has(i.object)).map((i) => i.object));
     for (const m of missing) out.push({ where: `scene ${s.name}`, message: `instances of unknown object "${m}"` });
-    checkEvents(`scene ${s.name}`, s.events, { objects, scenes: sceneNames, object: false, functions: scripts?.functions, dialogues: dialogues?.nodes }, out);
+    checkEvents(`scene ${s.name}`, s.events, { objects, scenes: sceneNames, object: false, functions: scripts?.functions, dialogues: dialogues?.nodes, components: compNames }, out);
   }
   return out;
 }

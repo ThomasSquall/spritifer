@@ -2,6 +2,7 @@
 
 import { type Instance, type Scene, type TileLayer, type Value, newGameId, normalizeScene, resizeScene } from '../core/game/types.js';
 import { renderEventSheet } from './eventSheet.js';
+import { componentListCard, instanceComponents } from './componentsUi.js';
 import { type LoadedAsset, gameApi } from './gameApi.js';
 import { state } from './gameState.js';
 import { TEMPLATES, createFromTemplate, sheetContext } from './objectsView.js';
@@ -999,6 +1000,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
             edit(() => setProp(k, 0));
             renderInspector();
           } }, icon('plus', 12), 'Property')),
+        h('div', {}, h('div', { class: 'muted small' }, 'Components (empty = value of the object type)'), instanceComponents(inst, obj, edit, () => renderInspector())),
         h('div', { class: 'actions' },
           obj ? h('a', { class: 'small', href: `#/objects/${encodeURIComponent(inst.object)}` }, `edit ${inst.object} →`) : h('span', { class: 'danger-text small' }, 'unknown type'),
           h('span', { class: 'spacer' }),
@@ -1050,6 +1052,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
           h('input', { type: 'checkbox', checked: !!scene.persistent, onchange: (e: Event) => { snapshot(); if ((e.target as HTMLInputElement).checked) scene.persistent = true; else delete scene.persistent; changed(); } }),
           'Remember instances when leaving'),
         vars,
+        componentListCard('Scene components', 'Managers and level logic: a script component here runs for the whole scene (this.self is null), e.g. a battle, a wave spawner, the level HUD.', () => scene.components, (list) => { snapshot(); if (list?.length) scene.components = list; else delete scene.components; }, () => sheetContext(null, []), () => changed()),
         h('div', { class: 'actions' },
           h('button', { class: 'small', onclick: async () => {
             const n = await promptText('Scene variable', 'Name (e.g. timeLeft)', '');

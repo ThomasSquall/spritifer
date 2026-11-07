@@ -76,16 +76,23 @@ export function loadGameBundle(ws: Workspace, opts: { images?: boolean } = {}): 
   const available = new Set(ws.list().map((s) => s.name));
   const sprites: Record<string, SpriteAsset> = {};
   const sheets = new Map<string, Bitmap>();
-  for (const name of usedSprites(game, scenes)) {
+  const scriptSources = ws.loadScripts();
+  const dialogueSources = ws.loadDialogues();
+  const used = usedSprites(game, scenes);
+  // Sprites only named in scripts or dialogues (e.g. ui.sprite('boss', ...)) are part of the game too.
+  for (const src of [...Object.values(scriptSources), ...Object.values(dialogueSources)]) {
+    for (const m of src.matchAll(/["'`]([A-Za-z0-9][A-Za-z0-9_-]{0,63})["'`]/g)) if (available.has(m[1])) used.add(m[1]);
+  }
+  for (const name of used) {
     if (!available.has(name)) continue;
     const built = buildAsset(ws.load(name), !!opts.images);
     // Copy so cached assets don't leak the image into headless bundles.
     sprites[name] = opts.images ? built.asset : { ...built.asset, image: undefined };
     sheets.set(name, built.sheet);
   }
-  const scripts = ws.loadScripts();
+  const scripts = scriptSources;
   const scriptInfo = inspectScripts(scripts);
-  const dialogues = ws.loadDialogues();
+  const dialogues = dialogueSources;
   const book = buildDialogueBook(dialogues);
   const dialogueInfo = { nodes: [...book.nodes.keys()].sort(), errors: book.errors };
   const problems = validateGame(game, scenes, available, scriptInfo, dialogueInfo);
@@ -185,9 +192,23 @@ export class BitmapRenderer implements Renderer {
     for (let i = 0; i < d.length; i += 4) d.set(c, i);
   }
 
-  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number }): void {
+  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; scale?: number }): void {
     const src = this.sheets.get(sprite);
     if (!src) return;
+    const k = Math.max(1, o.scale ?? 1);
+    if (k > 1) {
+      for (let y = 0; y < sh * k; y++) {
+        for (let x = 0; x < sw * k; x++) {
+          const px = sx + Math.floor((o.flipX ? sw * k - 1 - x : x) / k);
+          const py = sy + Math.floor(y / k);
+          if (px < 0 || py < 0 || px >= src.width || py >= src.height) continue;
+          const i = (py * src.width + px) * 4;
+          const a = src.data[i + 3] * o.opacity;
+          if (a) this.blend(dx + x, dy + y, src.data[i], src.data[i + 1], src.data[i + 2], a);
+        }
+      }
+      return;
+    }
     for (let y = 0; y < sh; y++) {
       for (let x = 0; x < sw; x++) {
         const px = sx + x;

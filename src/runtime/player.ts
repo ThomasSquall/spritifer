@@ -67,20 +67,21 @@ class CanvasRenderer implements Renderer {
     this.ctx.fillRect(0, 0, this.w, this.h);
   }
 
-  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; angle: number }): void {
+  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; angle: number; scale?: number }): void {
     const img = this.images.get(sprite);
     if (!img) return;
     const c = this.ctx;
+    const k = o.scale ?? 1;
     if (!o.flipX && !o.angle && o.opacity >= 1) {
-      c.drawImage(img, sx, sy, sw, sh, dx, dy, sw, sh);
+      c.drawImage(img, sx, sy, sw, sh, dx, dy, sw * k, sh * k);
       return;
     }
     c.save();
     c.globalAlpha = o.opacity;
-    c.translate(dx + sw / 2, dy + sh / 2);
+    c.translate(dx + (sw * k) / 2, dy + (sh * k) / 2);
     if (o.angle) c.rotate((o.angle * Math.PI) / 180);
     if (o.flipX) c.scale(-1, 1);
-    c.drawImage(img, sx, sy, sw, sh, -sw / 2, -sh / 2, sw, sh);
+    c.drawImage(img, sx, sy, sw, sh, (-sw * k) / 2, (-sh * k) / 2, sw * k, sh * k);
     c.restore();
   }
 

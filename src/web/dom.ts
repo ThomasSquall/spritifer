@@ -115,7 +115,7 @@ export function modal(title: string, build: (close: () => void) => Node, opts: {
 }
 
 /** Prompt for a single text value. */
-export async function promptText(title: string, label: string, initial = ''): Promise<string | null> {
+export async function promptText(title: string, label: string, initial = '', opts: { caretAtEnd?: boolean } = {}): Promise<string | null> {
   let result: string | null = null;
   await modal(title, (close) => {
     const input = h('input', { type: 'text', value: initial, spellcheck: false });
@@ -130,7 +130,7 @@ export async function promptText(title: string, label: string, initial = ''): Pr
       h('label', {}, label, input),
       h('div', { class: 'actions' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'OK')),
     );
-    setTimeout(() => input.select());
+    setTimeout(() => (opts.caretAtEnd ? input.setSelectionRange(input.value.length, input.value.length) : input.select()));
     return form;
   });
   return result;

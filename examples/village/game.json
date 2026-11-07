@@ -20,7 +20,8 @@
   "introDone": false,
   "metElder": false,
   "quest": 0,
-  "questDone": false
+  "questDone": false,
+  "foe": "slime"
  },
  "objects": [
   {
@@ -103,7 +104,7 @@
     },
     {
      "type": "script",
-     "name": "monster"
+     "name": "Monster"
     }
    ],
    "events": [],

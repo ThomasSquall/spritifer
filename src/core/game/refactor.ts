@@ -72,3 +72,37 @@ export function renameSceneRefs(game: GameProject, scenes: Scene[], from: string
   for (const o of game.objects) renameInEvents(o.events, ['scene'], from, to);
   return scenes.filter((s) => renameInEvents(s.events, ['scene'], from, to));
 }
+
+/** Renames a script component everywhere it is used: object types, instances, scene and game components, events. */
+export function renameComponentRefs(game: GameProject, scenes: Scene[], from: string, to: string): { game: boolean; scenes: Scene[] } {
+  let g = false;
+  const fix = (list: { type: string; name?: unknown }[] | undefined) => {
+    let c = false;
+    for (const b of list ?? []) {
+      if (b.type === 'script' && b.name === from) {
+        b.name = to;
+        c = true;
+      }
+    }
+    return c;
+  };
+  for (const o of game.objects) {
+    g = fix(o.behaviors) || g;
+    g = renameInEvents(o.events, ['scriptBehavior'], from, to) || g;
+  }
+  g = fix(game.components) || g;
+  const changed: Scene[] = [];
+  for (const s of scenes) {
+    let c = fix(s.components);
+    c = renameInEvents(s.events, ['scriptBehavior'], from, to) || c;
+    for (const i of s.instances) {
+      if (i.components && from in i.components) {
+        i.components[to] = i.components[from];
+        delete i.components[from];
+        c = true;
+      }
+    }
+    if (c) changed.push(s);
+  }
+  return { game: g, scenes: changed };
+}

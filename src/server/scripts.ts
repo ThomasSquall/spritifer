@@ -2,6 +2,12 @@
 
 import vm from 'node:vm';
 import { ScriptHost, type ScriptEvaluator, type ScriptInfo } from '../core/game/script.js';
+import { scriptBaseName, transformModule } from '../core/game/modules.js';
+import { COMPONENT_TEMPLATE, PLAIN_SCRIPT_TEMPLATE, buildTypeDefinitions } from '../core/game/scriptApi.js';
+import { SOUNDS } from '../core/game/catalog.js';
+import { buildDialogueBook } from '../core/game/dialogue.js';
+import type { Value } from '../core/game/types.js';
+import type { Workspace } from './store.js';
 import type { World } from '../core/game/engine.js';
 
 /**
@@ -21,33 +27,62 @@ export function inspectScripts(scripts: Record<string, string>): ScriptInfo {
   const fake = { log: (m: string) => logs.push(m), globals: {}, sceneVars: {}, actors: [], opts: {} } as unknown as World;
   const host = new ScriptHost(fake);
   host.load(scripts, nodeEvaluator);
-  return { behaviors: [...host.behaviors.keys()].sort(), functions: [...host.functions.keys()].sort(), errors: host.errors };
+  return { behaviors: [...host.components.keys()].sort(), functions: [...host.functions.keys()].sort(), errors: host.errors, components: host.componentInfo() };
 }
 
 /** Syntax check without running anything. */
 export function checkScriptSyntax(code: string, filename: string): string | null {
   try {
-    new vm.Script(`(function () {"use strict";\n${code}\n})`, { filename, lineOffset: -1 });
+    new vm.Script(`(function () {"use strict";\n${transformModule(code).code}\n})`, { filename, lineOffset: -1 });
     return null;
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
   }
 }
 
-export const SCRIPT_TEMPLATE = `// Scripts hold game logic that events can't express well. See the reference on the right.
-// (Conversations go in the Dialogues tab.)
+export { COMPONENT_TEMPLATE, PLAIN_SCRIPT_TEMPLATE } from '../core/game/scriptApi.js';
 
-// A function you can call from an event with the action "Run script function".
-func('reward', async (self, other, amount) => {
-  vars.score = (vars.score || 0) + (amount || 1)
-  sound('coin')
-})
+/** Starting code for a new script: a component class named after the file, or a plain module. */
+export function scriptTemplate(name: string, kind: 'component' | 'script' = 'component'): string {
+  return kind === 'component' ? COMPONENT_TEMPLATE(scriptBaseName(name)) : PLAIN_SCRIPT_TEMPLATE;
+}
 
-// Custom HUD drawn every frame.
-onDraw((ui) => {
-  ui.text('SCORE ' + (vars.score || 0), ui.width - 6, 6, { align: 'right' })
-})
-`;
+/** @deprecated kept for callers that create a script without saying which kind. */
+export const SCRIPT_TEMPLATE = PLAIN_SCRIPT_TEMPLATE;
+
+const JSCONFIG = `${JSON.stringify({
+  compilerOptions: { allowJs: true, checkJs: false, target: 'ES2022', module: 'ESNext', moduleResolution: 'bundler', paths: { '*': ['./*'] }, lib: ['ES2022'], noEmit: true },
+  include: ['**/*.js', 'spritifer.d.ts'],
+}, null, 2)}\n`;
+
+/**
+ * Writes scripts/jsconfig.json and scripts/spritifer.d.ts so VS Code / JetBrains autocomplete the game API,
+ * getComponent('Name') return types and the project's objects, scenes and variables. Only when there are scripts.
+ */
+export function refreshScriptTypes(ws: Workspace, info?: ScriptInfo): boolean {
+  try {
+    if (!ws.listScripts().length) return false;
+    const i = info ?? inspectScripts(ws.loadScripts());
+    const game = ws.loadGame();
+    const properties: Record<string, Value> = {};
+    for (const o of game.objects) Object.assign(properties, o.properties);
+    const dialogues = [...buildDialogueBook(ws.loadDialogues()).nodes.keys()].sort();
+    const dts = buildTypeDefinitions({
+      components: i.components.filter((c) => c.path).map((c) => ({ name: c.name, path: c.path })),
+      objects: game.objects.map((o) => o.name),
+      scenes: ws.listScenes().map((s) => s.name),
+      sounds: SOUNDS,
+      dialogues,
+      variables: game.variables,
+      properties,
+    });
+    const a = ws.writeScriptSupportFile('jsconfig.json', JSCONFIG);
+    const b = ws.writeScriptSupportFile('spritifer.d.ts', dts);
+    return a || b;
+  } catch {
+    return false;
+  }
+}
 
 export const DIALOGUE_TEMPLATE = `# Dialogues: one file can hold many. Give an NPC object type the behavior "Talks (dialogue)",
 # then set each placed instance's "dialogue" property (and its Name) in the scene inspector.

@@ -4,7 +4,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { BEHAVIOR_MAP, catalogReference, describeEvent, describeStep } from '../core/game/catalog.js';
 import { type PlaytestInput, runPlaytest } from '../core/game/engine.js';
-import { renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
+import { renameComponentRefs, renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
 import {
   type GameEvent,
   type GameProject,
@@ -15,6 +15,7 @@ import {
   createScene,
   newGameId,
   normalizeEvents,
+  normalizeComponents,
   normalizeGame,
   normalizeObject,
   normalizeScene,
@@ -24,7 +25,8 @@ import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePrev
 import { encodePng } from './png.js';
 import { scaleBitmap } from '../core/draw.js';
 import type { Workspace } from './store.js';
-import { SCRIPT_TEMPLATE, checkScriptSyntax, inspectScripts, nodeEvaluator } from './scripts.js';
+import { checkScriptSyntax, inspectScripts, nodeEvaluator, refreshScriptTypes } from './scripts.js';
+import { scriptBaseName } from '../core/game/modules.js';
 import { SCRIPT_REFERENCE } from '../core/game/script.js';
 import { DIALOGUE_REFERENCE, buildDialogueBook, parseDialogues } from '../core/game/dialogue.js';
 
@@ -50,8 +52,8 @@ Model:
 - Scenes (create_scene) are tile maps (cols x rows, tileSize from the tileset sprite's grid) with tile layers (solid layers collide) and placed instances. Scenes have their own event sheet and variables.
 - Events: WHEN trigger IF conditions DO actions. Call game_reference for the full vocabulary (triggers, conditions, actions, behaviors, keys, sounds, expression syntax).
 - Dialogues (write_dialogue, dialogue_reference) are plain-text conversations: speakers, choices, conditions, variables, commands, jumps. NPCs: ONE object type with the behavior "dialogue" (+ solid), placed many times, each instance with its own name, optional sprite override and props { dialogue: "<name>" }. Never create one object type or script per NPC.
-- Scripts (write_script, script_reference) are JavaScript files for game logic events can't express well: cutscenes (moveTo, wait, lockControls), turn-based battles, inventories and custom UI (onDraw with bars, panels, text). Attach script behaviors to object types with { type: "script", name } and call script functions from events with the action "call".
-- RPGs: top-down player (topdown + camera, sprite tags walk_<dir>/idle_<dir>), scene y_sort and persistent (towns remember chests/positions after battles), solid tile layers for walls, NPCs and chests via dialogues (~ self.opened = true), an intro via a scene event (start → dialogue), battles in a scene driven by a script onSceneStart('battle', async () => ...).
+- Scripts (write_script, script_reference) are JavaScript files in scripts/ (use folders: scripts/enemies/Patrol.js, scripts/ui/Hud.js, scripts/managers/GameManager.js) for logic events can't express well. Write COMPONENTS, Unity-style: ONE class per file named like the file (export default class Patrol extends Behaviour), public fields = inspector params, lifecycle awake/start/update/lateUpdate/onCollisionEnter/Stay/Exit/onInteract/onDraw/onDestroy, this.getComponent('Health') / findComponent('GameManager') to talk to other scripts, import for shared helpers. Attach them to object types ({ type: "script", name: "Patrol", speed: 60 } in behaviors), override params per placed instance (instances components: { Patrol: { speed: 80 } }), or attach managers to scenes (update_scene components) and to the whole game (set_game components). Never put several behaviours in one file.
+- RPGs: top-down player (topdown + camera, sprite tags walk_<dir>/idle_<dir>), scene y_sort and persistent (towns remember chests/positions after battles), solid tile layers for walls, NPCs and chests via dialogues (~ self.opened = true), an intro via a scene event (start → dialogue), battles in a scene driven by a scene component (class Battle extends Behaviour { async start() {...} } attached to the battle scene).
 - Projects: list_projects / open_project / create_project switch between games; each project folder has its own sprites, scenes, scripts and game.json.
 
 Workflow that works:
@@ -111,6 +113,9 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       `Instances (${s.instances.length}): ${[...counts].map(([k, v]) => `${k}×${v}`).join(', ') || 'none'}`,
     ];
     if (Object.keys(s.variables).length) lines.push(`Variables: ${Object.entries(s.variables).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')}`);
+    if (s.components?.length) lines.push(`Scene components: ${s.components.map((b) => describeStep(b, BEHAVIOR_MAP.get('script'))).join('; ')}`);
+    const custom = s.instances.filter((i) => i.components);
+    if (custom.length) lines.push(`Instance component overrides: ${custom.map((i) => `${i.name ?? i.object}#${i.id} ${JSON.stringify(i.components)}`).join('; ')}`);
     if (s.backgrounds.length) lines.push(`Backgrounds: ${s.backgrounds.map((b) => `${b.sprite} parallax ${b.parallax}`).join(', ')}`);
     s.events.forEach((e, i) => lines.push(`  [${i}] ${describeEvent(e)}`));
     return lines.join('\n');
@@ -141,6 +146,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
     const lines = [
       `Game "${g.title}"${ws.hasGame() ? '' : ' (not saved yet: defaults)'}: ${g.width}x${g.height}px, zoom ${g.zoom}, background ${g.background}, gravity ${g.gravity}, start scene ${g.startScene || '(first scene)'}${g.touchControls ? ', touch controls' : ''}`,
       `Variables: ${Object.entries(g.variables).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ') || 'none'}`,
+      `Global components: ${g.components?.map((b) => describeStep(b, BEHAVIOR_MAP.get('script'))).join('; ') || 'none'}`,
       `Scenes: ${scenes.map((s) => `${s.name} (${s.cols}x${s.rows}, ${s.instances} instances)`).join(', ') || 'none'}`,
       '',
       ...g.objects.map(describeObject),
@@ -163,9 +169,15 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       gravity: z.number().optional().describe('px/s² for platformer/patrol (default 900)'),
       touch_controls: z.boolean().optional(),
       variables: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
+      components: z.array(stepSchema).optional().describe('Global components alive for the whole game across scenes (replace the list): [{ type: "script", name: "GameManager" }]'),
     },
     (a) => {
       const { game } = mutateGame((g) => {
+        if (a.components) {
+          const list = normalizeComponents(a.components.map((b) => ({ ...b, type: 'script' })));
+          if (list) g.components = list;
+          else delete g.components;
+        }
         if (a.title !== undefined) g.title = a.title;
         if (a.width !== undefined) g.width = a.width;
         if (a.height !== undefined) g.height = a.height;
@@ -404,6 +416,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       variables: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       y_sort: z.boolean().optional().describe('Draw instances lower on screen in front (top-down / RPG depth)'),
       persistent: z.boolean().optional().describe('Remember instances when leaving (positions, properties, destroyed ones), e.g. an RPG town you come back to after a battle'),
+      components: z.array(stepSchema).optional().describe('Scene components (replace the list): [{ type: "script", name: "Battle", foeHp: 12 }] — managers, level logic, HUD'),
     },
     (a) => {
       const { scene } = mutateScene(a.scene, (s) => {
@@ -426,6 +439,11 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           }
         }
         if (a.background !== undefined) s.background = a.background;
+        if (a.components) {
+          const list = normalizeComponents(a.components.map((b) => ({ ...b, type: 'script' })));
+          if (list) s.components = list;
+          else delete s.components;
+        }
         if (a.backgrounds) s.backgrounds = a.backgrounds.map((b) => ({ sprite: b.sprite, parallax: b.parallax ?? 0.5, repeatX: b.repeat_x ?? true, y: b.y ?? 0 }));
         for (const [k, v] of Object.entries(a.variables ?? {})) {
           assertIdentifier('variable', k);
@@ -550,6 +568,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
         sprite: z.string().optional().describe('Use this sprite instead of the object type\'s (one NPC type, many looks)'),
         animation: z.string().optional(),
         props: z.record(z.string(), valueSchema).optional().describe('Instance properties, e.g. { dialogue: "elder" } for a Talks NPC'),
+        components: z.record(z.string(), z.record(z.string(), valueSchema)).optional().describe('Component params for this instance, by component name: { Patrol: { speed: 80 } }. A component the object type lacks is added to this instance only; { enabled: false } turns one off.'),
         flip_x: z.boolean().optional(),
       })).min(1),
       tiles: z.boolean().optional(),
@@ -575,7 +594,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           }
           const id = newGameId();
           ids.push(id);
-          s.instances.push({ id, object: i.object, x, y, ...(i.name ? { name: i.name } : {}), ...(i.sprite ? { sprite: i.sprite } : {}), ...(i.animation ? { animation: i.animation } : {}), ...(i.props ? { props: i.props } : {}), ...(i.flip_x ? { flipX: true } : {}) });
+          s.instances.push({ id, object: i.object, x, y, ...(i.name ? { name: i.name } : {}), ...(i.sprite ? { sprite: i.sprite } : {}), ...(i.animation ? { animation: i.animation } : {}), ...(i.props ? { props: i.props } : {}), ...(i.components ? { components: i.components as Record<string, Record<string, Value>> } : {}), ...(i.flip_x ? { flipX: true } : {}) });
         }
       });
       return text(`Placed ${ids.length} instance(s): ${ids.join(', ')}. Scene now has ${scene.instances.length}.`);
@@ -599,6 +618,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       sprite: z.string().nullable().optional().describe('Sprite override (null = the object type\'s)'),
       animation: z.string().nullable().optional(),
       props: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
+      components: z.record(z.string(), z.union([z.record(z.string(), z.union([valueSchema, z.null()])), z.null()])).optional().describe('Component params by component name (merged; null value deletes a param, null component removes the override)'),
     },
     (a) => {
       let n = 0;
@@ -631,6 +651,18 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
             i.props ??= {};
             if (v === null) delete i.props[k];
             else i.props[k] = v as Value;
+          }
+          for (const [c, params] of Object.entries(a.components ?? {})) {
+            i.components ??= {};
+            if (params === null) delete i.components[c];
+            else {
+              const cur = (i.components[c] ??= {});
+              for (const [k, v] of Object.entries(params)) {
+                if (v === null) delete cur[k];
+                else cur[k] = v as Value;
+              }
+            }
+            if (!Object.keys(i.components).length) delete i.components;
           }
         }
       });
@@ -729,17 +761,20 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
 
   const scriptSummary = () => {
     const info = inspectScripts(ws.loadScripts());
-    return `Registered behaviors: ${info.behaviors.join(', ') || 'none'}\nRegistered functions: ${info.functions.join(', ') || 'none'}${info.errors.length ? `\nERRORS:\n${info.errors.map((e) => '- ' + e).join('\n')}` : ''}`;
+    refreshScriptTypes(ws, info);
+    const comps = info.components.map((c) => `- ${c.name}${c.path ? ` (scripts/${c.path}.js)` : ' (legacy behavior())'}: params ${c.params.map((p) => `${p.name}:${p.type}=${JSON.stringify(p.default)}${p.options ? `[${p.options.join('|')}]` : ''}`).join(', ') || 'none'}; hooks ${c.hooks.join(', ') || 'none'}${c.methods.length ? `; methods ${c.methods.join(', ')}` : ''}${c.warnings.length ? `\n    WARN ${c.warnings.join('; ')}` : ''}`);
+    return `Components:\n${comps.join('\n') || '- none'}\nScript functions (func): ${info.functions.join(', ') || 'none'}${info.errors.length ? `\nERRORS:\n${info.errors.map((e) => '- ' + e).join('\n')}` : ''}`;
   };
 
-  tool('script_reference', 'Reference of the game scripting API (JavaScript): behaviors, functions callable from events, hooks, async dialogs/menus/waits/movement, instance handles, UI drawing, with a turn-based battle example. Read it before writing scripts.', {}, () => text(SCRIPT_REFERENCE), { readOnlyHint: true });
+  tool('script_reference', 'Reference of the game scripting API (JavaScript): components (one Behaviour class per file, Unity-style lifecycle, inspector params, getComponent), modules/imports, instance handles, async dialogs/menus/waits/movement, UI drawing, with an example. Read it before writing scripts.', {}, () => text(SCRIPT_REFERENCE), { readOnlyHint: true });
 
-  tool('list_scripts', 'List the project scripts (scripts/<name>.js) and what they register.', {}, () => {
+  tool('list_scripts', 'List the project scripts (scripts/<folder>/<name>.js), the components they define (params, hooks, methods) and loading errors.', {}, () => {
     const list = ws.listScripts();
-    return text(`${list.length ? list.map((s) => `${s.name}.js (${s.size} bytes)`).join('\n') : 'No scripts yet. Create one with write_script.'}\n\n${scriptSummary()}`);
+    const folders = ws.listScriptFolders();
+    return text(`${list.length ? list.map((s) => `${s.name}.js (${s.size} bytes)`).join('\n') : 'No scripts yet. Create one with write_script.'}${folders.length ? `\nFolders: ${folders.join(', ')}` : ''}\n\n${scriptSummary()}`);
   }, { readOnlyHint: true });
 
-  tool('read_script', 'Read a script with line numbers.', { name: z.string() }, (a) => {
+  tool('read_script', 'Read a script with line numbers.', { name: z.string().describe('Path without .js, e.g. "enemies/Patrol"') }, (a) => {
     const code = ws.readScript(a.name);
     return text(code.split('\n').map((l, i) => `${String(i + 1).padStart(4)}  ${l}`).join('\n'));
   }, { readOnlyHint: true });
@@ -753,8 +788,8 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
 
   tool(
     'write_script',
-    'Create or replace a game script (plain JavaScript, see script_reference). It is syntax-checked before saving; the result lists what all scripts register and any loading errors. Then attach behaviors to object types ({ type: "script", name }) or call functions from events (action "call"), and verify with playtest.',
-    { name: z.string().describe('Script name (file scripts/<name>.js), e.g. "npcs", "battle"'), code: z.string() },
+    'Create or replace a game script (see script_reference). Components: one class per file named like the file, e.g. name "enemies/Patrol" with `export default class Patrol extends Behaviour { speed = 40; update(dt) {...} }`. Plain scripts export helpers/data. Organize with folders (enemies/, player/, ui/, managers/, utils/). Syntax-checked before saving; the result lists every component with its params and any loading errors. Then attach components (set_object behaviors { type: "script", name }, update_scene / set_game components) and verify with playtest.',
+    { name: z.string().describe('Path in scripts/ without .js, e.g. "enemies/Patrol", "ui/Hud", "utils/math"'), code: z.string() },
     (a) => saveScript(a.name, a.code),
   );
 
@@ -770,12 +805,35 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
     },
   );
 
-  tool('delete_script', 'Delete a script file.', { name: z.string() }, (a) => {
-    ws.removeScript(a.name);
-    return text(`Deleted scripts/${a.name}.js.\n${scriptSummary()}`);
+  tool('move_script', 'Move or rename a script or a whole folder (e.g. "Patrol" → "enemies/Patrol", "enemies" → "monsters"). When a component file is renamed, its class name and every reference (objects, instances, scene/game components, events) follow.', { from: z.string(), to: z.string() }, (a) => {
+    const isFile = ws.scriptExists(a.from);
+    const before = isFile ? [a.from] : ws.listScripts().map((s) => s.name).filter((n) => n.startsWith(a.from + '/'));
+    remember('game', 'game');
+    for (const sc of ws.listScenes()) remember('scene', sc.name);
+    ws.moveScript(a.from, a.to);
+    for (const old of before) {
+      const now = isFile ? a.to : a.to + old.slice(a.from.length);
+      const x = scriptBaseName(old);
+      const y = scriptBaseName(now);
+      if (x === y) continue;
+      const code = ws.readScript(now);
+      const renamed = code.replace(new RegExp(`(export\\s+default\\s+class\\s+)${x}\\b`), `$1${y}`);
+      if (renamed !== code) ws.writeScript(now, renamed);
+      const game = ws.loadGame();
+      const scenes = ws.listScenes().map((sc) => ws.loadScene(sc.name));
+      const changed = renameComponentRefs(game, scenes, x, y);
+      if (changed.game) ws.saveGame(game, AUTHOR);
+      for (const sc of changed.scenes) ws.saveScene(sc, AUTHOR);
+    }
+    return text(`Moved ${a.from} → ${a.to}.\n${scriptSummary()}`);
   }, { destructiveHint: true });
 
-  void SCRIPT_TEMPLATE;
+  tool('delete_script', 'Delete a script file (or a folder with everything in it, with folder: true).', { name: z.string(), folder: z.boolean().optional() }, (a) => {
+    if (a.folder) ws.removeScriptFolder(a.name);
+    else ws.removeScript(a.name);
+    return text(`Deleted scripts/${a.name}${a.folder ? '/' : '.js'}.\n${scriptSummary()}`);
+  }, { destructiveHint: true });
+
 
   // ------------------------------------------------------------------ dialogues
 

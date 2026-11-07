@@ -12,7 +12,9 @@ import { ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
 import { createScene, normalizeGame, normalizeScene } from '../core/game/types.js';
 import { buildGameHtml, exportGame, loadGameBundle, loadRuntime, renderScenePreview } from './game.js';
 import { renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
-import { SCRIPT_TEMPLATE, checkScriptSyntax, inspectScripts } from './scripts.js';
+import { checkScriptSyntax, inspectScripts, refreshScriptTypes, scriptTemplate } from './scripts.js';
+import { scriptBaseName } from '../core/game/modules.js';
+import { renameComponentRefs } from '../core/game/refactor.js';
 import { SCRIPT_REFERENCE } from '../core/game/script.js';
 import { DIALOGUE_REFERENCE, buildDialogueBook } from '../core/game/dialogue.js';
 import { DIALOGUE_TEMPLATE } from './scripts.js';
@@ -73,7 +75,8 @@ export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1
           rev = raw.rev;
           updatedBy = raw.updatedBy;
         } else if (kind === 'script') {
-          rev = pws.scriptExists(name) ? String(Date.now()) : null;
+          refreshScriptTypes(pws);
+          rev = name && pws.scriptExists(name) ? String(Date.now()) : null;
         } else if (kind === 'dialogue') {
           rev = pws.dialogueExists(name) ? String(Date.now()) : null;
         } else if (kind === 'scene') {
@@ -317,21 +320,63 @@ async function handleGame(ws: Workspace, req: http.IncomingMessage, res: http.Se
   throw new HttpError(404, 'Not found');
 }
 
+/** After a script change: keep the IDE type definitions current. */
+function scriptsChanged(ws: Workspace): void {
+  refreshScriptTypes(ws);
+}
+
+/** Renames a script or folder; a component whose file name changes keeps its references (objects, scenes, events). */
+function moveScriptAndRefs(ws: Workspace, from: string, to: string): void {
+  const isFile = ws.scriptExists(from);
+  const before = isFile ? [from] : ws.listScripts().map((s) => s.name).filter((n) => n.startsWith(from + '/'));
+  ws.moveScript(from, to);
+  for (const old of before) {
+    const now = isFile ? to : to + old.slice(from.length);
+    const a = scriptBaseName(old);
+    const b = scriptBaseName(now);
+    if (a === b) continue;
+    // Keep the class name in sync with the file name (Unity-style).
+    const code = ws.readScript(now);
+    const renamed = code.replace(new RegExp(`(export\\s+default\\s+class\\s+)${a}\\b`), `$1${b}`);
+    if (renamed !== code) ws.writeScript(now, renamed);
+    const game = ws.loadGame();
+    const scenes = ws.listScenes().map((s) => ws.loadScene(s.name));
+    const changed = renameComponentRefs(game, scenes, a, b);
+    if (changed.game) ws.saveGame(game, 'editor');
+    for (const sc of changed.scenes) ws.saveScene(sc, 'editor');
+  }
+}
+
 async function handleScripts(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {
   const method = req.method ?? 'GET';
   const name = parts[0];
   if (!name) {
     if (method === 'GET') return sendJson(res, 200, ws.listScripts());
     if (method === 'POST') {
-      const body = (await readJson(req)) as { name: string; code?: string };
+      const body = (await readJson(req)) as { name: string; code?: string; kind?: 'component' | 'script' };
       if (ws.scriptExists(body.name)) throw new HttpError(409, `Script "${body.name}" already exists`);
-      ws.writeScript(body.name, body.code ?? SCRIPT_TEMPLATE);
+      ws.writeScript(body.name, body.code ?? scriptTemplate(body.name, body.kind ?? 'script'));
+      scriptsChanged(ws);
       return sendJson(res, 201, { name: body.name });
     }
     throw new HttpError(405, 'Method not allowed');
   }
   if (name === '_info' && method === 'GET') return sendJson(res, 200, inspectScripts(ws.loadScripts()));
   if (name === '_reference' && method === 'GET') return sendJson(res, 200, { reference: SCRIPT_REFERENCE });
+  if (name === '_tree' && method === 'GET') return sendJson(res, 200, { files: ws.listScripts(), folders: ws.listScriptFolders() });
+  if (name === '_folders') {
+    if (method === 'POST' && !parts[1]) {
+      const body = (await readJson(req)) as { name: string };
+      ws.createScriptFolder(body.name);
+      return sendJson(res, 201, { name: body.name });
+    }
+    if (method === 'DELETE' && parts[1]) {
+      ws.removeScriptFolder(parts[1]);
+      scriptsChanged(ws);
+      return sendJson(res, 200, { ok: true });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
   const sub = parts[1];
   if (!sub) {
     if (method === 'GET') return sendJson(res, 200, { name, code: ws.readScript(name) });
@@ -339,19 +384,20 @@ async function handleScripts(ws: Workspace, req: http.IncomingMessage, res: http
       const body = (await readJson(req)) as { code: string };
       if (typeof body.code !== 'string') throw new HttpError(400, 'Missing code');
       ws.writeScript(name, body.code);
+      scriptsChanged(ws);
       return sendJson(res, 200, { ok: true, syntaxError: checkScriptSyntax(body.code, `scripts/${name}.js`) });
     }
     if (method === 'DELETE') {
       ws.removeScript(name);
+      scriptsChanged(ws);
       return sendJson(res, 200, { ok: true });
     }
     throw new HttpError(405, 'Method not allowed');
   }
   if (sub === 'rename' && method === 'POST') {
     const body = (await readJson(req)) as { to: string };
-    if (ws.scriptExists(body.to)) throw new HttpError(409, `Script "${body.to}" already exists`);
-    ws.writeScript(body.to, ws.readScript(name));
-    ws.removeScript(name);
+    moveScriptAndRefs(ws, name, body.to);
+    scriptsChanged(ws);
     return sendJson(res, 200, { name: body.to });
   }
   throw new HttpError(404, 'Not found');

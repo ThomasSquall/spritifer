@@ -16,6 +16,8 @@ export const GAME_FILE = 'game.json';
 
 export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script' | 'dialogue';
 const SCRIPT_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+/** Script names are paths in scripts/ without .js: "enemies/Patrol". */
+const SCRIPT_PATH_RE = /^(?:[A-Za-z_][A-Za-z0-9_-]{0,63}\/){0,8}[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
 
 export interface SpriteSummary {
   name: string;
@@ -191,24 +193,75 @@ export class Workspace {
   }
 
   scriptFile(name: string): string {
-    if (!SCRIPT_RE.test(name)) throw new Error(`Invalid script name "${name}". Use letters, digits, "_" and "-".`);
-    return path.join(this.scriptsDir, `${name}.js`);
+    if (!SCRIPT_PATH_RE.test(name)) throw new Error(`Invalid script name "${name}". Use folders and names with letters, digits, "_" and "-", e.g. "enemies/Patrol".`);
+    return path.join(this.scriptsDir, ...name.split('/')) + '.js';
+  }
+
+  private scriptFolderPath(folder: string): string {
+    if (!SCRIPT_PATH_RE.test(folder)) throw new Error(`Invalid folder name "${folder}". Use letters, digits, "_" and "-" (nested: "enemies/bosses").`);
+    return path.join(this.scriptsDir, ...folder.split('/'));
   }
 
   scriptExists(name: string): boolean {
     return fs.existsSync(this.scriptFile(name));
   }
 
+  /** Every script in scripts/ and its subfolders (names are paths without .js). */
   listScripts(): { name: string; size: number; updatedAt: number }[] {
-    if (!fs.existsSync(this.scriptsDir)) return [];
-    return fs
-      .readdirSync(this.scriptsDir)
-      .filter((f) => f.endsWith('.js') && SCRIPT_RE.test(f.slice(0, -3)))
-      .map((f) => {
-        const st = fs.statSync(path.join(this.scriptsDir, f));
-        return { name: f.slice(0, -3), size: st.size, updatedAt: st.mtimeMs };
-      })
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const out: { name: string; size: number; updatedAt: number }[] = [];
+    const walk = (dir: string, prefix: string, depth: number) => {
+      if (depth > 9 || !fs.existsSync(dir)) return;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.name.startsWith('.')) continue;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (SCRIPT_RE.test(e.name)) walk(full, prefix + e.name + '/', depth + 1);
+        } else if (e.name.endsWith('.js') && !e.name.endsWith('.d.js') && SCRIPT_RE.test(e.name.slice(0, -3))) {
+          const st = fs.statSync(full);
+          out.push({ name: prefix + e.name.slice(0, -3), size: st.size, updatedAt: st.mtimeMs });
+        }
+      }
+    };
+    walk(this.scriptsDir, '', 0);
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Every folder in scripts/ (also empty ones), as paths: ["enemies", "enemies/bosses", "ui"]. */
+  listScriptFolders(): string[] {
+    const out: string[] = [];
+    const walk = (dir: string, prefix: string, depth: number) => {
+      if (depth > 8 || !fs.existsSync(dir)) return;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (!e.isDirectory() || e.name.startsWith('.') || !SCRIPT_RE.test(e.name)) continue;
+        out.push(prefix + e.name);
+        walk(path.join(dir, e.name), prefix + e.name + '/', depth + 1);
+      }
+    };
+    walk(this.scriptsDir, '', 0);
+    return out.sort();
+  }
+
+  createScriptFolder(folder: string): void {
+    fs.mkdirSync(this.scriptFolderPath(folder), { recursive: true });
+  }
+
+  /** Deletes a folder and the scripts in it. */
+  removeScriptFolder(folder: string): void {
+    const dir = this.scriptFolderPath(folder);
+    if (!fs.existsSync(dir)) throw new Error(`Folder "${folder}" not found`);
+    fs.rmSync(dir, { recursive: true });
+  }
+
+  /** Moves/renames a script or a whole folder ("enemies" → "monsters", "Patrol" → "enemies/Patrol"). */
+  moveScript(from: string, to: string): void {
+    const isFolder = !this.scriptExists(from) && fs.existsSync(this.scriptFolderPath(from));
+    const src = isFolder ? this.scriptFolderPath(from) : this.scriptFile(from);
+    const dst = isFolder ? this.scriptFolderPath(to) : this.scriptFile(to);
+    if (!fs.existsSync(src)) throw new Error(`Script "${from}" not found`);
+    if (fs.existsSync(dst)) throw new Error(`"${to}" already exists`);
+    if (isFolder && (dst + path.sep).startsWith(src + path.sep)) throw new Error('Cannot move a folder into itself');
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.renameSync(src, dst);
   }
 
   readScript(name: string): string {
@@ -227,14 +280,23 @@ export class Workspace {
 
   writeScript(name: string, code: string): void {
     const f = this.scriptFile(name);
-    fs.mkdirSync(this.scriptsDir, { recursive: true });
-    const tmp = path.join(this.scriptsDir, `.${name}.${process.pid}.tmp`);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const tmp = path.join(path.dirname(f), `.${path.basename(f)}.${process.pid}.tmp`);
     fs.writeFileSync(tmp, code);
     fs.renameSync(tmp, f);
   }
 
   removeScript(name: string): void {
     fs.rmSync(this.scriptFile(name));
+  }
+
+  /** Writes a file next to the scripts (IDE support: jsconfig.json, spritifer.d.ts) if its content changed. */
+  writeScriptSupportFile(file: string, content: string): boolean {
+    const f = path.join(this.scriptsDir, file);
+    if (fs.existsSync(f) && fs.readFileSync(f, 'utf8') === content) return false;
+    fs.mkdirSync(this.scriptsDir, { recursive: true });
+    fs.writeFileSync(f, content);
+    return true;
   }
 
   // ------------------------------------------------------------------ dialogues
@@ -322,11 +384,24 @@ export class Workspace {
         }, 40),
       );
     });
-    // Scripts live in a subfolder (fs.watch is not recursive everywhere).
+    // Scripts live in a folder tree.
     fs.mkdirSync(this.scriptsDir, { recursive: true });
-    const scriptWatcher = fs.watch(this.scriptsDir, (_event, filename) => {
-      if (!filename || !filename.endsWith('.js') || filename.startsWith('.')) return;
-      const name = filename.slice(0, -3);
+    const scriptWatcher = fs.watch(this.scriptsDir, { recursive: true }, (_event, filename) => {
+      if (!filename) return;
+      const rel = filename.split(path.sep).join('/');
+      if (rel.split('/').some((p) => p.startsWith('.'))) return;
+      // A folder changed (created, renamed, deleted): tell clients with an empty name.
+      if (!rel.endsWith('.js')) {
+        if (rel.endsWith('.d.ts') || rel.endsWith('.json')) return;
+        const key = 'script:';
+        clearTimeout(timers.get(key));
+        timers.set(key, setTimeout(() => {
+          timers.delete(key);
+          onChange('', 'script');
+        }, 40));
+        return;
+      }
+      const name = rel.slice(0, -3);
       const key = 'script:' + name;
       clearTimeout(timers.get(key));
       timers.set(key, setTimeout(() => {

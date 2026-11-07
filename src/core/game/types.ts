@@ -29,10 +29,17 @@ export interface GameEvent {
   actions: EventStep[];
 }
 
+/**
+ * A behavior on an object type: a built-in one (platformer, solid...) or a script component
+ * `{ type: "script", name: "Patrol", speed: 60 }` (the other keys are the component's params).
+ */
 export interface Behavior {
   type: string;
   [param: string]: Value;
 }
+
+/** Per-instance component settings: param overrides (and `enabled`), or components only this instance has. */
+export type ComponentOverrides = Record<string, Record<string, Value>>;
 
 export interface Hitbox {
   x: number;
@@ -92,6 +99,8 @@ export interface Instance {
   /** Overrides of the object's properties for this instance. */
   props?: Record<string, Value>;
   flipX?: boolean;
+  /** Component param overrides by component name; a name the object type doesn't have adds that component. */
+  components?: ComponentOverrides;
 }
 
 export interface SceneBackground {
@@ -123,6 +132,8 @@ export interface Scene {
   persistent?: boolean;
   /** Scene variables (reset when the scene starts). Read as `scene.name`. */
   variables: Record<string, Value>;
+  /** Scene components (managers, level logic, HUD): `{ type: "script", name, ...params }`. */
+  components?: Behavior[];
   rev: string;
   updatedBy?: string;
 }
@@ -145,6 +156,8 @@ export interface GameProject {
   /** Global variables with their initial values. Kept across scenes. */
   variables: Record<string, Value>;
   objects: ObjectType[];
+  /** Global components, alive for the whole game across scenes (GameManager, Inventory, HUD). */
+  components?: Behavior[];
   rev: string;
   updatedBy?: string;
 }
@@ -179,6 +192,20 @@ function vars(v: unknown): Record<string, Value> {
     }
   }
   return out;
+}
+
+function overrides(v: unknown): ComponentOverrides | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const out: ComponentOverrides = {};
+  for (const [k, x] of Object.entries(v)) if (GAME_NAME_RE.test(k) && x && typeof x === 'object') out[k] = vars(x);
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Normalizes a list of script components ({ type: "script", name, ...params }). */
+export function normalizeComponents(v: unknown): Behavior[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.map(step).map((b): Behavior => ({ ...b, type: 'script' })).filter((b) => typeof b.name === 'string' && b.name);
+  return out.length ? out : undefined;
 }
 
 function step(v: unknown): EventStep {
@@ -242,6 +269,7 @@ export function normalizeGame(v: unknown): GameProject {
     touchControls: bool(o.touchControls, true),
     variables: vars(o.variables),
     objects: Array.isArray(o.objects) ? o.objects.map(normalizeObject) : [],
+    ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
   };
@@ -275,6 +303,8 @@ export function normalizeScene(v: unknown): Scene {
     if (typeof I.name === 'string' && I.name) inst.name = I.name;
     if (typeof I.sprite === 'string' && I.sprite) inst.sprite = I.sprite;
     if (typeof I.animation === 'string' && I.animation) inst.animation = I.animation;
+    const comps = overrides(I.components);
+    if (comps) inst.components = comps;
     return inst;
   });
   const backgrounds: SceneBackground[] = (Array.isArray(o.backgrounds) ? o.backgrounds : []).map((b: unknown) => {
@@ -297,6 +327,7 @@ export function normalizeScene(v: unknown): Scene {
     ...(o.ySort === true ? { ySort: true } : {}),
     ...(o.persistent === true ? { persistent: true } : {}),
     variables: vars(o.variables),
+    ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
   };

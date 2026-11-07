@@ -31,6 +31,8 @@ export interface SheetContext {
   scriptBehaviors: string[];
   /** Dialogue names from the Dialogues tab. */
   dialogues: string[];
+  /** Sprite names (component params of type sprite). */
+  sprites?: string[];
 }
 
 const sounds = new SoundBoard();
@@ -65,7 +67,9 @@ export function paramInput(spec: ParamSpec, value: Value | undefined, onChange: 
       break;
     }
     case 'number': {
-      const n = h('input', { type: 'number', step: 'any', value: String(v), class: 'num', oninput: () => n.value !== '' && Number.isFinite(Number(n.value)) && onChange(Number(n.value)) });
+      const n = h('input', { type: 'number', step: spec.step !== undefined ? String(spec.step) : 'any', value: String(v), class: 'num', oninput: () => n.value !== '' && Number.isFinite(Number(n.value)) && onChange(Number(n.value)) });
+      if (spec.min !== undefined) n.min = String(spec.min);
+      if (spec.max !== undefined) n.max = String(spec.max);
       input = n;
       break;
     }
@@ -94,8 +98,16 @@ export function paramInput(spec: ParamSpec, value: Value | undefined, onChange: 
       input = select([['', ctx.dialogues.length ? '— dialogue —' : '— no dialogues yet —'], ...ctx.dialogues], String(v), onChange);
       break;
     case 'scriptBehavior':
-      input = select([['', ctx.scriptBehaviors.length ? '— script behavior —' : '— none in scripts —'], ...ctx.scriptBehaviors], String(v), onChange);
+      input = select([['', ctx.scriptBehaviors.length ? (spec.optional ? '— any component —' : '— component —') : '— no components yet —'], ...ctx.scriptBehaviors], String(v), onChange);
       break;
+    case 'sprite':
+      input = select([['', '— sprite —'], ...(ctx.sprites ?? [])], String(v), onChange);
+      break;
+    case 'color': {
+      const c = h('input', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(String(v)) ? String(v) : '#ffffff', oninput: () => onChange(c.value) });
+      input = c;
+      break;
+    }
     case 'sound': {
       const wrap = h('span', { class: 'param-inline' });
       let cur = String(v);

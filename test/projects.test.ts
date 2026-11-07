@@ -101,8 +101,8 @@ describe('MCP projects and scripts', () => {
   it('writes, checks, edits and runs scripts', async () => {
     await expect(call('write_script', { name: 'bad', code: 'func("x", () => {' })).rejects.toThrow(/Syntax error/);
     const out = await call('write_script', { name: 'npcs', code: "behavior('npc', { interact: async (self) => { await say('Hi') } })\nfunc('gift', () => { vars.gold = 3 })" });
-    expect(out).toContain('Registered behaviors: npc');
-    expect(out).toContain('Registered functions: gift');
+    expect(out).toContain('- npc (legacy behavior())');
+    expect(out).toContain('Script functions (func): gift');
     expect(await call('edit_script', { name: 'npcs', find: 'vars.gold = 3', replace: 'vars.gold = 7' })).toContain('Saved');
     expect(await call('read_script', { name: 'npcs' })).toContain('vars.gold = 7');
     await call('set_game', { variables: { gold: 0 } });
@@ -111,6 +111,33 @@ describe('MCP projects and scripts', () => {
     const run = await call('playtest', { seconds: 1 });
     expect(run).toContain('dialog: Welcome');
     expect(run).toContain('"gold":7');
-    expect(await call('script_reference')).toContain('behavior(name');
+    expect(await call('script_reference')).toContain('extends Behaviour');
+  });
+
+  it('organizes component scripts in folders and attaches them to objects, instances, scenes and the game', async () => {
+    await call('create_sprite', { name: 'box', width: 8, height: 8 });
+    const out = await call('write_script', { name: 'enemies/Mover', code: "import { step } from 'utils/math'\nexport default class Mover extends Behaviour {\n  speed = 10\n  static params = { speed: { min: 0 } }\n  update(dt) { this.self.x += step(this.speed, dt) }\n}" });
+    expect(out).toContain('ERRORS'); // utils/math doesn't exist yet
+    expect(await call('write_script', { name: 'utils/math', code: 'export const step = (v, dt) => v * dt' })).toContain('- Mover (scripts/enemies/Mover.js): params speed:number=10; hooks update');
+    await call('write_script', { name: 'Counter', code: 'export default class Counter extends Behaviour { onSceneStart() { vars.starts = (vars.starts || 0) + 1 } }' });
+    await call('write_script', { name: 'Level', code: "export default class Level extends Behaviour { start() { log('level ' + scene.name) } }" });
+    await call('set_object', { name: 'crate', sprite: 'box', behaviors: [{ type: 'script', name: 'Mover', speed: 20 }] });
+    await call('create_scene', { name: 'yard', cols: 20, rows: 8 });
+    await call('place_instances', { scene: 'yard', instances: [{ object: 'crate', x: 0, y: 0 }, { object: 'crate', x: 0, y: 20, components: { Mover: { speed: 60 } } }] });
+    await call('update_scene', { scene: 'yard', components: [{ type: 'script', name: 'Level' }] });
+    await call('set_game', { components: [{ type: 'script', name: 'Counter' }] });
+    expect(await call('validate_game')).toContain('No problems');
+    const run = await call('playtest', { seconds: 1 });
+    expect(run).toContain('level yard');
+    expect(run).toContain('"starts":1');
+    expect(run).toContain('crate#1 at 20,0');
+    expect(run).toContain('crate#2 at 60,20');
+    // IDE support files.
+    expect(fs.readFileSync(path.join(ws.dir, 'scripts', 'spritifer.d.ts'), 'utf8')).toContain('"Mover": import("./enemies/Mover.js").default;');
+    // Renaming the file renames the class and every reference.
+    await call('move_script', { from: 'enemies/Mover', to: 'movement/Slider' });
+    expect(await call('read_script', { name: 'movement/Slider' })).toContain('export default class Slider extends Behaviour');
+    expect(await call('get_game')).toContain('component Slider speed=20');
+    expect(await call('validate_game')).toContain('No problems');
   });
 });

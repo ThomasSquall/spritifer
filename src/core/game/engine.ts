@@ -7,8 +7,8 @@
 import { ACTION_MAP, BEHAVIOR_MAP, CONDITION_MAP, TRIGGER_MAP, withDefaults } from './catalog.js';
 import { type ExprContext, MATH_FUNCTIONS, compile, fmt, parseTarget, toNum, truthy } from './expr.js';
 import { measureText } from './font.js';
-import type { Behavior, EventStep, GameBundle, GameEvent, GameProject, Hitbox, ObjectType, Scene, SpriteAsset, Value } from './types.js';
-import { type ScriptEvaluator, ScriptHost, wrapText } from './script.js';
+import type { Behavior, ComponentOverrides, EventStep, GameBundle, GameEvent, GameProject, Hitbox, ObjectType, Scene, SpriteAsset, Value } from './types.js';
+import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, fieldsOf, wrapText } from './script.js';
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
 
 export const STEP = 1 / 60;
@@ -54,7 +54,19 @@ const overlap = (a: Rect, b: Rect) => a.x < b.x + b.w && a.x + a.w > b.x && a.y 
 export class Actor {
   readonly id: number;
   readonly type: ObjectType;
-  readonly behaviors: Behavior[];
+  /** Built-in behaviors and script components ({ type: "script", name }), in order. */
+  behaviors: Behavior[];
+  /** Script component instances (Behaviour subclasses). */
+  components: Behaviour[] = [];
+  /** Which component instance a { type: "script" } behavior entry created. */
+  componentFor = new Map<Behavior, Behaviour>();
+  /** Per-instance component settings from the scene. */
+  componentConfig: ComponentOverrides | undefined;
+  /** Component fields remembered by a persistent scene. */
+  componentRestore: Record<string, Record<string, Value>> | undefined;
+  componentsReady = false;
+  /** onCreated ran (components awoken, "created" events fired). */
+  created = false;
   readonly asset: SpriteAsset | undefined;
   x: number;
   y: number;
@@ -198,7 +210,11 @@ export class World {
   private started = false;
   private gameStarted = false;
   /** Per persistent scene: what happened to each placed instance. */
-  private memory = new Map<string, Map<string, { destroyed?: boolean; x?: number; y?: number; vars?: Record<string, Value>; flipX?: boolean; facing?: Actor['facing']; anim?: string }>>();
+  private memory = new Map<string, Map<string, { destroyed?: boolean; x?: number; y?: number; vars?: Record<string, Value>; flipX?: boolean; facing?: Actor['facing']; anim?: string; comps?: Record<string, Record<string, Value>> }>>();
+  /** Components of the current scene (managers, level logic). */
+  sceneComponents: Behaviour[] = [];
+  /** Global components: created when the game starts, kept across scenes. */
+  gameComponents: Behaviour[] = [];
   private resetPending = false;
   readonly opts: EngineOptions;
   readonly scripts: ScriptHost;
@@ -281,14 +297,26 @@ export class World {
     }
     // Leaving a persistent scene: remember where everything is.
     const prev = this.scene;
+    if (prev && this.started) this.scripts.invokeAll(this.gameComponents, 'onSceneEnd', prev.name);
     if (prev?.persistent && prev.name !== name) {
       const mem = this.memory.get(prev.name) ?? new Map();
       for (const a of this.actors) {
         if (!a.sceneId || a.destroyed) continue;
-        mem.set(a.sceneId, { x: a.x, y: a.y, vars: { ...a.vars }, flipX: a.flipX, facing: a.facing, anim: a.anim });
+        const comps: Record<string, Record<string, Value>> = {};
+        for (const c of a.components) {
+          const st = componentState(c);
+          if (st) comps[st.name] = fieldsOf(c);
+        }
+        mem.set(a.sceneId, { x: a.x, y: a.y, vars: { ...a.vars }, flipX: a.flipX, facing: a.facing, anim: a.anim, ...(a.components.length ? { comps } : {}) });
       }
       this.memory.set(prev.name, mem);
     }
+    // The old scene's components are gone (their pending waits stop).
+    if (this.scripts) {
+      this.scripts.drop(this.sceneComponents);
+      for (const a of this.actors) this.scripts.drop(a.components);
+    }
+    this.sceneComponents = [];
     if (this.resetPending || prev?.name === name) this.memory.delete(name);
     this.resetPending = false;
     const remembered = scene.persistent ? this.memory.get(name) : undefined;
@@ -313,7 +341,9 @@ export class World {
       if (inst.animation) a.anim = inst.animation;
       if (inst.props) Object.assign(a.vars, inst.props);
       if (inst.flipX) a.flipX = true;
+      a.componentConfig = inst.components;
       if (mem) {
+        a.componentRestore = mem.comps;
         a.x = a.startX = mem.x ?? a.x;
         a.y = a.startY = mem.y ?? a.y;
         if (mem.vars) a.vars = { ...mem.vars };
@@ -340,36 +370,62 @@ export class World {
     return a;
   }
 
+  /** True once the current scene has started (components created at runtime are awoken right away). */
+  get isRunning(): boolean {
+    return this.started;
+  }
+
   private begin(): void {
     this.started = true;
     this.scene.events.forEach((e, i) => {
       if (e.trigger.type === 'timer') this.sceneTimers.set(i, this.time + Math.max(0.01, toNum(e.trigger.seconds ?? 1)));
     });
+    const firstScene = !this.gameStarted;
+    // Create every component first (so awake() can find the others), then awake them: game, scene, instances.
+    if (firstScene) this.gameComponents = this.makeComponents(this.game.components, 'game');
+    this.sceneComponents = this.makeComponents(this.scene.components, 'scene');
+    for (const a of this.actors) this.ensureComponents(a);
+    if (firstScene) for (const c of [...this.gameComponents]) this.scripts.awaken(c);
+    for (const c of [...this.sceneComponents]) this.scripts.awaken(c);
     for (const a of [...this.actors]) this.onCreated(a);
+    this.scripts.runStarts();
     for (const a of [...this.actors]) this.fireObject(a, 'start');
     this.fireScene('start');
-    if (!this.gameStarted) {
+    if (firstScene) {
       this.gameStarted = true;
       for (const fn of this.scripts.startHooks) this.scripts.run('onStart', fn);
     }
     for (const h of this.scripts.sceneHooks) if (h.scene === null || h.scene === this.scene.name) this.scripts.run(`onSceneStart(${this.scene.name})`, h.fn, this.scene.name);
+    this.scripts.invokeAll(this.gameComponents, 'onSceneStart', this.scene.name);
     this.updateCamera(true);
   }
 
-  /** Script behaviors attached to an instance, with their hooks and params. */
-  private scriptBehaviors(a: Actor): { name: string; hooks: import('./script.js').BehaviorHooks; params: Record<string, Value> }[] {
-    const out = [];
-    for (const b of a.behaviors) {
-      if (b.type !== 'script') continue;
-      const name = String(b.name ?? '');
-      const hooks = this.scripts.behaviors.get(name);
-      if (!hooks) {
-        this.error(`object ${a.type.name}`, new Error(`no script behavior "${name}"`));
-        continue;
-      }
-      out.push({ name, hooks, params: b as Record<string, Value> });
+  private makeComponents(list: Behavior[] | undefined, scope: 'scene' | 'game'): Behaviour[] {
+    const out: Behaviour[] = [];
+    for (const b of list ?? []) {
+      const { type: _t, name, ...params } = b;
+      const c = this.scripts.instantiate(String(name ?? ''), scope, null, params);
+      if (c) out.push(c);
     }
     return out;
+  }
+
+  /** Creates the script components of an instance: the object type's ones (with instance overrides) + instance-only ones. */
+  private ensureComponents(a: Actor): void {
+    if (a.componentsReady) return;
+    a.componentsReady = true;
+    const over = a.componentConfig ?? {};
+    const names = new Set(a.behaviors.filter((b) => b.type === 'script').map((b) => String(b.name ?? '')));
+    for (const n of Object.keys(over)) if (!names.has(n)) a.behaviors.push({ type: 'script', name: n });
+    for (const b of [...a.behaviors]) {
+      if (b.type !== 'script') continue;
+      const name = String(b.name ?? '');
+      const { type: _t, name: _n, ...params } = b;
+      const c = this.scripts.instantiate(name, 'object', a, { ...params, ...(over[name] ?? {}) }, a.componentRestore?.[name]);
+      if (!c) continue;
+      a.componentFor.set(b, c);
+      a.components.push(c);
+    }
   }
 
   gotoScene(name: string): void {
@@ -488,14 +544,17 @@ export class World {
   }
 
   private onCreated(a: Actor): void {
+    if (a.created) return;
+    a.created = true;
     const bullet = a.behavior('bullet');
     if (bullet && a.vx === 0 && a.vy === 0) {
       const ang = (toNum(bullet.angle) * Math.PI) / 180;
       a.vx = Math.cos(ang) * toNum(bullet.speed);
       a.vy = Math.sin(ang) * toNum(bullet.speed);
     }
+    this.ensureComponents(a);
+    for (const c of [...a.components]) this.scripts.awaken(c);
     this.fireObject(a, 'created');
-    for (const sb of this.scriptBehaviors(a)) this.scripts.run(`${sb.name}.create`, sb.hooks.create, this.scripts.handle(a), sb.params);
   }
 
   // ------------------------------------------------------------------ main loop
@@ -517,6 +576,9 @@ export class World {
       return;
     }
     for (const fn of this.scripts.updateHooks) this.scripts.run('onUpdate', fn, dt);
+    this.scripts.runStarts();
+    this.scripts.invokeAll(this.gameComponents, 'update', dt);
+    this.scripts.invokeAll(this.sceneComponents, 'update', dt);
 
     for (const a of this.actors) {
       a.flags.landed = a.flags.hitWall = a.flags.leftScene = false;
@@ -552,14 +614,23 @@ export class World {
       }
     }
 
-    // Script collide hooks (start of touch).
+    // Component collision hooks: enter (start of touch), stay, exit.
+    const sh = this.scripts;
     for (const a of live) {
-      const sbs = this.scriptBehaviors(a).filter((sb) => sb.hooks.collide);
-      if (!sbs.length) continue;
-      for (const o of now.get(a) ?? []) {
-        if (a.touching.has(o) || o.destroyed || a.destroyed) continue;
-        for (const sb of sbs) this.scripts.run(`${sb.name}.collide`, sb.hooks.collide, this.scripts.handle(a), this.scripts.handle(o));
+      if (!a.components.length || a.destroyed) continue;
+      const enter = a.components.some((c) => sh.has(c, 'onCollisionEnter'));
+      const stay = a.components.some((c) => sh.has(c, 'onCollisionStay'));
+      const exit = a.components.some((c) => sh.has(c, 'onCollisionExit'));
+      if (!enter && !stay && !exit) continue;
+      const cur = now.get(a) ?? new Set<Actor>();
+      for (const o of cur) {
+        if (a.destroyed) break;
+        if (o.destroyed) continue;
+        const was = a.touching.has(o);
+        if (!was && enter) sh.invokeAll(a.components, 'onCollisionEnter', sh.handle(o));
+        else if (was && stay) sh.invokeAll(a.components, 'onCollisionStay', sh.handle(o));
       }
+      if (exit) for (const o of a.touching) if (!cur.has(o) && !a.destroyed) sh.invokeAll(a.components, 'onCollisionExit', sh.handle(o));
     }
 
     // Events.
@@ -570,15 +641,24 @@ export class World {
       a.touching = touching;
     }
     if (this.pressedKey('action')) this.interact();
+    if (input.clicks.length) {
+      for (const a of [...this.actors]) if (!a.destroyed && a.components.some((c) => sh.has(c, 'onClick')) && this.clickHits(a)) sh.invokeAll(a.components, 'onClick');
+    }
     this.runSceneEvents();
     for (let round = 0; round < 10 && this.messages.length; round++) {
       const msgs = this.messages.splice(0);
       for (const m of msgs) {
         for (const fn of this.scripts.messageHooks.get(m) ?? []) this.scripts.run(`onMessage(${m})`, fn, m);
+        sh.invokeAll(sh.all(), 'onMessage', m);
         for (const a of [...this.actors]) if (!a.destroyed) this.fireObject(a, 'message', (t) => t.message === m);
         this.fireScene('message', (t) => t.message === m);
       }
     }
+
+    // Late update: after movement, collisions and events.
+    sh.invokeAll(this.gameComponents, 'lateUpdate', dt);
+    sh.invokeAll(this.sceneComponents, 'lateUpdate', dt);
+    for (const a of [...this.actors]) if (!a.destroyed && a.components.length) sh.invokeAll(a.components, 'lateUpdate', dt);
 
     this.updateTexts();
 
@@ -615,7 +695,7 @@ export class World {
       let bd = Infinity;
       for (const o of this.actors) {
         if (o === p || o.destroyed || o.type.hud) continue;
-        const hasHook = o.type.events.some((e) => !e.disabled && e.trigger.type === 'interact') || !!o.behavior('dialogue') || this.scriptBehaviors(o).some((sb) => sb.hooks.interact);
+        const hasHook = o.type.events.some((e) => !e.disabled && e.trigger.type === 'interact') || !!o.behavior('dialogue') || o.components.some((c) => this.scripts.has(c, 'onInteract'));
         if (!hasHook || !overlap(probe, o.box())) continue;
         const ob = o.box();
         const d = Math.hypot(ob.x + ob.w / 2 - (b.x + b.w / 2), ob.y + ob.h / 2 - (b.y + b.h / 2));
@@ -632,7 +712,7 @@ export class World {
         if (node) void this.startDialogue(node, best, p);
         else this.error(`object ${best.type.name}`, new Error('Talks behavior without a dialogue (set the dialogue property of the instance)'));
       }
-      for (const sb of this.scriptBehaviors(best)) this.scripts.run(`${sb.name}.interact`, sb.hooks.interact, this.scripts.handle(best), this.scripts.handle(p));
+      this.scripts.invokeAll(best.components, 'onInteract', this.scripts.handle(p));
       return;
     }
   }
@@ -737,6 +817,8 @@ export class World {
 
   private pickAnim(a: Actor, candidates: string[]): void {
     if (a.animLock > this.time) return;
+    // A script is walking this instance (cutscene): its walk animation wins.
+    if (this.scripts.movers.some((m) => m.actor === a)) return;
     const name = candidates.find((c) => a.hasTag(c));
     if (name !== undefined) this.setAnim(a, name);
   }
@@ -750,7 +832,7 @@ export class World {
 
   private updateBehaviors(a: Actor, dt: number): void {
     const g = this.game.gravity;
-    for (const b of a.behaviors) {
+    for (const b of a.components.length ? [...a.behaviors] : a.behaviors) {
       switch (b.type) {
         case 'platformer': {
           const speed = toNum(b.speed);
@@ -909,8 +991,8 @@ export class World {
           break;
         }
         case 'script': {
-          const hooks = this.scripts.behaviors.get(String(b.name ?? ''));
-          if (hooks?.update) this.scripts.run(`${b.name}.update`, hooks.update, this.scripts.handle(a), dt, b as Record<string, Value>);
+          const c = a.componentFor.get(b);
+          if (c) this.scripts.invoke(c, 'update', dt);
           break;
         }
         case 'lifetime': {
@@ -1119,7 +1201,7 @@ export class World {
       this.memory.set(this.scene.name, mem);
     }
     this.fireObject(a, 'destroyed');
-    for (const sb of this.scriptBehaviors(a)) this.scripts.run(`${sb.name}.destroy`, sb.hooks.destroy, this.scripts.handle(a));
+    for (const c of [...a.components]) this.scripts.remove(c);
   }
 
   spawn(objectName: string, x: number, y: number, vx = 0, vy = 0): Actor | undefined {
@@ -1129,7 +1211,7 @@ export class World {
     a.vx = vx;
     a.vy = vy;
     this.actors.push(a);
-    this.onCreated(a);
+    if (this.started) this.onCreated(a);
     return a;
   }
 
@@ -1238,6 +1320,17 @@ export class World {
         if (!fn) throw new Error(`no script function "${name}"`);
         const arg = s.arg === undefined || s.arg === '' ? undefined : this.eval(s.arg, ctx);
         this.scripts.run(`func ${name}`, fn, this.scripts.handle(ctx.self), this.scripts.handle(ctx.other), arg);
+        return;
+      }
+      case 'callMethod': {
+        const method = String(s.method ?? '');
+        if (!method) throw new Error('no method name');
+        const comp = String(s.component ?? '') || undefined;
+        const a = this.target(ctx, s.target);
+        const list = (a ? this.scripts.componentsOf(a, comp) : this.scripts.findAll(comp).filter((c) => !componentState(c)?.actor)).filter((c) => typeof (c as unknown as Record<string, unknown>)[method] === 'function');
+        if (!list.length) throw new Error(`no component${comp ? ` "${comp}"` : ''} with a method "${method}"${a ? ` on ${a.type.name}` : ' in the scene or game'}`);
+        const arg = s.arg === undefined || s.arg === '' ? undefined : this.eval(s.arg, ctx);
+        for (const c of list) this.scripts.invoke(c, method, arg, this.scripts.handle(ctx.other));
         return;
       }
       case 'dialogue':
@@ -1431,7 +1524,7 @@ export class World {
 export interface Renderer {
   clear(color: string): void;
   /** Draws part of a sprite's spritesheet. */
-  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, opts: { flipX: boolean; opacity: number; angle: number }): void;
+  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, opts: { flipX: boolean; opacity: number; angle: number; scale?: number }): void;
   rect(x: number, y: number, w: number, h: number, color: string, alpha?: number): void;
   text(text: string, x: number, y: number, color: string, scale: number): void;
 }

@@ -9,6 +9,7 @@ import { looksLikePlainText, previewText } from './textPreview.js';
 import { state } from './gameState.js';
 import { appNav } from './nav.js';
 import { clear, confirmDialog, h, icon, iconButton, promptText, toast } from './dom.js';
+import { componentCard, componentPicker } from './componentsUi.js';
 
 interface Template {
   id: string;
@@ -43,6 +44,7 @@ export function sheetContext(obj: ObjectType | null, animations: string[]): Shee
     functions: state.scriptInfo.functions,
     scriptBehaviors: state.scriptInfo.behaviors,
     dialogues: state.dialogueInfo.nodes,
+    sprites: state.sprites.map((s) => s.name),
   };
 }
 
@@ -344,24 +346,37 @@ function behaviorsCard(obj: ObjectType, changed: () => void): HTMLElement {
   const render = () => {
     clear(body);
     obj.behaviors.forEach((b, i) => {
+      const remove = () => { obj.behaviors.splice(i, 1); changed(); render(); };
+      if (b.type === 'script') {
+        body.append(componentCard(b, ctx(), changed, { remove, moveUp: i > 0 ? () => { obj.behaviors.splice(i - 1, 0, ...obj.behaviors.splice(i, 1)); changed(); render(); } : undefined }));
+        return;
+      }
       const spec = BEHAVIOR_MAP.get(b.type);
       body.append(h('div', { class: 'behavior' },
-        h('div', { class: 'behavior-head' }, h('strong', {}, spec?.label ?? b.type), h('span', { class: 'spacer' }), iconButton('close', 'Remove behavior', () => { obj.behaviors.splice(i, 1); changed(); render(); }, { class: 'icon-btn tiny' })),
+        h('div', { class: 'behavior-head' }, h('strong', {}, spec?.label ?? b.type), h('span', { class: 'badge muted-badge' }, 'built-in'), h('span', { class: 'spacer' }), iconButton('close', 'Remove behavior', remove, { class: 'icon-btn tiny' })),
         h('p', { class: 'muted small' }, spec?.help ?? 'Unknown behavior'),
         h('div', { class: 'step-editor' }, ...(spec?.params ?? []).map((p) => paramInput(p, b[p.name], (v) => { b[p.name] = v; changed(); }, ctx()))),
       ));
     });
-    if (!obj.behaviors.length) body.append(h('p', { class: 'muted small' }, 'Behaviors give ready-made movement: platformer, top-down, patrol, bullet, solid…'));
+    if (!obj.behaviors.length) body.append(h('p', { class: 'muted small' }, 'Components give an object its logic: built-in movement (platformer, top-down, patrol, bullet, solid…) or your own script components (scripts/…/Name.js). Run in this order every frame.'));
   };
-  const add = h('select', { onchange: () => {
-    const spec = BEHAVIOR_MAP.get(add.value);
-    add.value = '';
+  const builtIns = BEHAVIORS.filter((b) => b.type !== 'script');
+  const addBuiltIn = h('select', { onchange: () => {
+    const spec = BEHAVIOR_MAP.get(addBuiltIn.value);
+    addBuiltIn.value = '';
     if (!spec) return;
     if (obj.behaviors.some((b) => b.type === spec.type)) return toast(`Already has ${spec.label}`, 'error');
     obj.behaviors.push(defaultStep(spec));
     changed();
     render();
-  } }, h('option', { value: '' }, '+ Add behavior…'), ...BEHAVIORS.map((b) => h('option', { value: b.type }, b.label)));
+  } }, h('option', { value: '' }, '+ Built-in behavior…'), ...builtIns.map((b) => h('option', { value: b.type }, b.label)));
+  const addScript = () => componentPicker('+ Script component…', obj.behaviors.filter((b) => b.type === 'script').map((b) => String(b.name)), (name) => {
+    obj.behaviors.push({ type: 'script', name });
+    changed();
+    render();
+    picker.replaceWith((picker = addScript()));
+  });
+  let picker = addScript();
   render();
-  return h('div', { class: 'card' }, h('h3', {}, 'Behaviors'), body, add);
+  return h('div', { class: 'card' }, h('h3', {}, 'Components'), body, h('div', { class: 'add-row' }, picker, addBuiltIn));
 }

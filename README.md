@@ -84,29 +84,51 @@ self: Pane fresco! Solo 5 monete.
 
 **Un solo NPC, tanti personaggi.** Crea un tipo di oggetto con il comportamento **Talks (dialogue)** (modello *NPC (talks)*) e piazzalo quante volte vuoi. Nell'inspector della scena ogni istanza ha il suo **Name**, il suo **Sprite** e il suo **Dialogue**: il giocatore ci parla premendo Spazio/Z accanto. I dialoghi partono anche dagli eventi (azione **Start dialogue**, per esempio all'inizio della scena) e dagli script (`await dialogue('nome', self)`).
 
-### Script
+### Script e componenti
 
-Per la logica che gli eventi non esprimono bene (sequenze animate, battaglie a turni, inventari, menu e HUD personalizzati) ci sono gli **script**: file JavaScript in `scripts/<nome>.js`, scritti nella scheda **Scripts** (evidenziazione, numeri di riga, salvataggio automatico, riferimento API a lato) o da Claude con `write_script` / `edit_script`.
+Per la logica che gli eventi non esprimono bene ci sono gli **script**: file JavaScript nella cartella `scripts/`, organizzati in **sottocartelle** (`scripts/enemies/Patrol.js`, `scripts/ui/Hud.js`, `scripts/managers/GameManager.js`). Si scrivono nella scheda **Scripts** (albero di cartelle con trascinamento, evidenziazione, autocompletamento, salvataggio automatico) o da Claude con `write_script` / `edit_script` / `move_script`.
+
+**Componenti, come in Unity.** Ogni comportamento è **una classe in un suo file**, con lo stesso nome del file:
 
 ```js
-// Un comportamento: dai al tipo di oggetto { type: "script", name: "guard" }
-behavior('guard', {
-  update: (self, dt) => { if (self.distanceTo(player()) < 40) self.face(player().x < self.x ? 'left' : 'right') },
-})
+// scripts/enemies/Patrol.js
+/** Cammina avanti e indietro e fa danno al giocatore. */
+export default class Patrol extends Behaviour {
+  speed = 40              // campo pubblico = parametro modificabile dall'inspector
+  damage = 1
+  target = 'player'
+  _dir = 1                // con _ davanti: stato privato, non compare nell'inspector
 
-// Una funzione richiamabile dagli eventi con l'azione "Run script function"
-func('apriPorta', async (self) => { self.play('open'); await wait(0.3); goto('dungeon') })
+  // Facoltativo: tipi, intervalli, scelte e aiuto per l'inspector
+  static params = { target: 'object', speed: { min: 0, max: 200, help: 'pixel al secondo' } }
 
-// Interfaccia disegnata ogni frame
-onDraw((ui) => ui.bar(4, 4, 60, 6, vars.hp, vars.maxHp, '#e43b44'))
+  awake() { this.health = this.getComponent('Health') }      // riferimenti agli altri componenti
+  update(dt) { this.self.x += this._dir * this.speed * dt }
+  onCollisionEnter(other) {
+    if (other.object === this.target) other.getComponent('Health')?.damage(this.damage)
+  }
+}
 ```
 
-- **Registrazione**: `behavior` (hook `create`, `update`, `collide`, `interact`, `destroy`), `func`, `onStart`, `onSceneStart`, `onUpdate`, `onDraw`, `onMessage`.
-- **Flusso asincrono**: `await say()` (finestra di dialogo con effetto macchina da scrivere, il gioco si ferma), `await choose([...])` (menu), `await wait(s)`, `await waitUntil(fn)`, `await self.moveTo(x, y)`, `lockControls()`.
-- **Stato e istanze**: `vars`, `scene`, `game`, `camera`, `find`, `findOne`, `player()`, `spawn`; le istanze espongono campi (`x`, `y`, `facing`…), proprietà (`self.hp`) e metodi (`play`, `destroy`, `flash`, `face`, `say`).
-- **Interfaccia**: `ui.text`, `ui.panel`, `ui.bar`, `ui.rect`, `ui.sprite`.
+- **Ciclo di vita**: `awake` → `onEnable` → `start` (prima del primo update, può essere `async`) → `update(dt)` → `lateUpdate(dt)` ogni frame; `onCollisionEnter/Stay/Exit(other)`, `onInteract(player)`, `onClick()`, `onMessage(msg)`, `onDraw(ui)`, `onDisable`, `onDestroy`; i componenti globali ricevono anche `onSceneStart(nome)` / `onSceneEnd(nome)`.
+- **Parametri da inspector**: i campi pubblici con un valore semplice (numero, testo, booleano) diventano parametri; `static params` aggiunge tipi (`object`, `scene`, `sound`, `sprite`, `dialogue`, `key`, `color`, `choice`), intervalli e descrizioni. Il commento `/** … */` sopra la classe appare nell'inspector.
+- **Dove si attaccano**: ai **tipi di oggetto** (Objects → *Components*), con **override per singola istanza** nell'inspector della scena (campo vuoto = valore del tipo; si possono anche aggiungere componenti a una sola istanza); alle **scene** (scheda *Scene* dell'editor: manager, logica del livello, HUD) e al **gioco intero** (pagina Game → *Global components*: GameManager, inventario, HUD che restano tra una scena e l'altra).
+- **Parlarsi tra script**: `this.getComponent('Health')`, `other.getComponent(Health)`, `getComponents()`, `addComponent('Burn', { dps: 2 })`, `removeComponent(...)`, `findComponent('GameManager')` / `findComponents('Enemy')` (come `FindObjectOfType`), `sendMessage('hit', 1)`, campi statici (`GameManager.instance = this`). Dagli eventi: azione **Call component method**.
+- **Moduli**: gli script possono importarsi a vicenda (`import Health from './Health'`, `import { FOES } from 'data/foes'`, percorsi senza `./` partono da `scripts/`). Gli script "semplici" esportano funzioni e dati condivisi.
+- **Coroutine**: `await this.wait(1)`, `await this.waitUntil(() => …)`, `this.every(2, () => …)` si fermano da sole quando il componente viene distrutto.
+- **Scene con memoria**: i campi dei componenti (anche `_privati`) vengono ricordati come le proprietà delle istanze.
+- **Rinominare** un file componente (anche spostandolo di cartella) rinomina la classe e aggiorna tutti gli usi in oggetti, istanze, scene, gioco ed eventi.
 
-Gli eventi possono usare le azioni **Dialog** (finestra RPG), **Run script function** e **Lock player controls**, e il trigger **Player interacts**: si attiva quando il giocatore preme azione accanto all'istanza o rivolto verso di essa.
+**Autocompletamento.** L'editor suggerisce mentre scrivi (o con **Ctrl+Spazio**): i membri di `this` (parametri, campi e metodi della classe, API di `Behaviour`), delle istanze (`this.self.`, `other.`, `findOne('…').`), dei componenti ottenuti con `getComponent('Nome').`, i nomi dentro le stringhe (`getComponent('`, `goto('`, `sound('`, `findOne('`, percorsi di `import`), le variabili `vars.`, `ui.` e gli hook del ciclo di vita come snippet; sotto l'editor mostra la firma della funzione che stai chiamando. Il progetto contiene anche `scripts/jsconfig.json` e `scripts/spritifer.d.ts` (generati), così **VS Code e JetBrains** completano l'API, i nomi del progetto e i tipi restituiti da `getComponent`.
+
+API globale (anche negli script semplici):
+
+- **Flusso asincrono**: `await say()` (finestra di dialogo con effetto macchina da scrivere, il gioco si ferma), `await choose([...])` (menu), `await wait(s)`, `await waitUntil(fn)`, `await self.moveTo(x, y)`, `lockControls()`.
+- **Stato e istanze**: `vars`, `scene`, `game`, `camera`, `find`, `findOne`, `player()`, `spawn`; le istanze espongono campi (`x`, `y`, `facing`…), proprietà (`self.hp`) e metodi (`play`, `destroy`, `flash`, `face`, `say`, `getComponent`).
+- **Interfaccia**: `ui.text`, `ui.panel`, `ui.bar`, `ui.rect`, `ui.sprite` (in `onDraw`).
+- **Hook globali** per script semplici: `onStart`, `onSceneStart`, `onUpdate`, `onDraw`, `onMessage`, `func` (funzioni richiamabili dagli eventi con **Run script function**). Il vecchio `behavior(nome, { … })` funziona ancora, ma i comportamenti nuovi vanno in un file-classe ciascuno.
+
+Gli eventi possono usare le azioni **Dialog** (finestra RPG), **Run script function**, **Call component method** e **Lock player controls**, e il trigger **Player interacts**: si attiva quando il giocatore preme azione accanto all'istanza o rivolto verso di essa.
 
 Nel playtest di Claude gli script girano isolati (`node:vm`). I dialoghi si confermano da soli e `choices` sceglie le voci dei menu, così Claude può verificare missioni e battaglie senza browser.
 
@@ -117,9 +139,9 @@ Nel playtest di Claude gli script girano isolati (`node:vm`). I dialoghi si conf
 - Livelli tile *solid* per muri, alberi e acqua.
 - NPC con il comportamento *Talks (dialogue)*: un tipo di oggetto, tanti personaggi diversi (nome, sprite e dialogo per istanza). Scrigni come dialoghi che usano le proprietà dell'istanza (`~ self.opened = true`, `~ gold += self.gold`).
 - Scene con memoria, così il villaggio resta com'era dopo una battaglia.
-- Battaglie in una scena dedicata, guidate da `onSceneStart('battle', async () => …)`, con menu `choose` e barre HP in `onDraw`.
+- Battaglie in una scena dedicata, guidate da un **componente di scena** (`class Battle extends Behaviour { async start() { … } }`), con menu `choose` e barre HP in `onDraw`.
 
-L'esempio `examples/village` mostra tutto questo: tutte le conversazioni stanno in `dialogues/village.dialogue`, la battaglia in `scripts/battle.js`, il messaggio di benvenuto è un evento della scena *town* (*Scene starts* → *Start dialogue intro*).
+L'esempio `examples/village` mostra tutto questo: tutte le conversazioni stanno in `dialogues/village.dialogue`; gli script sono componenti in cartelle (`enemies/Monster.js` sugli slime, `battle/Battle.js` sulla scena *battle*, `ui/TownHud.js` sulla scena *town*) più i dati condivisi in `data/foes.js`; il messaggio di benvenuto è un evento della scena *town* (*Scene starts* → *Start dialogue intro*).
 
 ### Editor di scena
 
@@ -188,7 +210,7 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Gioco | `game_reference` (vocabolario completo di trigger, condizioni, azioni, comportamenti ed espressioni), `get_game`, `set_game`, `set_object`, `delete_object`, `set_events` |
 | Scene | `create_scene`, `get_scene` (anche la mappa come griglia di caratteri), `update_scene`, `delete_scene`, `set_tile_layer`, `paint_tiles` (righe + legenda come `draw_pixels`, o rettangoli), `place_instances`, `update_instances`, `tileset_preview` (indici dei tile) |
 | Dialoghi | `dialogue_reference`, `list_dialogues`, `read_dialogue`, `write_dialogue` (controllato prima di salvare), `edit_dialogue`, `delete_dialogue`; `place_instances` / `update_instances` con nome, sprite e `props.dialogue` per istanza |
-| Script | `script_reference` (API completa con esempio di battaglia), `list_scripts`, `read_script`, `write_script` (con controllo della sintassi e nomi registrati), `edit_script`, `delete_script` |
+| Script | `script_reference` (componenti, ciclo di vita, API completa con esempio), `list_scripts` (cartelle, componenti con parametri/hook/metodi), `read_script`, `write_script` (percorsi con cartelle, controllo della sintassi), `edit_script`, `move_script` (sposta/rinomina file e cartelle aggiornando i riferimenti), `delete_script`; `place_instances`/`update_instances` (`components`), `update_scene` e `set_game` (`components`) attaccano i componenti |
 | Progetti | `list_projects`, `open_project`, `create_project` (vuoto, platformer, rpg) |
 | Verifica ed export del gioco | `validate_game`, `preview_scene`, `playtest` (gioco headless con input scriptati e risposte ai menu: log, dialoghi, stato, screenshot), `export_game` (HTML unico per il web), `undo_game_change` |
 | Altro | `undo`, `editor_url` |
@@ -299,7 +321,7 @@ Il workspace (default `./sprites`) contiene tutto il progetto:
 - `<nome>.sprite.json`: dimensioni, palette, livelli, frame, tag, griglia tile opzionale e pixel RGBA (base64) per ogni cel `livello/frame`;
 - `<nome>.scene.json`: dimensioni in tile, tileset, livelli tile (indici, `-1` = vuoto), istanze, eventi e variabili della scena;
 - `game.json`: impostazioni, variabili globali e tipi di oggetto con comportamenti ed eventi;
-- `scripts/<nome>.js`: gli script del gioco;
+- `scripts/<cartella>/<Nome>.js`: gli script del gioco (componenti e moduli), più `jsconfig.json` e `spritifer.d.ts` generati per l'autocompletamento negli IDE;
 - `dialogues/<nome>.dialogue`: i dialoghi.
 
 Sono JSON leggibili e versionabili. L'editor e il server MCP leggono e scrivono gli stessi file; un watcher notifica le modifiche al browser via WebSocket.

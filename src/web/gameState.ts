@@ -1,6 +1,7 @@
 /** Shared client-side state of the game project (game.json + sprite and scene lists), with autosave. */
 
 import type { GameProject, ObjectType } from '../core/game/types.js';
+import type { ComponentInfo, ScriptInfo } from '../core/game/script.js';
 import { api, type SpriteSummary } from './api.js';
 import { type LoadedAsset, type SceneSummary, gameApi, loadAsset } from './gameApi.js';
 import { toast } from './dom.js';
@@ -13,7 +14,7 @@ class GameState {
   sprites: SpriteSummary[] = [];
   scenes: SceneSummary[] = [];
   /** What the project scripts register (for dropdowns) and their loading errors. */
-  scriptInfo: { behaviors: string[]; functions: string[]; errors: string[] } = { behaviors: [], functions: [], errors: [] };
+  scriptInfo: ScriptInfo = { behaviors: [], functions: [], errors: [], components: [] };
   /** Dialogue names and parse errors (Dialogues tab). */
   dialogueInfo: { nodes: string[]; errors: { file: string; line: number; message: string }[] } = { nodes: [], errors: [] };
   private listeners = new Set<Listener>();
@@ -51,6 +52,10 @@ class GameState {
 
   emit(): void {
     for (const l of [...this.listeners]) l();
+  }
+
+  component(name: string): ComponentInfo | undefined {
+    return this.scriptInfo.components.find((c) => c.name === name);
   }
 
   object(name: string): ObjectType | undefined {

@@ -2,6 +2,7 @@
 
 import type { GameProject, Scene, SpriteAsset } from '../core/game/types.js';
 import type { Problem } from '../core/game/catalog.js';
+import type { ScriptInfo } from '../core/game/script.js';
 import { apiBase } from './api.js';
 
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -64,10 +65,13 @@ export const gameApi = {
   listScripts: () => req<{ name: string; size: number; updatedAt: number }[]>('GET', `${apiBase()}/scripts`),
   getScript: (name: string) => req<{ name: string; code: string }>('GET', `${apiBase()}/scripts/${enc(name)}`),
   saveScript: (name: string, code: string) => req<{ ok: true; syntaxError: string | null }>('PUT', `${apiBase()}/scripts/${enc(name)}`, { code }),
-  createScript: (name: string) => req<{ name: string }>('POST', `${apiBase()}/scripts`, { name }),
+  createScript: (name: string, kind: 'component' | 'script' = 'component') => req<{ name: string }>('POST', `${apiBase()}/scripts`, { name, kind }),
+  scriptTree: () => req<{ files: { name: string; size: number; updatedAt: number }[]; folders: string[] }>('GET', `${apiBase()}/scripts/_tree`),
+  createScriptFolder: (name: string) => req<{ name: string }>('POST', `${apiBase()}/scripts/_folders`, { name }),
+  deleteScriptFolder: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/scripts/_folders/${enc(name)}`),
   deleteScript: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/scripts/${enc(name)}`),
   renameScript: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/scripts/${enc(name)}/rename`, { to }),
-  scriptInfo: () => req<{ behaviors: string[]; functions: string[]; errors: string[] }>('GET', `${apiBase()}/scripts/_info`),
+  scriptInfo: () => req<ScriptInfo>('GET', `${apiBase()}/scripts/_info`),
   scriptReference: () => req<{ reference: string }>('GET', `${apiBase()}/scripts/_reference`),
   listDialogues: () => req<{ name: string; size: number; updatedAt: number }[]>('GET', `${apiBase()}/dialogues`),
   getDialogue: (name: string) => req<{ name: string; code: string }>('GET', `${apiBase()}/dialogues/${enc(name)}`),

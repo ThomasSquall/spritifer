@@ -7,6 +7,8 @@ import { state } from './gameState.js';
 import { appNav } from './nav.js';
 import { openExport, openPlay } from './play.js';
 import { clear, h, icon, iconButton, promptText, toast } from './dom.js';
+import { componentListCard } from './componentsUi.js';
+import { sheetContext } from './objectsView.js';
 
 const RESOLUTIONS: [number, number, string][] = [
   [160, 144, 'handheld'],
@@ -82,6 +84,10 @@ export function renderGameSettings(root: HTMLElement): () => void {
             changed();
             render();
           } }, icon('plus', 13), 'Variable'),
+        ),
+        h('div', { class: 'card' },
+          h('h3', {}, 'Global components'),
+          componentListCard('', 'Created when the game starts and kept across scenes: a GameManager, an inventory, a HUD on every scene. They get onSceneStart(name) / onSceneEnd(name).', () => g.components, (list) => { if (list?.length) g.components = list; else delete g.components; }, () => sheetContext(null, []), changed),
         ),
         h('div', { class: 'card' },
           h('h3', {}, 'Checks'),

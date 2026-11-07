@@ -143,3 +143,13 @@ describe('game MCP tools', () => {
     }
   });
 });
+
+describe('bundling', () => {
+  it('includes sprites that are only named in scripts', async () => {
+    await buildPlatformer();
+    await call('create_sprite', { name: 'boss_art', width: 8, height: 8 });
+    expect(Object.keys(loadGameBundle(ws).bundle.sprites)).not.toContain('boss_art');
+    await call('write_script', { name: 'ui', code: "onDraw((ui) => ui.sprite('boss_art', 0, 0, { scale: 2 }))" });
+    expect(Object.keys(loadGameBundle(ws).bundle.sprites)).toContain('boss_art');
+  });
+});

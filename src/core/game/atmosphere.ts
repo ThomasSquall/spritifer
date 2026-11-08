@@ -93,25 +93,26 @@ function shadowWidth(a: AtmosphereActor): number {
   return a.type.hitbox.w + 2;
 }
 
-/** The silhouette of an instance laid on the ground, away from the sun. Crisp, drawn once per pixel so it never doubles up. */
-function castShadow(r: Renderer, a: AtmosphereActor, sun: SceneSun, color: string, opacity: number, camX: number, camY: number, zoom: number): void {
-  const asset = a.asset;
-  if (!asset?.frames?.length || !asset.name || !r.spriteMask) return;
-  const f = asset.frames[a.frameIndex?.() ?? 0] ?? asset.frames[0];
-  const mask = r.spriteMask(asset.name, f.x, f.y, f.w, f.h);
-  if (!mask) return;
+/** A silhouette already laid on the ground: rows of [x, y, length] relative to the sprite, ready to draw. */
+export interface CastShape {
+  readonly reachX: number;
+  readonly reachY: number;
+  readonly bottom: number;
+  readonly width: number;
+  readonly height: number;
+  readonly runs: readonly number[];
+}
+
+/** By sprite asset (a rebuilt sprite is a new object): the shapes for one sun direction, by frame and mirroring. */
+const castShapes = new WeakMap<object, { sun: string; shapes: Map<number, CastShape | null> }>();
+
+function buildCastShape(mask: Uint8Array, fw: number, flip: boolean, dx: number, dy: number): CastShape | null {
   let bottom = -1;
-  for (let i = mask.length - 1; i >= 0 && bottom < 0; i--) if (mask[i]) bottom = Math.floor(i / f.w);
-  if (bottom < 0) return;
-  const angle = ((sun.angle ?? -135) * Math.PI) / 180;
-  const elevation = (Math.max(15, sun.elevation ?? 50) * Math.PI) / 180;
-  const length = Math.min(1.6, 1 / Math.tan(elevation));
-  // Away from the sun; the ground recedes, so distances along y are shorter on screen.
-  const dx = -Math.cos(angle) * length;
-  const dy = -Math.sin(angle) * length * 0.55;
+  for (let i = mask.length - 1; i >= 0 && bottom < 0; i--) if (mask[i]) bottom = Math.floor(i / fw);
+  if (bottom < 0) return null;
   const reachX = Math.ceil(Math.abs(dx) * (bottom + 1)) + 1;
   const reachY = Math.ceil(Math.abs(dy) * (bottom + 1)) + 1;
-  const W = f.w + reachX * 2;
+  const W = fw + reachX * 2;
   const H = reachY * 2 + 2;
   const ground = new Uint8Array(W * H);
   for (let y = bottom; y >= 0; y--) {
@@ -121,25 +122,59 @@ function castShadow(r: Renderer, a: AtmosphereActor, sun: SceneSun, color: strin
       const h = rise + step * 0.5;
       const ox = Math.round(h * dx);
       const oy = Math.round(h * dy);
-      for (let x = 0; x < f.w; x++) {
-        if (!mask[y * f.w + (a.flipX ? f.w - 1 - x : x)]) continue;
+      for (let x = 0; x < fw; x++) {
+        if (!mask[y * fw + (flip ? fw - 1 - x : x)]) continue;
         const gx = x + ox + reachX;
         const gy = oy + reachY;
         if (gx >= 0 && gy >= 0 && gx < W && gy < H) ground[gy * W + gx] = 1;
       }
     }
   }
-  const left = Math.round((a.x + (a.type.spriteOffset?.x ?? 0) - reachX - camX) * zoom);
-  const top = Math.round((a.y + (a.type.spriteOffset?.y ?? 0) + bottom - reachY - camY) * zoom);
+  const runs: number[] = [];
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       if (!ground[y * W + x]) continue;
       let end = x;
       while (end + 1 < W && ground[y * W + end + 1]) end++;
-      r.rect(left + x * zoom, top + y * zoom, (end - x + 1) * zoom, zoom, color, opacity);
+      runs.push(x, y, end - x + 1);
       x = end;
     }
   }
+  return { reachX, reachY, bottom, width: W, height: H, runs };
+}
+
+/** The silhouette of an instance laid on the ground, away from the sun. Crisp, drawn once per pixel so it never doubles up. */
+function castShadow(r: Renderer, a: AtmosphereActor, sunKey: string, dx: number, dy: number, color: string, opacity: number, camX: number, camY: number, zoom: number, viewW: number, viewH: number): void {
+  const asset = a.asset;
+  if (!asset?.frames?.length || !asset.name || !r.spriteMask) return;
+  const frame = a.frameIndex?.() ?? 0;
+  const f = asset.frames[frame] ?? asset.frames[0];
+  let entry = castShapes.get(asset);
+  if (!entry || entry.sun !== sunKey) castShapes.set(asset, (entry = { sun: sunKey, shapes: new Map() }));
+  const key = frame * 2 + (a.flipX ? 1 : 0);
+  let shape = entry.shapes.get(key);
+  if (shape === undefined) {
+    const mask = r.spriteMask(asset.name, f.x, f.y, f.w, f.h);
+    if (!mask) return; // Not available yet: the sheet may still be loading, so nothing is remembered.
+    shape = buildCastShape(mask, f.w, !!a.flipX, dx, dy);
+    entry.shapes.set(key, shape);
+  }
+  if (!shape) return;
+  const left = Math.round((a.x + (a.type.spriteOffset?.x ?? 0) - shape.reachX - camX) * zoom);
+  const top = Math.round((a.y + (a.type.spriteOffset?.y ?? 0) + shape.bottom - shape.reachY - camY) * zoom);
+  if (left + shape.width * zoom < 0 || left > viewW || top + shape.height * zoom < 0 || top > viewH) return;
+  if (r.stamp) return r.stamp(shape, left, top, zoom, color, opacity);
+  const runs = shape.runs;
+  for (let i = 0; i < runs.length; i += 3) r.rect(left + runs[i]! * zoom, top + runs[i + 1]! * zoom, runs[i + 2]! * zoom, zoom, color, opacity);
+}
+
+/** Is this instance (plus `margin` world pixels around it) off the screen? Cheap enough to ask before anything else. */
+function offView(a: AtmosphereActor, camX: number, camY: number, zoom: number, viewW: number, viewH: number, margin: number): boolean {
+  const w = a.asset?.width ?? 0;
+  const h = a.asset?.height ?? 0;
+  const ox = a.type.spriteOffset?.x ?? 0;
+  const oy = a.type.spriteOffset?.y ?? 0;
+  return (a.x + ox + w + margin - camX) * zoom < 0 || (a.y + oy + h + margin - camY) * zoom < 0 || (a.x + ox - margin - camX) * zoom > viewW || (a.y + oy - margin - camY) * zoom > viewH;
 }
 
 /** Soft elliptical contact shadows under the instances (drawn above the ground, below the instances), and the sun's cast shadows. */
@@ -148,16 +183,28 @@ export function drawShadows(w: AtmosphereWorld, r: Renderer, atm: SceneAtmospher
   const color = atm.shadowColor ?? '#1a1030';
   const op = atm.shadowOpacity ?? 0.38;
   const sun = atm.relief?.sun;
+  const viewW = w.game.width;
+  const viewH = w.game.height;
   if (sun) {
+    const angle = ((sun.angle ?? -135) * Math.PI) / 180;
+    const elevation = (Math.max(15, sun.elevation ?? 50) * Math.PI) / 180;
+    const length = Math.min(1.6, 1 / Math.tan(elevation));
+    // Away from the sun; the ground recedes, so distances along y are shorter on screen.
+    const dx = -Math.cos(angle) * length;
+    const dy = -Math.sin(angle) * length * 0.55;
+    const sunKey = `${sun.angle}|${sun.elevation}`;
+    const opacity = Math.min(0.8, op * 1.5 * (sun.intensity ?? 1));
     for (const a of w.actors) {
       if (a.destroyed || !a.visible || a.type.hud || !a.asset || a.opacity <= 0 || a.type.shadow === 0 || a.z < 0) continue;
-      castShadow(r, a, sun, color, Math.min(0.8, op * 1.5 * (sun.intensity ?? 1)), camX, camY, zoom);
+      // A shadow reaches at most as far as the sprite is tall, times the length of the shadow.
+      if (offView(a, camX, camY, zoom, viewW, viewH, a.asset.height * 1.6 + 2)) continue;
+      castShadow(r, a, sunKey, dx, dy, color, opacity, camX, camY, zoom, viewW, viewH);
     }
   }
   for (const a of w.actors) {
     if (a.destroyed || !a.visible || a.type.hud || !a.asset || a.opacity <= 0) continue;
     const sw = shadowWidth(a);
-    if (sw <= 0) continue;
+    if (sw <= 0 || offView(a, camX, camY, zoom, viewW, viewH, sw)) continue;
     const box = a.box();
     const cx = (box.x + box.w / 2 - camX) * zoom;
     const cy = (box.y + box.h - 1 - camY) * zoom;

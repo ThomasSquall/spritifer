@@ -12,7 +12,7 @@ import { componentListCard, instanceComponents } from './componentsUi.js';
 import { type LoadedAsset, gameApi } from './gameApi.js';
 import { state } from './gameState.js';
 import { TEMPLATES, createFromTemplate, sheetContext } from './objectsView.js';
-import { openPlay, registerFlusher } from './play.js';
+import { isPlaying, onPlayChange, openPlay, registerFlusher } from './play.js';
 import { clear, h, icon, iconButton, modal, promptText, toast } from './dom.js';
 import { api } from './api.js';
 import { drawPixelText, previewText, textSize } from './textPreview.js';
@@ -298,7 +298,11 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       asset, type: obj ?? {}, box: () => b,
     };
   });
-  const animating = () => showGameLook && !!(scene.atmosphere || (tileset && tileset.frames.length > 1));
+  // Not behind the Play overlay: the game runs on the same thread, and this redraws every light at full size.
+  const animating = () => showGameLook && !isPlaying() && !!(scene.atmosphere || (tileset && tileset.frames.length > 1));
+  const stopWatchingPlay = onPlayChange(() => {
+    if (animating() && !raf && canvas.isConnected) raf = requestAnimationFrame(loop);
+  });
   const loop = () => {
     raf = 0;
     if (!canvas.isConnected || !animating()) return;
@@ -1388,6 +1392,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       void flush();
       unregister();
       unsub();
+      stopWatchingPlay();
       ro.disconnect();
       cancelAnimationFrame(raf);
       window.removeEventListener('keydown', onKey);

@@ -29,7 +29,49 @@ function bundle(opts: { wall?: boolean; scripts?: Record<string, string>; object
   return { game, scenes: { a }, sprites: { box: box('box'), red: box('red', 8, 8) }, scripts: opts.scripts ?? {} };
 }
 
+describe('topdown', () => {
+  it('moves diagonally at diagonalSpeed per axis, also when running', async () => {
+    const b = bundle();
+    b.game.objects[0].behaviors[0] = { type: 'topdown', speed: 120, runSpeed: 240, diagonalSpeed: 90 };
+    const w = new World(b);
+    await steps(w, 1);
+    const p = w.actors[0];
+    const down = (...keys: string[]) => ({ ...emptyInput(), down: new Set(keys) });
+    let x = p.x;
+    let y = p.y;
+    await steps(w, 2, down('right', 'down'));
+    expect(p.x - x).toBeCloseTo(3); // 1.5 px per step on each axis
+    expect(p.y - y).toBeCloseTo(3);
+    x = p.x;
+    y = p.y;
+    await steps(w, 2, down('right', 'down', 'shift'));
+    expect(p.x - x).toBeCloseTo(6);
+    expect(p.y - y).toBeCloseTo(6);
+    x = p.x;
+    await steps(w, 2, down('right'));
+    expect(p.x - x).toBeCloseTo(4); // straight lines keep the normal speed
+  });
+});
+
 describe('camera', () => {
+  it('keeps what it follows on the same screen pixel, also moving at fractions of a pixel', async () => {
+    const b = bundle();
+    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 120, diagonalSpeed: 90 }, { type: 'camera', smoothing: 0.15 }];
+    b.scenes.a.instances[0].x = 200;
+    b.scenes.a.instances[0].y = 100;
+    const w = new World(b);
+    await steps(w, 1);
+    const input = { ...emptyInput(), down: new Set(['right', 'down']) };
+    await steps(w, 40, input);
+    const seen = new Set<string>();
+    const r = { clear() {}, rect() {}, text() {}, image(_s: string, _sx: number, _sy: number, _sw: number, _sh: number, dx: number, dy: number) { seen.add(`${dx},${dy}`); } };
+    for (let i = 0; i < 12; i++) {
+      await steps(w, 1, input);
+      renderWorld(w, r);
+    }
+    expect(seen.size).toBe(1);
+  });
+
   it('follows with a dead zone and look-ahead, clamps to bounds, zooms', async () => {
     const b = bundle();
     b.game.objects[0].behaviors[1] = { type: 'camera', smoothing: 0, deadZoneX: 40, lookAhead: 0 };

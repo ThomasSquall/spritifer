@@ -14,7 +14,7 @@ import { resolveObjectTypes } from './variants.js';
 import { ParticleSystem } from './particles.js';
 import { type VfxAnchor, type VfxPoint, VfxSystem } from './vfx.js';
 import { TileResolver, tilesetFrame } from './tilerules.js';
-import { MoteField, type ScreenLight, drawClouds, drawShadows, postProcess } from './atmosphere.js';
+import { type CastShape, MoteField, type ScreenLight, drawClouds, drawShadows, postProcess } from './atmosphere.js';
 import type { ResolvedRelief } from './relief.js';
 
 export const STEP = 1 / 60;
@@ -266,6 +266,8 @@ export class World {
   frame = 0;
   /** Top-left of the view in world pixels; zoom > 1 shows less of the world, bigger. */
   camera = { x: 0, y: 0, zoom: 1 };
+  /** What the camera followed in the last update: drawing keeps it on a steady screen pixel. */
+  cameraHeld: Actor | null = null;
   /** Scripts: limit the camera to a rectangle (a room) instead of the scene. */
   cameraBounds: Rect | null = null;
   /** Scripts: the instance the camera follows (undefined = the one with the Camera behavior, null = none). */
@@ -1084,17 +1086,7 @@ export class World {
 
     // Overlaps.
     const live = this.actors.filter((a) => !a.destroyed && !a.type.hud);
-    const now = new Map<Actor, Set<Actor>>();
-    for (const a of live) now.set(a, new Set());
-    for (let i = 0; i < live.length; i++) {
-      const bi = live[i].box();
-      for (let j = i + 1; j < live.length; j++) {
-        if (overlap(bi, live[j].box())) {
-          now.get(live[i])!.add(live[j]);
-          now.get(live[j])!.add(live[i]);
-        }
-      }
-    }
+    const now = touchingPairs(live);
 
     // Component collision hooks: enter (start of touch), stay, exit.
     const sh = this.scripts;
@@ -1104,7 +1096,7 @@ export class World {
       const stay = a.components.some((c) => sh.has(c, 'onCollisionStay'));
       const exit = a.components.some((c) => sh.has(c, 'onCollisionExit'));
       if (!enter && !stay && !exit) continue;
-      const cur = now.get(a) ?? new Set<Actor>();
+      const cur = now.get(a) ?? NO_TOUCH;
       for (const o of cur) {
         if (a.destroyed) break;
         if (o.destroyed) continue;
@@ -1118,7 +1110,7 @@ export class World {
     // Events.
     for (const a of [...this.actors]) {
       if (a.destroyed) continue;
-      const touching = now.get(a) ?? new Set<Actor>();
+      const touching = now.get(a) ?? NO_TOUCH;
       this.runObjectEvents(a, touching);
       a.touching = touching;
     }
@@ -1637,6 +1629,13 @@ export class World {
             dy /= len;
             a.vx = dx * speed;
             a.vy = dy * speed;
+            // A diagonal at a chosen speed per axis, so it can also be a whole or half number of pixels per step.
+            const diagonal = toNum(b.diagonalSpeed);
+            if (diagonal > 0 && dx && dy) {
+              const axis = diagonal * (running ? speed / (toNum(b.speed) || speed) : 1);
+              a.vx = Math.sign(dx) * axis;
+              a.vy = Math.sign(dy) * axis;
+            }
           }
           if (this.moveAxis(a, a.vx * dt, 'x')) a.flags.hitWall = true;
           if (this.moveAxis(a, a.vy * dt, 'y')) a.flags.hitWall = true;
@@ -1835,6 +1834,7 @@ export class World {
     const vw = this.viewWidth;
     const vh = this.viewHeight;
     const followed = this.cameraTarget === undefined ? auto : this.cameraTarget && !this.cameraTarget.destroyed ? this.cameraTarget : undefined;
+    this.cameraHeld = followed ?? null;
     let tx = this.camera.x;
     let ty = this.camera.y;
     if (followed) {
@@ -2427,6 +2427,8 @@ export interface Renderer {
   grade?(tint: string, amount: number): void;
   /** Darkens the screen edges. */
   vignette?(strength: number, color: string): void;
+  /** Draws a whole cast shadow in one go; `shape` is the same object for as long as the shadow doesn't change, so it can be kept ready. */
+  stamp?(shape: CastShape, x: number, y: number, zoom: number, color: string, alpha: number): void;
 }
 
 /** A renderer that draws nothing (headless UI). */
@@ -2451,9 +2453,16 @@ export function renderWorld(w: World, r: Renderer): void {
     camX += (Math.random() * 2 - 1) * k;
     camY += (Math.random() * 2 - 1) * k;
   }
-  // Snap to the zoomed pixel grid.
-  camX = Math.round(camX * zoom) / zoom;
-  camY = Math.round(camY * zoom) / zoom;
+  // Snap to the zoomed pixel grid. What the camera follows sets the snap: rounded on its own, the camera would land on
+  // a different pixel from the character, and the character would tremble by one pixel on the screen.
+  const held = w.cameraHeld && !w.cameraHeld.destroyed ? w.cameraHeld : null;
+  if (held) {
+    camX = (Math.round(held.x * zoom) - Math.round((held.x - camX) * zoom)) / zoom;
+    camY = (Math.round(held.y * zoom) - Math.round((held.y - camY) * zoom)) / zoom;
+  } else {
+    camX = Math.round(camX * zoom) / zoom;
+    camY = Math.round(camY * zoom) / zoom;
+  }
 
   for (const bg of scene.backgrounds) {
     const asset = w.bundle.sprites[bg.sprite];
@@ -2521,6 +2530,14 @@ export function renderWorld(w: World, r: Renderer): void {
     if (a.type.hud) {
       hud.push(a);
       return;
+    }
+    // Off the screen: not sorted, not drawn. Most of a big map, every frame.
+    if (a.asset?.frames.length && a.type.text === undefined) {
+      const ox = a.type.spriteOffset?.x ?? 0;
+      const oy = a.type.spriteOffset?.y ?? 0;
+      const sx = (a.x + ox - camX) * zoom;
+      const sy = (a.y + oy - camY) * zoom;
+      if (sx + a.asset.width * zoom < -8 || sy + a.asset.height * zoom < -8 || sx > vw + 8 || sy > vh + 8) return;
     }
     // y-sort: within the same z, instances lower on screen are drawn in front (top-down / RPG depth).
     const order = scene.ySort ? 1000 + a.box().y + a.box().h + i / 10000 : 1000 + i;
@@ -2638,6 +2655,45 @@ function drawActor(w: World, r: Renderer, a: Actor, camX: number, camY: number, 
     r.text(a.textOverride, x + s, y + s, '#000000', s);
     r.text(a.textOverride, x, y, color, s);
   }
+}
+
+/** For actors touching nothing, which are most of them. Never written to. */
+const NO_TOUCH: Set<Actor> = new Set();
+
+/**
+ * Who touches whom. Boxes sorted by left edge only need comparing with the ones that start before they end, so scenes
+ * with hundreds of props stay cheap. Pairs are recorded in actor order, so events fire in a stable order.
+ */
+function touchingPairs(live: readonly Actor[]): Map<Actor, Set<Actor>> {
+  const n = live.length;
+  const boxes = live.map((a) => a.box());
+  const order = Array.from({ length: n }, (_, i) => i).sort((i, j) => boxes[i]!.x - boxes[j]!.x);
+  const pairs: number[] = [];
+  for (let a = 0; a < n; a++) {
+    const i = order[a]!;
+    const bi = boxes[i]!;
+    const right = bi.x + bi.w;
+    for (let b = a + 1; b < n; b++) {
+      const j = order[b]!;
+      const bj = boxes[j]!;
+      if (bj.x >= right) break;
+      if (overlap(bi, bj)) pairs.push(i < j ? i * n + j : j * n + i);
+    }
+  }
+  pairs.sort((p, q) => p - q);
+  const out = new Map<Actor, Set<Actor>>();
+  const add = (a: Actor, b: Actor) => {
+    let set = out.get(a);
+    if (!set) out.set(a, (set = new Set()));
+    set.add(b);
+  };
+  for (const p of pairs) {
+    const i = Math.floor(p / n);
+    const j = p % n;
+    add(live[i]!, live[j]!);
+    add(live[j]!, live[i]!);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

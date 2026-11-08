@@ -19,6 +19,22 @@ export async function flushAll(): Promise<void> {
 }
 
 let open = false;
+const playWatchers = new Set<() => void>();
+
+/** Is the Play overlay open? Views keep their animated previews still meanwhile: they share the browser's thread with the game. */
+export const isPlaying = (): boolean => open;
+
+/** Called when the Play overlay opens or closes. Returns the function that stops listening. */
+export function onPlayChange(fn: () => void): () => void {
+  playWatchers.add(fn);
+  return () => playWatchers.delete(fn);
+}
+
+function setOpen(on: boolean): void {
+  open = on;
+  for (const fn of playWatchers) fn();
+}
+
 /** The game iframe while the Play overlay is open (for hot reload). */
 let playFrame: HTMLIFrameElement | null = null;
 let hotReload = true;
@@ -43,7 +59,7 @@ export async function openPlay(scene?: string): Promise<void> {
     toast('Create a scene first (Scenes tab)', 'error');
     return;
   }
-  open = true;
+  setOpen(true);
   let debug = false;
   const logs = h('div', { class: 'play-logs' });
   const sendToGame = (msg: Record<string, unknown>) => frame.contentWindow?.postMessage({ source: 'spritifer-editor', ...msg }, '*');
@@ -81,6 +97,10 @@ export async function openPlay(scene?: string): Promise<void> {
       musicOn = !!d.on;
       musicBtn.classList.toggle('on', musicOn);
     }
+    if (d.type === 'fps') {
+      fpsOn = !!d.on;
+      fpsBtn.classList.toggle('on', fpsOn);
+    }
   };
   window.addEventListener('message', onMsg);
   const reload = () => {
@@ -95,7 +115,7 @@ export async function openPlay(scene?: string): Promise<void> {
     window.removeEventListener('message', onMsg);
     document.removeEventListener('keydown', onKey, true);
     overlay.remove();
-    open = false;
+    setOpen(false);
   };
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -108,6 +128,8 @@ export async function openPlay(scene?: string): Promise<void> {
   const hitBtn = h('button', { class: 'small', title: 'Show collision boxes (F2 in game)', onclick: () => { debug = !debug; hitBtn.classList.toggle('on', debug); reload(); } }, 'Hitboxes');
   let musicOn = true;
   const musicBtn = h('button', { class: 'small on', title: 'Music on or off while the game runs (F3 in game); remembered for the next Play', onclick: () => { sendToGame({ type: 'music', on: !musicOn }); frame.focus(); } }, 'Music');
+  let fpsOn = false;
+  const fpsBtn = h('button', { class: 'small', title: 'Show frame rate and frame time on the game (F4 in game); remembered for the next Play', onclick: () => { sendToGame({ type: 'fps', on: !fpsOn }); frame.focus(); } }, 'FPS');
   const overlay = h('div', { class: 'play-overlay' },
     h('header', { class: 'play-head' },
       h('span', { class: 'play-title' }, icon('play', 14), ` ${state.game?.title ?? 'Game'}`, scene ? h('span', { class: 'muted' }, ` · ${scene}`) : null),
@@ -116,6 +138,7 @@ export async function openPlay(scene?: string): Promise<void> {
       errCount,
       hotBtn,
       musicBtn,
+      fpsBtn,
       hitBtn,
       h('button', { class: 'small', onclick: reload }, 'Restart'),
       h('button', { class: 'small', onclick: () => window.open(gameApi.playUrl(scene), '_blank') }, 'New tab'),

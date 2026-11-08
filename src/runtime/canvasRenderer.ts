@@ -4,24 +4,16 @@
  */
 
 import type { Renderer } from '../core/game/engine.js';
-import type { ScreenLight } from '../core/game/atmosphere.js';
+import type { CastShape, ScreenLight } from '../core/game/atmosphere.js';
 import { rasterText } from '../core/game/font.js';
-import { type ResolvedRelief, flipNormalSheet, frameMask, normalSheetFor, reliefKind, shadeRelief } from '../core/game/relief.js';
+import { type ResolvedRelief, frameMask, normalSheetFor, reliefKind, shadeRelief } from '../core/game/relief.js';
 import type { SpriteAsset } from '../core/game/types.js';
 
 interface NormalSheet {
-  plain: HTMLCanvasElement;
-  flipped: HTMLCanvasElement;
   data: Uint8ClampedArray;
+  /** The same bytes as one number per pixel, for copying. */
+  pixels: Uint32Array;
   width: number;
-}
-
-function canvasFrom(data: Uint8ClampedArray, width: number, height: number): HTMLCanvasElement {
-  const cv = document.createElement('canvas');
-  cv.width = width;
-  cv.height = height;
-  cv.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(data), width, height), 0, 0);
-  return cv;
 }
 
 export class CanvasRenderer implements Renderer {
@@ -62,30 +54,42 @@ export class CanvasRenderer implements Renderer {
     this.ctx.globalAlpha = 1;
   }
 
-  private relief: { assets: Record<string, SpriteAsset | undefined>; view: { width: number; height: number }; target: CanvasRenderingContext2D; on: boolean; tiles: boolean } | null = null;
+  private relief: { assets: Record<string, SpriteAsset | undefined>; view: { width: number; height: number }; normals: Uint8ClampedArray; pixels: Uint32Array; on: boolean; tiles: boolean; dirty: boolean } | null = null;
   private normalSheets = new Map<string, NormalSheet | null>();
+  private alphaMasks = new Map<string, { mask: Uint8Array; width: number } | null>();
 
   /** Enables per-pixel lighting. `view` is the game's screen: sprites as big as it are backdrops and stay flat. */
   useRelief(assets: Record<string, SpriteAsset | undefined>, view: { width: number; height: number }, shared?: Map<string, unknown>): this {
     if (shared) this.normalSheets = shared as Map<string, NormalSheet | null>;
-    const cv = document.createElement('canvas');
-    cv.width = Math.max(1, this.w);
-    cv.height = Math.max(1, this.h);
-    const target = cv.getContext('2d', { willReadFrequently: true })!;
-    target.imageSmoothingEnabled = false;
-    this.relief = { assets, view, target, on: false, tiles: true };
+    const normals = new Uint8ClampedArray(Math.max(1, this.w) * Math.max(1, this.h) * 4);
+    this.relief = { assets, view, normals, pixels: new Uint32Array(normals.buffer), on: false, tiles: true, dirty: false };
     return this;
   }
 
   beginRelief(on: boolean, tiles = true): void {
-    if (!this.relief) return;
-    this.relief.on = on;
-    this.relief.tiles = tiles;
-    if (on) this.relief.target.clearRect(0, 0, this.w, this.h);
+    const rel = this.relief;
+    if (!rel) return;
+    rel.on = on;
+    rel.tiles = tiles;
+    if (on && rel.dirty) {
+      rel.pixels.fill(0);
+      rel.dirty = false;
+    }
   }
 
   endRelief(): void {
     if (this.relief) this.relief.on = false;
+  }
+
+  private readImage(img: HTMLImageElement | HTMLCanvasElement): { data: Uint8ClampedArray; width: number; height: number } {
+    const width = (img as HTMLImageElement).naturalWidth || img.width;
+    const height = (img as HTMLImageElement).naturalHeight || img.height;
+    const read = document.createElement('canvas');
+    read.width = width;
+    read.height = height;
+    const g = read.getContext('2d', { willReadFrequently: true })!;
+    g.drawImage(img, 0, 0);
+    return { data: g.getImageData(0, 0, width, height).data, width, height };
   }
 
   private normalSheet(sprite: string): NormalSheet | null {
@@ -97,18 +101,28 @@ export class CanvasRenderer implements Renderer {
     sheet = null;
     const img = this.images.get(sprite) as HTMLImageElement | HTMLCanvasElement | undefined;
     if (asset && img && reliefKind(asset, rel.view)) {
-      const w = (img as HTMLImageElement).naturalWidth || img.width;
-      const h = (img as HTMLImageElement).naturalHeight || img.height;
-      const read = document.createElement('canvas');
-      read.width = w;
-      read.height = h;
-      const g = read.getContext('2d', { willReadFrequently: true })!;
-      g.drawImage(img, 0, 0);
-      const data = normalSheetFor(g.getImageData(0, 0, w, h).data, w, h, asset, rel.view)!;
-      sheet = { plain: canvasFrom(data, w, h), flipped: canvasFrom(flipNormalSheet(data), w, h), data, width: w };
+      const { data: src, width, height } = this.readImage(img);
+      const data = normalSheetFor(src, width, height, asset, rel.view)!;
+      sheet = { data, pixels: new Uint32Array(data.buffer, data.byteOffset, data.length >> 2), width };
     }
     this.normalSheets.set(sprite, sheet);
     return sheet;
+  }
+
+  /** Which pixels of a sprite without normals are solid: it erases the normals under them. */
+  private alphaMask(sprite: string): { mask: Uint8Array; width: number } | null {
+    let found = this.alphaMasks.get(sprite);
+    if (found !== undefined) return found;
+    found = null;
+    const img = this.images.get(sprite) as HTMLImageElement | HTMLCanvasElement | undefined;
+    if (img) {
+      const { data, width, height } = this.readImage(img);
+      const mask = new Uint8Array(width * height);
+      for (let i = 0; i < mask.length; i++) mask[i] = data[i * 4 + 3]! > 0 ? 1 : 0;
+      found = { mask, width };
+    }
+    this.alphaMasks.set(sprite, found);
+    return found;
   }
 
   /** Records the normals of a drawn sprite. A sprite without them erases what it covers (a roof over a character). */
@@ -116,19 +130,45 @@ export class CanvasRenderer implements Renderer {
     const rel = this.relief;
     if (!rel?.on || o.opacity < 1 || o.angle) return;
     const sheet = o.flat ? null : this.normalSheet(sprite);
-    const g = rel.target;
+    // Nothing recorded yet, nothing to erase: the whole ground layer ends here.
+    if (!sheet && !rel.dirty) return;
     const k = o.scale ?? 1;
-    const src: CanvasImageSource | undefined = sheet ? (o.flipX ? sheet.flipped : sheet.plain) : this.images.get(sprite);
-    if (!src) return;
-    g.save();
-    // Normals are fully opaque, so they simply replace what is under them; a flat sprite cuts its shape out.
-    g.globalCompositeOperation = sheet ? 'source-over' : 'destination-out';
-    if (o.flipX) {
-      g.translate(dx + sw * k, dy);
-      g.scale(-1, 1);
-      g.drawImage(src, sx, sy, sw, sh, 0, 0, sw * k, sh * k);
-    } else g.drawImage(src, sx, sy, sw, sh, dx, dy, sw * k, sh * k);
-    g.restore();
+    const left = Math.round(dx);
+    const top = Math.round(dy);
+    const x0 = Math.max(0, left);
+    const y0 = Math.max(0, top);
+    const x1 = Math.min(this.w, left + Math.round(sw * k));
+    const y1 = Math.min(this.h, top + Math.round(sh * k));
+    if (x0 >= x1 || y0 >= y1) return;
+    const out = rel.pixels;
+    const W = this.w;
+    const flip = o.flipX;
+    const column = (x: number) => {
+      const u = Math.min(sw - 1, Math.floor((x - left) / k));
+      return flip ? sx + sw - 1 - u : sx + u;
+    };
+    if (sheet) {
+      const src = sheet.pixels;
+      const SW = sheet.width;
+      for (let y = y0; y < y1; y++) {
+        const row = (sy + Math.min(sh - 1, Math.floor((y - top) / k))) * SW;
+        let i = y * W + x0;
+        for (let x = x0; x < x1; x++, i++) {
+          const v = src[row + column(x)]!;
+          // Mirrored, the x of the normal (the low byte) points the other way.
+          if (v >>> 24) out[i] = flip ? v ^ 0xff : v;
+        }
+      }
+      rel.dirty = true;
+      return;
+    }
+    const alpha = this.alphaMask(sprite);
+    if (!alpha) return;
+    for (let y = y0; y < y1; y++) {
+      const row = (sy + Math.min(sh - 1, Math.floor((y - top) / k))) * alpha.width;
+      let i = y * W + x0;
+      for (let x = x0; x < x1; x++, i++) if (alpha.mask[row + column(x)]) out[i] = 0;
+    }
   }
 
   spriteMask(sprite: string, x: number, y: number, w: number, h: number): Uint8Array | null {
@@ -142,7 +182,7 @@ export class CanvasRenderer implements Renderer {
   reliefLighting(relief: ResolvedRelief, ambient: string, lights: ScreenLight[], glow: number): void {
     if (!this.relief) return this.lighting(ambient, lights, glow);
     const frame = this.ctx.getImageData(0, 0, this.w, this.h);
-    shadeRelief(frame, this.relief.target.getImageData(0, 0, this.w, this.h).data, relief, ambient, lights, glow);
+    shadeRelief(frame, this.relief.normals, relief, ambient, lights, glow);
     this.ctx.putImageData(frame, 0, 0);
   }
 
@@ -183,19 +223,45 @@ export class CanvasRenderer implements Renderer {
     c.restore();
   }
 
+  private vignetteCache: { key: string; grad: CanvasGradient } | null = null;
+
   vignette(strength: number, color: string): void {
     const c = this.ctx;
-    const cx = this.w / 2;
-    const cy = this.h / 2;
-    const r = Math.hypot(cx, cy);
-    const grad = c.createRadialGradient(cx, cy, r * 0.45, cx, cy, r);
-    grad.addColorStop(0, withAlpha(color, 0));
-    grad.addColorStop(1, withAlpha(color, strength));
+    const key = `${strength}|${color}`;
+    if (this.vignetteCache?.key !== key) {
+      const cx = this.w / 2;
+      const cy = this.h / 2;
+      const r = Math.hypot(cx, cy);
+      const grad = c.createRadialGradient(cx, cy, r * 0.45, cx, cy, r);
+      grad.addColorStop(0, withAlpha(color, 0));
+      grad.addColorStop(1, withAlpha(color, strength));
+      this.vignetteCache = { key, grad };
+    }
     c.save();
     c.globalAlpha = 1;
-    c.fillStyle = grad;
+    c.fillStyle = this.vignetteCache.grad;
     c.fillRect(0, 0, this.w, this.h);
     c.restore();
+  }
+
+  private stamps = new WeakMap<CastShape, { color: string; canvas: HTMLCanvasElement }>();
+
+  /** A cast shadow is painted once on its own canvas, then drawn with one call instead of one rectangle per row. */
+  stamp(shape: CastShape, x: number, y: number, zoom: number, color: string, alpha: number): void {
+    let entry = this.stamps.get(shape);
+    if (!entry || entry.color !== color) {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, shape.width);
+      canvas.height = Math.max(1, shape.height);
+      const g = canvas.getContext('2d')!;
+      g.fillStyle = color;
+      for (let i = 0; i < shape.runs.length; i += 3) g.fillRect(shape.runs[i]!, shape.runs[i + 1]!, shape.runs[i + 2]!, 1);
+      this.stamps.set(shape, (entry = { color, canvas }));
+    }
+    const c = this.ctx;
+    c.globalAlpha = alpha;
+    c.drawImage(entry.canvas, x, y, shape.width * zoom, shape.height * zoom);
+    c.globalAlpha = 1;
   }
 
   text(text: string, x: number, y: number, color: string, scale: number): void {

@@ -30,6 +30,11 @@ if (!bundle) {
     onMusicChange: (on) => {
       if (inFrame) window.parent.postMessage({ source: 'spritifer-game', type: 'music', on }, '*');
     },
+    // The game page served by the editor; an exported game has no button, only F4.
+    fpsButton: !inFrame && location.pathname.endsWith('/play.html'),
+    onFpsChange: (on) => {
+      if (inFrame) window.parent.postMessage({ source: 'spritifer-game', type: 'fps', on }, '*');
+    },
     onLog: (m) => {
       post('log', m);
       if (m.startsWith('ERROR')) console.warn('[game]', m);
@@ -51,6 +56,9 @@ if (!bundle) {
             return;
           case 'music':
             player.music = !!d.on;
+            return;
+          case 'fps':
+            player.fps = !!d.on;
             return;
           case 'pause':
             player.paused = !!d.on;

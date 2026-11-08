@@ -30,7 +30,7 @@ import { previewSound } from './eventSheet.js';
 import { type LoadedAsset, gameApi } from './gameApi.js';
 import { state } from './gameState.js';
 import { appNav } from './nav.js';
-import { registerFlusher } from './play.js';
+import { isPlaying, registerFlusher } from './play.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const PORT_Y = 21;
@@ -865,6 +865,10 @@ function createPreview(getGraph: () => VfxGraph | null, selectedNode: () => stri
 
   const frame = (now: number) => {
     raf = requestAnimationFrame(frame);
+    if (isPlaying()) { // Behind the Play overlay nobody sees it, and it would take time from the game.
+      last = now;
+      return;
+    }
     const dt = Math.min(0.1, (now - last) / 1000) * pace;
     last = now;
     acc += dt;

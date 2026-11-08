@@ -22,6 +22,10 @@ export interface PlayerOptions {
   musicButton?: boolean;
   /** Called with the music state at start and whenever it changes. */
   onMusicChange?: (on: boolean) => void;
+  /** Small on-screen button for the frame-rate readout (for playing from the editor's server, not in exported games). */
+  fpsButton?: boolean;
+  /** Called with the state of the frame-rate readout at start and whenever it changes. */
+  onFpsChange?: (on: boolean) => void;
 }
 
 export interface Player {
@@ -34,6 +38,8 @@ export interface Player {
   stepOnce(): void;
   /** Music on or off while the game runs (effects are not affected). */
   music: boolean;
+  /** Frame-rate readout on or off (F4). */
+  fps: boolean;
 }
 
 /** Physical key code → logical keys. Letters keep their own name and WASD also act as arrows. */
@@ -84,9 +90,14 @@ const STYLE = `
 .spf-root:hover .spf-music,.spf-music:focus-visible{opacity:.85}
 .spf-music.off{text-decoration:line-through;color:#ffffff99}
 @media (hover:none){.spf-music{opacity:.5}}
+.spf-fps-btn{position:absolute;top:8px;right:46px;height:30px;padding:0 9px;border:1px solid #ffffff55;border-radius:15px;background:#0008;color:#fff;font:600 11px system-ui;cursor:pointer;opacity:.7}
+.spf-fps-btn:hover,.spf-fps-btn:focus-visible{opacity:1}
+.spf-fps-btn.on{background:#3b5dc9;border-color:#3b5dc9;opacity:1}
+.spf-fps{position:absolute;top:44px;right:8px;padding:6px 9px;border-radius:6px;background:#000c;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre;pointer-events:none}
 `;
 
 const MUSIC_PREF = '__music';
+const FPS_PREF = '__fps';
 
 /** Starts the game inside `container`. Resolves once the sprites are loaded. */
 export async function mountPlayer(container: HTMLElement, bundle: GameBundle, opts: PlayerOptions = {}): Promise<Player> {
@@ -174,6 +185,63 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
   }
   showMusic();
 
+  // ---------------------------------------------------------------- frame-rate readout
+  let fpsOn = storage.get(FPS_PREF) === 'on';
+  const fpsBox = document.createElement('div');
+  fpsBox.className = 'spf-fps';
+  root.append(fpsBox);
+  let fpsBtn: HTMLButtonElement | null = null;
+  // Counted over a second, then shown: refreshes of the screen, pictures drawn, how long they took, how many came late.
+  const fpsStats = { since: performance.now(), refreshes: 0, draws: 0, cost: 0, worst: 0, late: 0, lastDraw: 0 };
+  const resetFps = (now: number) => Object.assign(fpsStats, { since: now, refreshes: 0, draws: 0, cost: 0, worst: 0, late: 0 });
+  const showFps = () => {
+    fpsBox.hidden = !fpsOn;
+    if (fpsBtn) {
+      fpsBtn.classList.toggle('on', fpsOn);
+      fpsBtn.title = `Frame rate ${fpsOn ? 'on' : 'off'} (F4)`;
+      fpsBtn.setAttribute('aria-pressed', String(fpsOn));
+    }
+    opts.onFpsChange?.(fpsOn);
+  };
+  const setFps = (on: boolean) => {
+    fpsOn = on;
+    storage.set(FPS_PREF, on ? 'on' : 'off');
+    resetFps(performance.now());
+    fpsStats.lastDraw = 0;
+    if (on) {
+      fpsBox.textContent = 'FPS …';
+      fpsBox.style.color = '#fff';
+    }
+    showFps();
+  };
+  const updateFps = (now: number) => {
+    const s = fpsStats;
+    const elapsed = now - s.since;
+    if (elapsed < 1000) return;
+    const fps = (s.draws * 1000) / elapsed;
+    fpsBox.style.color = fps >= 55 ? '#7dff9a' : fps >= 40 ? '#ffd76a' : '#ff8a8a';
+    fpsBox.textContent = [
+      `FPS    ${fps.toFixed(0)}`,
+      `screen ${((s.refreshes * 1000) / elapsed).toFixed(0)} Hz`,
+      `frame  ${(s.draws ? s.cost / s.draws : 0).toFixed(1)} ms`,
+      `worst  ${s.worst.toFixed(1)} ms`,
+      `late   ${s.late}`,
+    ].join('\n');
+    resetFps(now);
+  };
+  if (opts.fpsButton) {
+    fpsBtn = document.createElement('button');
+    fpsBtn.className = 'spf-fps-btn';
+    fpsBtn.textContent = 'FPS';
+    fpsBtn.setAttribute('aria-label', 'Frame rate');
+    fpsBtn.addEventListener('click', () => {
+      setFps(!fpsOn);
+      canvas.focus();
+    });
+    root.append(fpsBtn);
+  }
+  showFps();
+
   // ---------------------------------------------------------------- scaling
   const fit = () => {
     const r = root.getBoundingClientRect();
@@ -181,12 +249,14 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     let z: number;
     if (game.zoom !== 'fit') z = game.zoom;
     else {
-      // Integer zoom keeps pixels perfectly square; fall back to a smooth fit when it would waste too much space.
-      const whole = Math.floor(exact);
-      z = whole >= 1 && whole / exact >= 0.8 ? whole : exact;
+      // A whole number of physical screen pixels per game pixel keeps pixels square: at a fraction they come out uneven
+      // and shimmer while the view scrolls. Only when that would waste too much of the window does it fit exactly.
+      const dpr = window.devicePixelRatio || 1;
+      const whole = Math.floor(exact * dpr);
+      z = whole >= 1 && whole / (exact * dpr) >= 0.75 ? whole / dpr : exact;
     }
-    canvas.style.width = `${Math.round(game.width * z)}px`;
-    canvas.style.height = `${Math.round(game.height * z)}px`;
+    canvas.style.width = `${game.width * z}px`;
+    canvas.style.height = `${game.height * z}px`;
   };
   const ro = new ResizeObserver(fit);
   ro.observe(root);
@@ -210,6 +280,11 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     }
     if (e.code === 'F3') {
       if (!e.repeat) setMusic(!musicOn);
+      e.preventDefault();
+      return;
+    }
+    if (e.code === 'F4') {
+      if (!e.repeat) setFps(!fpsOn);
       e.preventDefault();
       return;
     }
@@ -333,11 +408,19 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
   let busy = false;
   let paused = false;
   let stepRequests = 0;
+  let drawn = false;
   const frame = async (now: number) => {
     raf = requestAnimationFrame((t) => void frame(t));
+    if (fpsOn) fpsStats.refreshes++;
     if (busy) return;
+    const started = performance.now();
     busy = true;
-    acc += Math.min(0.25, (now - last) / 1000);
+    // The clock of a screen wobbles by a millisecond or two: taken literally, some frames would get no step and others
+    // two, and movement would stutter. A frame close to a whole number of half steps counts as exactly that.
+    let dt = Math.min(0.25, (now - last) / 1000);
+    const halves = Math.round(dt / (STEP / 2));
+    if (halves > 0 && halves <= 8 && Math.abs(dt - (halves * STEP) / 2) < 0.002) dt = (halves * STEP) / 2;
+    acc += dt;
     last = now;
     if (paused) {
       // Only the frames asked for with stepOnce().
@@ -354,6 +437,9 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     }
     if (steps === 5) acc = 0;
     busy = false;
+    // Nothing moved (a screen faster than the game): the picture on it is already right.
+    if (steps === 0 && !paused && drawn) return;
+    drawn = true;
     renderWorld(world, renderer);
     if (showHitboxes) {
       ctx.globalAlpha = 0.8;
@@ -367,6 +453,18 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
         ctx.strokeRect(Math.round((b.x - ox) * z) + 0.5, Math.round((b.y - oy) * z) + 0.5, Math.max(0, b.w * z - 1), Math.max(0, b.h * z - 1));
       }
       ctx.globalAlpha = 1;
+    }
+    if (fpsOn) {
+      const end = performance.now();
+      const cost = end - started;
+      const s = fpsStats;
+      s.draws++;
+      s.cost += cost;
+      if (cost > s.worst) s.worst = cost;
+      // A picture that arrives more than half a step later than expected is a visible hitch.
+      if (s.lastDraw && end - s.lastDraw > STEP * 1500) s.late++;
+      s.lastDraw = end;
+      updateFps(end);
     }
   };
   raf = requestAnimationFrame((t) => void frame(t));
@@ -394,6 +492,12 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     },
     set music(on: boolean) {
       setMusic(on);
+    },
+    get fps() {
+      return fpsOn;
+    },
+    set fps(on: boolean) {
+      setFps(on);
     },
     destroy() {
       cancelAnimationFrame(raf);

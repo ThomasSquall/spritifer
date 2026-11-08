@@ -275,127 +275,207 @@ const roll = (c: number, light: number) => {
 /** Rounds a shading value to discrete steps: light falls on sprites in clean bands, as a pixel artist would paint it. */
 const band = (v: number, bands: number) => (bands > 0 ? Math.round(v * bands) / bands : v);
 
+/** Colors are parsed once: lights ask for theirs on every frame. */
+const rgbCache = new Map<string, RGB | null>();
+function cachedRgb(hex: string): RGB | null {
+  let c = rgbCache.get(hex);
+  if (c === undefined) rgbCache.set(hex, (c = hexToRgb(hex)));
+  return c;
+}
+
+/** A normal channel (0..255) as a number in -1..1. */
+const NORMAL = Float64Array.from({ length: 256 }, (_, i) => i / 127.5 - 1);
+
+/** Per-frame work buffers, reused: allocating them on every frame made the garbage collector stutter. */
+const buffers = { size: 0, lr: new Float32Array(0), lg: new Float32Array(0), lb: new Float32Array(0), gr: new Float32Array(0), gg: new Float32Array(0), gb: new Float32Array(0), glowUsed: false };
+
+function workBuffers(n: number): typeof buffers {
+  const b = buffers;
+  if (b.size !== n) {
+    b.size = n;
+    b.lr = new Float32Array(n);
+    b.lg = new Float32Array(n);
+    b.lb = new Float32Array(n);
+    b.gr = new Float32Array(n);
+    b.gg = new Float32Array(n);
+    b.gb = new Float32Array(n);
+    b.glowUsed = false;
+  }
+  if (b.glowUsed) {
+    b.gr.fill(0);
+    b.gg.fill(0);
+    b.gb.fill(0);
+    b.glowUsed = false;
+  }
+  return b;
+}
+
+/** Everything about a relief setup that depends only on a pixel's normal, computed once for all 65536 of them. */
+interface ReliefTables {
+  key: string;
+  /** Multiplier of the ambient light, by the normal's y. */
+  ambient: Float64Array;
+  /** Sun light added and shade applied, by (y << 8) | x of the normal. */
+  sunAdd: Float64Array;
+  sunShade: Float64Array;
+}
+
+let tables: ReliefTables | null = null;
+
+function reliefTables(relief: ResolvedRelief): ReliefTables {
+  const sun = relief.sun;
+  const key = `${relief.strength}|${relief.bands}|${relief.rim}|${sun ? `${sun.x}|${sun.y}|${sun.z}|${sun.intensity}` : ''}`;
+  if (tables?.key === key) return tables;
+  const { strength, bands, rim } = relief;
+  const ambient = new Float64Array(256);
+  for (let g = 0; g < 256; g++) ambient[g] = strength > 0 ? Math.max(0.3, 1 + band(-NORMAL[g]! * 0.75 * strength, bands)) : 1;
+  const sunAdd = new Float64Array(65536);
+  const sunShade = new Float64Array(65536);
+  if (sun) {
+    const planar = Math.hypot(sun.x, sun.y) || 1;
+    for (let g = 0; g < 256; g++) {
+      for (let r = 0; r < 256; r++) {
+        const nx = NORMAL[r]!;
+        const ny = NORMAL[g]!;
+        const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+        const along = (nx * sun.x + ny * sun.y) / planar;
+        // Only the sideways part counts, so the sprites keep the brightness of the ground around them.
+        const v = band(along * (1.15 - sun.z * 0.5) * strength, bands);
+        const i = (g << 8) | r;
+        let add = v > 0 ? v * sun.intensity * 0.7 : 0;
+        if (rim > 0) add += rim * (1 - nz) * (1 - nz) * Math.max(0, along) * sun.intensity * 0.5;
+        sunAdd[i] = add;
+        sunShade[i] = v < 0 ? Math.min(1, -v * sun.intensity * 1.3) : 0;
+      }
+    }
+  }
+  return (tables = { key, ambient, sunAdd, sunShade });
+}
+
 /**
  * Lights a finished frame in place. Pixels with no normal (the ground, tiles) receive the same light as the plain
  * lighting pass; pixels with a normal are shaped by it. `normals` has the size of the frame, in the sheet encoding.
+ * Runs on every frame for every pixel, so it allocates nothing and reads what it can from tables.
  */
 export function shadeRelief(frame: { width: number; height: number; data: Uint8ClampedArray }, normals: Uint8ClampedArray, relief: ResolvedRelief, ambient: string, lights: readonly ScreenLight[], glow: number): void {
   const { width: W, height: H, data: d } = frame;
   const n = W * H;
-  const amb = hexToRgb(ambient) ?? [255, 255, 255];
-  const lr = new Float32Array(n).fill(amb[0] / 255);
-  const lg = new Float32Array(n).fill(amb[1] / 255);
-  const lb = new Float32Array(n).fill(amb[2] / 255);
+  const amb = cachedRgb(ambient) ?? ([255, 255, 255] as RGB);
+  const buf = workBuffers(n);
+  const { lr, lg, lb, gr, gg, gb } = buf;
+  const { ambient: ambientK, sunAdd, sunShade } = reliefTables(relief);
+  const ar = amb[0] / 255;
+  const ag = amb[1] / 255;
+  const ab = amb[2] / 255;
   // Ambient light comes from the sky: surfaces turned up catch more of it, surfaces turned down less.
-  if (relief.strength > 0) {
-    for (let i = 0; i < n; i++) {
-      if (!normals[i * 4 + 3]) continue;
-      const k = Math.max(0.3, 1 + band(-(normals[i * 4 + 1] / 127.5 - 1) * 0.75 * relief.strength, relief.bands));
-      lr[i] *= k;
-      lg[i] *= k;
-      lb[i] *= k;
-    }
+  for (let i = 0, p = 3; i < n; i++, p += 4) {
+    const k = normals[p] ? ambientK[normals[p - 2]!]! : 1;
+    lr[i] = ar * k;
+    lg[i] = ag * k;
+    lb[i] = ab * k;
   }
-  const gr = new Float32Array(n);
-  const gg = new Float32Array(n);
-  const gb = new Float32Array(n);
   const { strength, bands, rim } = relief;
 
   for (const l of lights) {
-    const c = hexToRgb(l.color);
+    const c = cachedRgb(l.color);
     if (!c || l.radius <= 0) continue;
     const cr = c[0] / 255;
     const cg = c[1] / 255;
     const cb = c[2] / 255;
     const k = Math.min(1, l.intensity);
     const kg = Math.min(1, l.intensity * glow * 0.35);
-    const glowRadius = l.radius * 0.7;
-    const lift = l.radius * relief.lightHeight;
-    const y1 = Math.min(H, Math.ceil(l.y + l.radius));
-    const x1 = Math.min(W, Math.ceil(l.x + l.radius));
-    for (let y = Math.max(0, Math.floor(l.y - l.radius)); y < y1; y++) {
-      for (let x = Math.max(0, Math.floor(l.x - l.radius)); x < x1; x++) {
+    if (kg > 0) buf.glowUsed = true;
+    const radius = l.radius;
+    const r2 = radius * radius;
+    const glowRadius = radius * 0.7;
+    const g2 = glowRadius * glowRadius;
+    const lift = radius * relief.lightHeight;
+    const lift2 = lift * lift;
+    const y1 = Math.min(H, Math.ceil(l.y + radius));
+    const x1 = Math.min(W, Math.ceil(l.x + radius));
+    const x0 = Math.max(0, Math.floor(l.x - radius));
+    for (let y = Math.max(0, Math.floor(l.y - radius)); y < y1; y++) {
+      const dy = l.y - (y + 0.5);
+      const dy2 = dy * dy;
+      if (dy2 >= r2) continue;
+      for (let x = x0; x < x1; x++) {
         const dx = l.x - (x + 0.5);
-        const dy = l.y - (y + 0.5);
-        const dist = Math.hypot(dx, dy);
-        if (dist >= l.radius) continue;
-        const f = (1 - dist / l.radius) ** 2 * k;
+        const d2 = dx * dx + dy2;
+        if (d2 >= r2) continue;
+        const dist = Math.sqrt(d2);
+        const t = 1 - dist / radius;
+        const f = t * t * k;
         const i = y * W + x;
-        let shape = 1;
-        let edge = 0;
-        if (normals[i * 4 + 3]) {
-          const nx = normals[i * 4] / 127.5 - 1;
-          const ny = normals[i * 4 + 1] / 127.5 - 1;
+        const p = i * 4;
+        let v = f;
+        if (normals[p + 3]) {
+          const nx = NORMAL[normals[p]!]!;
+          const ny = NORMAL[normals[p + 1]!]!;
           const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
-          const len = Math.hypot(dx, dy, lift) || 1;
-          const facing = Math.max(0, (nx * dx + ny * dy + nz * lift) / len);
-          const flat = lift / len;
-          shape = Math.max(0.08, Math.min(2.6, band(1 + strength * 2.4 * (facing - flat), bands)));
-          if (rim > 0 && dist > 0.5) edge = rim * (1 - nz) * (1 - nz) * Math.max(0, (nx * dx + ny * dy) / dist);
+          const len = Math.sqrt(d2 + lift2) || 1;
+          const side = nx * dx + ny * dy;
+          const facing = Math.max(0, (side + nz * lift) / len);
+          const shape = Math.max(0.08, Math.min(2.6, band(1 + strength * 2.4 * (facing - lift / len), bands)));
+          let edge = 0;
+          if (rim > 0 && dist > 0.5) edge = rim * (1 - nz) * (1 - nz) * Math.max(0, side / dist);
+          v = f * (shape + edge * 2);
         }
-        const v = f * (shape + edge * 2);
-        lr[i] += cr * v;
-        lg[i] += cg * v;
-        lb[i] += cb * v;
-        if (kg > 0 && dist < glowRadius) {
-          const fg = (1 - dist / glowRadius) ** 2 * kg;
-          gr[i] += c[0] * fg;
-          gg[i] += c[1] * fg;
-          gb[i] += c[2] * fg;
+        lr[i]! += cr * v;
+        lg[i]! += cg * v;
+        lb[i]! += cb * v;
+        if (kg > 0 && d2 < g2) {
+          const tg = 1 - dist / glowRadius;
+          const fg = tg * tg * kg;
+          gr[i]! += c[0] * fg;
+          gg[i]! += c[1] * fg;
+          gb[i]! += c[2] * fg;
         }
       }
     }
   }
 
   const sun = relief.sun;
-  for (let i = 0; i < n; i++) {
-    const p = i * 4;
-    let r = lr[i];
-    let g = lg[i];
-    let b = lb[i];
+  const glowUsed = buf.glowUsed;
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    let r = lr[i]!;
+    let g = lg[i]!;
+    let b = lb[i]!;
     if (normals[p + 3]) {
       if (sun) {
-        const nx = normals[p] / 127.5 - 1;
-        const ny = normals[p + 1] / 127.5 - 1;
-        const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
-        // Only the sideways part counts, so the sprites keep the brightness of the ground around them.
-        const planar0 = Math.hypot(sun.x, sun.y) || 1;
-        const v = band(((nx * sun.x + ny * sun.y) / planar0) * (1.15 - sun.z * 0.5) * strength, bands);
-        if (v > 0) {
-          const add = v * sun.intensity * 0.7;
-          r += sun.color[0] * add;
-          g += sun.color[1] * add;
-          b += sun.color[2] * add;
-        } else if (v < 0) {
-          const t = Math.min(1, -v * sun.intensity * 1.3);
+        const idx = (normals[p + 1]! << 8) | normals[p]!;
+        const t = sunShade[idx]!;
+        if (t > 0) {
           r *= 1 + (sun.shade[0] - 1) * t;
           g *= 1 + (sun.shade[1] - 1) * t;
           b *= 1 + (sun.shade[2] - 1) * t;
         }
-        if (rim > 0) {
-          const planar = Math.hypot(sun.x, sun.y) || 1;
-          const e = rim * (1 - nz) * (1 - nz) * Math.max(0, (nx * sun.x + ny * sun.y) / planar) * sun.intensity * 0.5;
-          r += sun.color[0] * e;
-          g += sun.color[1] * e;
-          b += sun.color[2] * e;
+        const add = sunAdd[idx]!;
+        if (add > 0) {
+          r += sun.color[0] * add;
+          g += sun.color[1] * add;
+          b += sun.color[2] * add;
         }
       }
       // Self-lit pixels (crystals, eyes, lava) never fall below their own color.
       if (normals[p + 2]) {
-        r = Math.max(r, 1.1);
-        g = Math.max(g, 1.1);
-        b = Math.max(b, 1.1);
+        if (r < 1.1) r = 1.1;
+        if (g < 1.1) g = 1.1;
+        if (b < 1.1) b = 1.1;
       }
-      r = Math.min(1.45, r);
-      g = Math.min(1.45, g);
-      b = Math.min(1.45, b);
-    } else {
-      r = Math.min(1, r);
-      g = Math.min(1, g);
-      b = Math.min(1, b);
+      if (r > 1.45) r = 1.45;
+      if (g > 1.45) g = 1.45;
+      if (b > 1.45) b = 1.45;
+      d[p] = Math.min(255, roll(d[p]!, r) + gr[i]!);
+      d[p + 1] = Math.min(255, roll(d[p + 1]!, g) + gg[i]!);
+      d[p + 2] = Math.min(255, roll(d[p + 2]!, b) + gb[i]!);
+      continue;
     }
-    d[p] = Math.min(255, roll(d[p], r) + gr[i]);
-    d[p + 1] = Math.min(255, roll(d[p + 1], g) + gg[i]);
-    d[p + 2] = Math.min(255, roll(d[p + 2], b) + gb[i]);
+    if (r >= 1 && g >= 1 && b >= 1 && !glowUsed) continue; // Full light on flat ground: nothing changes.
+    if (r > 1) r = 1;
+    if (g > 1) g = 1;
+    if (b > 1) b = 1;
+    d[p] = d[p]! * r + gr[i]!;
+    d[p + 1] = d[p + 1]! * g + gg[i]!;
+    d[p + 2] = d[p + 2]! * b + gb[i]!;
   }
 }

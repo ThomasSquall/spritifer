@@ -230,7 +230,12 @@ export function renderGit(root: HTMLElement): () => void {
       }
       lastStatus = s;
     } catch (err) {
-      toast((err as Error).message, 'error');
+      // The page is served from disk, so it can be newer than the server process that answers its API.
+      if (!lastStatus && (err as Error).message === 'Not found') {
+        body.replaceChildren(h('div', { class: 'empty big' },
+          h('h2', {}, 'The Spritifer server needs a restart'),
+          h('p', {}, 'This server started before the Git tab existed. Stop it and start it again with npm start, or restart Claude Code if it started the server through MCP.')));
+      } else toast((err as Error).message, 'error');
     } finally {
       running = false;
       if (again) {

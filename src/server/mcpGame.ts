@@ -42,6 +42,7 @@ import { scriptBaseName } from '../core/game/modules.js';
 import { describeTilesetRules, normalizeTilesetRules } from '../core/game/tilerules.js';
 import { SCRIPT_REFERENCE } from '../core/game/script.js';
 import { DIALOGUE_REFERENCE, buildDialogueBook, parseDialogues } from '../core/game/dialogue.js';
+import { enableGit, gitCommit, gitCommitFiles, gitDiff, gitLog, gitPull, gitPush, gitRestore, gitSetRemote, gitStatus } from './projectGit.js';
 
 type Content = CallToolResult['content'];
 
@@ -73,6 +74,7 @@ Model:
 - Data tables (write_data / update_data / read_data / list_data): the game's database in data/<table>.json — items, weapons with tiers and prices, classes, skills, enemy stats, shop stock, quest rewards. Scripts read db.weapons, db.get('weapons', 'bronze'), db.where('weapons', { tier: 2 }); events, dialogues and activeIf read db("weapons", "bronze", "price"). Prefer tables over constants in scripts for anything a designer would tweak.
 - Things that appear as the game progresses (a town that grows: new buildings, residents, upgraded shops, opened bridges): place them once with active_if (an expression such as "inn_lv >= 1" or "quest_bram == 2"); the engine shows them only while it is true, checking continuously. fn("name", args) in expressions calls a func() from a plain script (synchronous), for conditions too complex for an expression.
 - Projects: list_projects / open_project / create_project switch between games; each project folder has its own sprites, scenes, scripts and game.json.
+- Version control: each game folder is its own git repository, separate from the editor's code (new projects start with one; git_enable adds it to an older project). git_commit after a meaningful step, git_log / git_show / git_diff to look back, git_restore to go back (whole game or one file: uncommitted work is saved first and history is never rewritten), git_push / git_pull with the remote set by git_remote. Commit or push only when the user asks.
 
 Workflow that works:
 1. Draw the art first with the sprite tools: a tileset sprite with tile_width/tile_height (index = position in the grid, row-major), characters with tags idle/run/jump/fall (platformer) or idle_<dir>/walk_<dir> (topdown, as rig_animate makes them), items, enemies. tileset_preview shows each tile's index.
@@ -1368,6 +1370,60 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       }
     }
     return text(`Undid ${steps} change(s): ${done.join(', ')}. ${history.length} more available.`);
+  });
+
+  const sign = { added: 'A', modified: 'M', deleted: 'D', renamed: 'R' } as const;
+  const changeLines = (files: Awaited<ReturnType<typeof gitCommitFiles>>) => files.map((f) => `${sign[f.status]} ${f.oldPath ? `${f.oldPath} -> ` : ''}${f.path}`).join('\n');
+
+  tool('git_status', 'Version control state of the current game: branch, last version, remote and the files changed since the last version.', {}, async () => {
+    const s = await gitStatus(ws.dir);
+    if (!s.installed) return text('Git is not installed on this computer.');
+    if (!s.enabled) return text(s.parentRepo ? `This folder is versioned by the repository at ${s.parentRepo}.` : 'Version control is not enabled for this game. git_enable turns it on.');
+    const remote = s.remote ? `${s.remote} (${s.pushed ? `${s.ahead} to push, ${s.behind} to pull` : 'not pushed yet'})` : 'none';
+    return text(`Branch: ${s.branch ?? '(detached)'}\nVersion: ${s.head?.slice(0, 7) ?? '(none)'}\nRemote: ${remote}\n${s.changes.length ? `Changed files (${s.changes.length}):\n${changeLines(s.changes)}` : 'No changes since the last version.'}`);
+  }, { readOnlyHint: true });
+
+  tool('git_enable', 'Turn on version control for the current game: creates a git repository in its folder, with a .gitignore for exports and generated files, and a first version.', {}, async () => {
+    enableGit(ws.dir);
+    const [c] = await gitLog(ws.dir, { limit: 1 });
+    return text(`Version control is on for ${ws.dir}. Current version: ${c?.short ?? '(none)'}.`);
+  });
+
+  tool('git_commit', 'Save every current change of the game as a new version with a message.', { message: z.string().describe('What changed in this version') }, async (a) => {
+    const sha = await gitCommit(ws.dir, a.message);
+    return text(`Saved version ${sha.slice(0, 7)}.`);
+  });
+
+  tool('git_log', 'List the versions of the game, newest first.', { limit: z.number().int().min(1).max(200).optional(), skip: z.number().int().min(0).optional() }, async (a) => {
+    const log = await gitLog(ws.dir, a);
+    return text(log.length ? log.map((c) => `${c.short}  ${new Date(c.time).toISOString().slice(0, 16).replace('T', ' ')}  ${c.subject}`).join('\n') : 'No versions yet.');
+  }, { readOnlyHint: true });
+
+  tool('git_show', 'List the files a version changed.', { sha: z.string().describe('Version id from git_log') }, async (a) => text(changeLines(await gitCommitFiles(ws.dir, a.sha)) || 'No files changed.'), { readOnlyHint: true });
+
+  tool('git_diff', 'Text diff of one file (scene, script, dialogue, game.json...), in a version or, without sha, since the last version. Sprite pixels are encoded and do not diff usefully.', { path: z.string().describe('Path relative to the game folder'), sha: z.string().optional() }, async (a) => {
+    const d = await gitDiff(ws.dir, a.path, a.sha);
+    return text(d.text ? d.text + (d.truncated ? '\n[diff truncated]' : '') : 'No differences.');
+  }, { readOnlyHint: true });
+
+  tool('git_restore', 'Bring the whole game, or one file with path, back to a version. Uncommitted work is first saved as its own version and the restore is a new version, so nothing is lost.', { sha: z.string().describe('Version id from git_log'), path: z.string().optional().describe('Restore only this file, relative to the game folder') }, async (a) => {
+    const r = await gitRestore(ws.dir, a.sha, a.path);
+    return text(`${r.commit ? `Restored as version ${r.commit.slice(0, 7)}.` : 'The files already match that version.'}${r.snapshot ? ` Uncommitted work saved in ${r.snapshot.slice(0, 7)}.` : ''}`);
+  }, { destructiveHint: true });
+
+  tool('git_remote', 'Set the address (https://, ssh:// or git@host:path) of the remote repository of the game. An empty url disconnects it.', { url: z.string() }, async (a) => {
+    await gitSetRemote(ws.dir, a.url);
+    return text(a.url.trim() ? `Remote set to ${a.url.trim()}.` : 'Remote disconnected.');
+  });
+
+  tool('git_push', 'Upload the versions of the game to its remote repository.', {}, async () => {
+    await gitPush(ws.dir);
+    return text('Pushed.');
+  });
+
+  tool('git_pull', 'Download new versions from the remote repository. Fast-forward only: fails rather than merging if the histories diverged.', {}, async () => {
+    await gitPull(ws.dir);
+    return text('Up to date with the remote.');
   });
 
   return {

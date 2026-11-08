@@ -17,6 +17,7 @@ import { pushScriptsToPlay } from './play.js';
 import { renderDialogues } from './dialoguesView.js';
 import { renderData } from './dataView.js';
 import { renderVfx } from './vfxView.js';
+import { renderGit } from './gitView.js';
 import { currentProjectId } from './api.js';
 
 const root = document.getElementById('app')!;
@@ -26,7 +27,7 @@ let current: { editor: Editor; view: ReturnType<typeof mountEditor> } | null = n
 let sceneEd: SceneEditorHandle | null = null;
 /** Re-renders the current list page after remote changes. */
 let refreshPage: (() => void) | null = null;
-let page: 'sprites' | 'objects' | 'scenes' | 'scripts' | 'dialogues' | 'data' | 'vfx' | 'game' | 'sprite' | 'scene' | 'projects' = 'sprites';
+let page: 'sprites' | 'objects' | 'scenes' | 'scripts' | 'dialogues' | 'data' | 'vfx' | 'game' | 'git' | 'sprite' | 'scene' | 'projects' = 'sprites';
 let scriptsPage: { refresh: () => void; destroy: () => void } | null = null;
 
 /** The previous in-app page, so "back" from the sprite editor returns where the user came from. */
@@ -91,6 +92,12 @@ async function route(): Promise<void> {
     toast(`Could not load the game project: ${(err as Error).message}`, 'error');
   }
 
+  if (hash === '#/git') {
+    page = 'git';
+    document.title = 'Git · Spritifer';
+    refreshPage = renderGit(root);
+    return;
+  }
   if (hash === '#/projects') {
     page = 'projects';
     document.title = 'Projects · Spritifer';
@@ -190,6 +197,7 @@ async function onRemoteChange(e: ChangeEvent): Promise<void> {
     if (e.updatedBy === 'claude') toast(`Claude is editing project "${e.project}"`, 'claude');
     return;
   }
+  if (page === 'git') refreshSoon();
   if (kind === 'data') {
     await state.remote('data', e.rev);
     if (page === 'data' && !fromSelf) refreshSoon();

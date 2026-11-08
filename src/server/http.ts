@@ -21,6 +21,7 @@ import { SCRIPT_REFERENCE } from '../core/game/script.js';
 import { DIALOGUE_REFERENCE, buildDialogueBook } from '../core/game/dialogue.js';
 import { DIALOGUE_TEMPLATE } from './scripts.js';
 import { VFX_TEMPLATES, normalizeVfx } from '../core/game/vfxGraph.js';
+import { enableGit, gitCommit, gitCommitFiles, gitDiff, gitFileAt, gitLog, gitPull, gitPush, gitRestore, gitSetRemote, gitStatus } from './projectGit.js';
 
 const WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
 
@@ -188,16 +189,8 @@ async function handleProjects(registry: ProjectRegistry, req: http.IncomingMessa
 async function handle(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[], url: URL, method: string): Promise<void> {
 
   if (parts[1] === 'pixellab') {
-    // This local-only API can spend the account's credits. Reject remote hosts and browser cross-origin requests.
-    const loopback = /^(localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?$/i;
-    const peer = req.socket.remoteAddress;
-    const origin = req.headers.origin;
-    if ((peer !== '127.0.0.1' && peer !== '::1' && peer !== '::ffff:127.0.0.1') ||
-        !loopback.test(req.headers.host ?? '') ||
-        (origin && origin !== `http://${req.headers.host}`) ||
-        (req.headers['sec-fetch-site'] && !['none', 'same-origin'].includes(req.headers['sec-fetch-site']))) {
-      throw new HttpError(403, 'PixelLab is available only from the local Spritifer editor');
-    }
+    // This local-only API can spend the account's credits.
+    assertLocalEditor(req, 'PixelLab');
     const provider = new PixelLabProvider();
     const operation = parts[2];
     if (method === 'GET') {
@@ -232,6 +225,8 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
     }
     throw new HttpError(404, 'PixelLab operation not found');
   }
+
+  if (parts[1] === 'git') return handleGit(ws, req, res, parts.slice(2), url, method);
 
   // /api/workspace
   if (parts[1] === 'workspace' && method === 'GET') {
@@ -723,6 +718,65 @@ async function handleScenes(ws: Workspace, req: http.IncomingMessage, res: http.
   if (sub === 'preview.png' && method === 'GET') {
     const { png } = renderScenePreview(loadGameBundle(ws), name, { scale: num(url.searchParams.get('scale')), grid: url.searchParams.has('grid') });
     return sendBuffer(res, png, 'image/png');
+  }
+  throw new HttpError(404, 'Not found');
+}
+
+/** Rejects remote hosts and browser cross-origin requests, for APIs that only the local editor may reach. */
+function assertLocalEditor(req: http.IncomingMessage, feature: string): void {
+  const loopback = /^(localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?$/i;
+  const peer = req.socket.remoteAddress;
+  const origin = req.headers.origin;
+  if ((peer !== '127.0.0.1' && peer !== '::1' && peer !== '::ffff:127.0.0.1') ||
+      !loopback.test(req.headers.host ?? '') ||
+      (origin && origin !== `http://${req.headers.host}`) ||
+      (req.headers['sec-fetch-site'] && !['none', 'same-origin'].includes(req.headers['sec-fetch-site']))) {
+    throw new HttpError(403, `${feature} is available only from the local Spritifer editor`);
+  }
+}
+
+/** /api/git: version control of the project folder. It can rewrite files and push them elsewhere, so it's local-only. */
+async function handleGit(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[], url: URL, method: string): Promise<void> {
+  assertLocalEditor(req, 'Version control');
+  const dir = ws.dir;
+  const [op, arg] = parts;
+  const q = url.searchParams;
+  if (method === 'GET') {
+    if (!op) return sendJson(res, 200, await gitStatus(dir));
+    if (op === 'log') return sendJson(res, 200, await gitLog(dir, { limit: num(q.get('limit')), skip: num(q.get('skip')) }));
+    if (op === 'commits' && arg) return sendJson(res, 200, await gitCommitFiles(dir, arg));
+    if (op === 'diff') return sendJson(res, 200, await gitDiff(dir, q.get('path') ?? '', q.get('sha') ?? undefined));
+    if (op === 'sprite.png') {
+      const file = q.get('path') ?? '';
+      if (!file.endsWith('.sprite.json')) throw new HttpError(400, 'Not a sprite file');
+      const ref = q.get('ref') ?? 'HEAD';
+      if (ref === 'WORKTREE' && (file.includes('/') || file.includes('\\'))) throw new HttpError(400, 'Not a project sprite');
+      const json = ref === 'WORKTREE' ? fs.readFileSync(path.join(dir, file), 'utf8') : await gitFileAt(dir, ref, file);
+      const sprite = deserializeSprite(JSON.parse(json) as SpriteFile);
+      return sendBuffer(res, previewPng(sprite, { frames: [0], scale: num(q.get('scale')) ?? 4 }), 'image/png');
+    }
+  }
+  if (method === 'POST') {
+    if (op === 'init') {
+      enableGit(dir);
+      return sendJson(res, 200, await gitStatus(dir));
+    }
+    const body = (await readJson(req)) as { message?: string; sha?: string; path?: string };
+    if (op === 'commit') return sendJson(res, 201, { sha: await gitCommit(dir, body.message ?? '') });
+    if (op === 'restore') return sendJson(res, 200, await gitRestore(dir, body.sha ?? '', body.path));
+    if (op === 'push') {
+      await gitPush(dir);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (op === 'pull') {
+      await gitPull(dir);
+      return sendJson(res, 200, { ok: true });
+    }
+  }
+  if (method === 'PUT' && op === 'remote') {
+    const body = (await readJson(req)) as { url?: string };
+    await gitSetRemote(dir, body.url ?? '');
+    return sendJson(res, 200, { ok: true });
   }
   throw new HttpError(404, 'Not found');
 }

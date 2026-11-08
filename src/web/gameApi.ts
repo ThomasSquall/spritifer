@@ -58,6 +58,36 @@ export interface SceneSummary {
   rev: string;
 }
 
+export type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed';
+export interface GitChange { path: string; status: GitChangeStatus; oldPath?: string }
+export interface GitCommit { sha: string; short: string; author: string; time: number; subject: string }
+export interface GitStatus {
+  installed: boolean;
+  enabled: boolean;
+  parentRepo: string | null;
+  branch: string | null;
+  head: string | null;
+  changes: GitChange[];
+  remote: string | null;
+  pushed: boolean;
+  ahead: number;
+  behind: number;
+}
+
+export const gitApi = {
+  status: () => req<GitStatus>('GET', `${apiBase()}/git`),
+  enable: () => req<GitStatus>('POST', `${apiBase()}/git/init`),
+  commit: (message: string) => req<{ sha: string }>('POST', `${apiBase()}/git/commit`, { message }),
+  log: (limit: number) => req<GitCommit[]>('GET', `${apiBase()}/git/log?limit=${limit}`),
+  files: (sha: string) => req<GitChange[]>('GET', `${apiBase()}/git/commits/${enc(sha)}`),
+  diff: (path: string, sha?: string) => req<{ text: string; truncated: boolean }>('GET', `${apiBase()}/git/diff?path=${enc(path)}${sha ? `&sha=${enc(sha)}` : ''}`),
+  restore: (sha: string, path?: string) => req<{ commit: string | null; snapshot: string | null }>('POST', `${apiBase()}/git/restore`, { sha, path }),
+  setRemote: (url: string) => req<{ ok: true }>('PUT', `${apiBase()}/git/remote`, { url }),
+  push: () => req<{ ok: true }>('POST', `${apiBase()}/git/push`, {}),
+  pull: () => req<{ ok: true }>('POST', `${apiBase()}/git/pull`, {}),
+  spriteUrl: (ref: string, path: string) => `${apiBase()}/git/sprite.png?ref=${enc(ref)}&path=${enc(path)}&t=${Date.now()}`,
+};
+
 export const gameApi = {
   getGame: () => req<GameProject & { saved: boolean }>('GET', `${apiBase()}/game`),
   saveGame: (g: GameProject) => req<{ rev: string }>('PUT', `${apiBase()}/game`, g),

@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeGame } from '../core/game/types.js';
+import { enableGit } from './projectGit.js';
 import { Workspace } from './store.js';
 
 const REGISTRY_FILE = '.spritifer-projects.json';
@@ -206,6 +207,11 @@ export class ProjectRegistry {
     const game = ws.loadGame();
     game.title = title;
     ws.saveGame(normalizeGame(game), 'editor');
+    try {
+      enableGit(dir);
+    } catch {
+      // A game can be made without git installed; the Git tab says what's missing.
+    }
     return this.info(dir);
   }
 }

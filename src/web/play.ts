@@ -13,7 +13,7 @@ export function registerFlusher(fn: () => Promise<void>): () => void {
   return () => flushers.delete(fn);
 }
 
-async function flushAll(): Promise<void> {
+export async function flushAll(): Promise<void> {
   await state.flush();
   await Promise.all([...flushers].map((f) => f().catch(() => {})));
 }

@@ -282,6 +282,12 @@ Chiedi per esempio:
 
 Claude disegna gli asset, crea gli oggetti con `set_object`, compone i livelli con `create_scene`, `paint_tiles` e `place_instances`, scrive gli eventi, poi verifica con `validate_game`, `preview_scene` e `playtest` (che esegue il gioco senza browser con input scriptati e restituisce log, stato finale e screenshot) prima di `export_game`.
 
+### Versionare i giochi con git
+
+Ogni gioco è un repository git a sé, dentro la sua cartella, separato dal codice dell'editor. I progetti nuovi nascono già con git; per quelli esistenti basta **Enable version control** nella scheda **Git**. Da lì salvi una versione con un messaggio, sfogli la cronologia, confronti gli sprite prima e dopo e colleghi un repository remoto per Push e Pull.
+
+**Restore** riporta l'intero gioco o un singolo file a una versione: il lavoro non salvato finisce prima in una versione automatica e il ripristino è a sua volta una nuova versione, quindi la cronologia non si perde. Restano fuori da git `export/`, `.versions/` e i file generati (vedi il `.gitignore` del gioco). Per Claude ci sono gli stessi comandi: `git_status`, `git_enable`, `git_commit`, `git_log`, `git_show`, `git_diff`, `git_restore`, `git_remote`, `git_push`, `git_pull`.
+
 ## Far disegnare Claude Code
 
 ### In questo progetto

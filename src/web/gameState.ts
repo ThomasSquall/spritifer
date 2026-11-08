@@ -4,7 +4,7 @@ import type { GameProject, ObjectType } from '../core/game/types.js';
 import type { ComponentInfo, ScriptInfo } from '../core/game/script.js';
 import { type ResolvedTypes, resolveObjectTypes } from '../core/game/variants.js';
 import { api, type SpriteSummary } from './api.js';
-import { type LoadedAsset, type SceneSummary, gameApi, loadAsset } from './gameApi.js';
+import { type LoadedAsset, type SceneSummary, type TableSummary, gameApi, loadAsset } from './gameApi.js';
 import { toast } from './dom.js';
 
 type Listener = () => void;
@@ -18,6 +18,8 @@ class GameState {
   audio: string[] = [];
   /** What the project scripts register (for dropdowns) and their loading errors. */
   scriptInfo: ScriptInfo = { behaviors: [], functions: [], errors: [], components: [] };
+  /** Data tables (Data tab): names, columns, row counts. */
+  tables: TableSummary[] = [];
   /** Dialogue names and parse errors (Dialogues tab). */
   dialogueInfo: { nodes: string[]; errors: { file: string; line: number; message: string }[] } = { nodes: [], errors: [] };
   private listeners = new Set<Listener>();
@@ -26,14 +28,16 @@ class GameState {
   private dirty = false;
 
   async load(): Promise<void> {
-    const [game, sprites, scenes, scriptInfo, dialogueInfo, audio] = await Promise.all([
+    const [game, sprites, scenes, scriptInfo, dialogueInfo, audio, tables] = await Promise.all([
       gameApi.getGame(),
       api.list(),
       gameApi.listScenes(),
       gameApi.scriptInfo().catch(() => this.scriptInfo),
       gameApi.dialogueInfo().catch(() => this.dialogueInfo),
       gameApi.listAudio().catch(() => []),
+      gameApi.listTables().catch(() => []),
     ]);
+    this.tables = tables;
     this.audio = audio.map((a) => a.name);
     this.scriptInfo = scriptInfo;
     this.dialogueInfo = dialogueInfo;
@@ -120,7 +124,12 @@ class GameState {
   }
 
   /** Handles live notifications from the server (Claude editing through MCP, other tabs). */
-  async remote(kind: 'sprite' | 'scene' | 'game' | 'script' | 'dialogue', rev: string | null): Promise<boolean> {
+  async remote(kind: 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data', rev: string | null): Promise<boolean> {
+    if (kind === 'data') {
+      this.tables = await gameApi.listTables();
+      this.emit();
+      return true;
+    }
     if (kind === 'dialogue') {
       this.dialogueInfo = await gameApi.dialogueInfo();
       this.emit();

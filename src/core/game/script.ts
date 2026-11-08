@@ -1411,6 +1411,35 @@ export class ScriptHost {
 
   // ------------------------------------------------------------------ API
 
+  /**
+   * db: the data tables. db.weapons / db('weapons') = rows, db('weapons', 'bronze') or db.get('weapons', 'bronze') = one row,
+   * db.where('weapons', { tier: 2 }) or a predicate, db.tables = names. Rows are read-only.
+   */
+  private dbApi(): unknown {
+    const w = this.world;
+    const rows = (t: string) => w.table(String(t)).rows;
+    const fn = (t: string, id?: string) => (id === undefined ? rows(t) : (w.row(String(t), String(id)) ?? null));
+    const helpers: Record<string, unknown> = {
+      get: (t: string, id: string) => w.row(String(t), String(id)) ?? null,
+      where: (t: string, test: Record<string, unknown> | ((row: Record<string, unknown>) => boolean)) =>
+        rows(t).filter((r) => (typeof test === 'function' ? test(r) : Object.entries(test ?? {}).every(([k, v]) => r[k] === v || (Array.isArray(r[k]) && (r[k] as unknown[]).includes(v))))),
+      columns: (t: string) => w.table(String(t)).columns.map((c) => ({ ...c })),
+      get tables() {
+        return Object.keys(w.data);
+      },
+    };
+    return new Proxy(fn, {
+      get: (target, prop, recv) => {
+        if (typeof prop === 'string') {
+          if (prop in helpers) return helpers[prop];
+          if (prop in w.data) return rows(prop);
+        }
+        return Reflect.get(target, prop, recv);
+      },
+      has: (target, prop) => (typeof prop === 'string' && (prop in w.data || prop in helpers)) || Reflect.has(target, prop),
+    });
+  }
+
   private api(): Record<string, unknown> {
     const w = this.world;
     const host = this;
@@ -1503,6 +1532,9 @@ export class ScriptHost {
         /** Screen pixel → world position (mouse, taps). */
         toWorld: (sx: number, sy: number) => ({ x: Number(sx) / w.zoom + w.camera.x, y: Number(sy) / w.zoom + w.camera.y }),
       },
+      // data tables (read-only)
+      db: this.dbApi(),
+      refreshInstances: () => w.refreshConditional(),
       // instances
       find: (name?: string) => all(name).map((a) => this.handle(a)),
       findOne: (name: string) => this.handle(all(name)[0]),
@@ -1529,11 +1561,8 @@ export class ScriptHost {
       particles: (x: number, y: number, preset: unknown = 'sparks', overrides: Record<string, unknown> = {}) => w.particles.burst(Number(x), Number(y), preset as string, (overrides ?? {}) as object),
       findPath: (x1: number, y1: number, x2: number, y2: number, opts: { diagonal?: boolean; partial?: boolean } = {}) => w.findPath(Number(x1), Number(y1), Number(x2), Number(y2), opts ?? {}),
       player: () => this.handle(w.actors.find((a) => !a.destroyed && a.behaviors.some((b) => (b.type === 'platformer' || b.type === 'topdown') && b.controls !== false))),
-      spawn: (name: string, x: number, y: number, props: Record<string, Value> = {}) => {
-        const a = w.spawn(name, x, y);
-        if (a) Object.assign(a.vars, props);
-        return this.handle(a);
-      },
+      spawn: (name: string, x: number, y: number, props: Record<string, Value> = {}, opts: { sprite?: string; name?: string; animation?: string } = {}) =>
+        this.handle(w.spawn(String(name), Number(x), Number(y), 0, 0, { props: props ?? {}, sprite: opts?.sprite ? String(opts.sprite) : undefined, name: opts?.name ? String(opts.name) : undefined, animation: opts?.animation ? String(opts.animation) : undefined })),
       // world
       goto: (scene: string, opts: { fade?: number; color?: string } = {}) => w.gotoScene(String(scene), opts ?? {}),
       restart: (opts: { fade?: number; color?: string } = {}) => w.restartScene(opts ?? {}),

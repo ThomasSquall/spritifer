@@ -119,6 +119,7 @@ export function completionContext(path: string, scripts: string[]): CompleteCont
     variables: g?.variables ?? {},
     properties: [...properties],
     tags: [...new Set((g?.objects ?? []).flatMap((o) => o.tags ?? []))].sort(),
+    tables: Object.fromEntries(state.tables.map((t) => [t.name, t.columns])),
   };
 }
 

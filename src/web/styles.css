@@ -586,3 +586,24 @@ a.script-ref-link { color: #73eff7; font-family: var(--mono); }
 .variant-link { font-family: var(--mono); }
 .events-in { width: 90px; height: 24px !important; font: 11px var(--mono); }
 .frame-ev { position: absolute; top: 1px; right: 3px; font-size: 9px; color: var(--accent); }
+
+/* ---------------------------------------------------------------- Data tables */
+.data-main { display: flex; flex-direction: column; min-height: 0; }
+.data-info { display: flex; align-items: center; gap: 10px; padding: 6px 14px; border-bottom: 1px solid var(--line); }
+.data-info .data-desc { flex: 1; }
+.data-grid-wrap { flex: 1; overflow: auto; padding: 8px 14px 40px; }
+.data-grid { border-collapse: collapse; font-size: 12px; }
+.data-grid th { position: sticky; top: 0; background: var(--panel); z-index: 1; text-align: left; padding: 2px 4px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.data-grid td { padding: 1px 2px; border-bottom: 1px solid #23262e; vertical-align: middle; }
+.data-grid tr:hover td { background: #1a1d24; }
+.data-colhead { font-weight: 600; }
+.data-cell { height: 24px; width: 110px; font-size: 12px; }
+.data-cell.num { width: 64px; }
+.data-cell.long { width: 240px; }
+.data-cell.id { width: 120px; font-family: ui-monospace, monospace; color: var(--accent); }
+.data-rownum { width: 26px; text-align: right; }
+.data-actions { white-space: nowrap; }
+.data-empty { padding: 12px 4px; }
+.tpl-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.inspector-activeif input { font-family: ui-monospace, monospace; }
+.hier-cond { margin-left: 4px; padding: 0 4px; border-radius: 3px; background: #3b5dc9; color: #fff; font-size: 10px; }

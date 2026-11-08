@@ -190,7 +190,9 @@ export const GLOBALS: ApiEntry[] = [
   fn('find', 'find(object?: ObjectName): Instance[]', 'All instances (of an object type).', "find('$0')"),
   fn('findOne', 'findOne(object: ObjectName): Instance | undefined', 'First instance of an object type.', "findOne('$0')"),
   fn('player', 'player(): Instance | undefined', 'The player (instance with platformer/topdown controls).'),
-  fn('spawn', 'spawn(object: ObjectName, x: number, y: number, props?: Record<string, any>): Instance | undefined', 'Creates an instance.', "spawn('$0')"),
+  fn('spawn', 'spawn(object: ObjectName, x: number, y: number, props?: Record<string, any>, opts?: { sprite?: string; name?: string; animation?: string }): Instance | undefined', 'Creates an instance (props are set before its components wake up). opts: another sprite (one "npc" type, many looks), a name (dialogue speaker), a start animation.', "spawn('$0')"),
+  ns('db', 'db: Db', 'Data tables (Data tab, data/<table>.json), read-only: db.weapons (rows), db.get("weapons", "bronze") (a row or null), db.where("weapons", { tier: 2 }) or db.where("weapons", r => r.price < 100), db.tables (names), db.columns("weapons").'),
+  fn('refreshInstances', 'refreshInstances(): void', 'Re-checks the activeIf of placed instances right now (they are also checked a few times per second): call it after changing the variables a building or NPC depends on.'),
   fn('findWithTag', 'findWithTag(tag: TagName): Instance[]', 'Every instance with a group tag.', "findWithTag('$0')"),
   fn('findNearest', 'findNearest(from: Instance | number, y?: number | QueryFilter, filter?: QueryFilter & { maxDistance?: number }): Instance | null', 'Nearest instance to an instance (itself excluded) or to a point: findNearest(this.self, { tag: "enemy", maxDistance: 80 }).'),
   fn('overlapBox', 'overlapBox(x: number, y: number, w: number, h: number, filter?: QueryFilter): Instance[]', 'Instances whose hitbox overlaps a rectangle (world pixels): area attacks, sensors.'),
@@ -352,6 +354,12 @@ TAGS, QUERIES, SAVES
 - overlapBox(x, y, w, h, filter), overlapCircle(x, y, r, filter), findNearest(self, { tag, maxDistance }), isSolidAt(x, y)
 - saveGame('slot1'), loadGame('slot1'), hasSave('slot1'), listSaves(), deleteSave('slot1') — also event actions "Save game" / "Load game" and hasSave("slot") in expressions
 
+DATA TABLES AND CONDITIONAL INSTANCES
+- Data tables (Data tab, MCP write_data): db.weapons → rows, db.get('weapons', 'bronze') → row | null, db.where('weapons', { tier: 2 }), db.where('items', r => r.price <= vars.gold), db.tables
+  Rows are read-only objects with an "id" and typed columns (number, text, bool, list → string[], ref → id of another table's row).
+  Expressions and dialogues: db("weapons", "bronze", "price"); fn("name", args) calls func(name, (self, other, ...args) => value) synchronously.
+- Placed instances with activeIf ("inn_lv >= 1") exist only while it is true (checked continuously); refreshInstances() re-checks now.
+
 MESSAGES, TWEENS, TRANSITIONS
 - emit('playerHit', { damage: 2 }) → this.on('playerHit', (data) => ...) in any component (auto-removed), onMessage(name, data), events "Message received"
 - await this.tween(this.self, { y: this.self.y - 12, opacity: 0 }, 0.4, 'outQuad')   easings: linear, inQuad, outQuad, inOutQuad, inCubic, outCubic, inOutCubic, inOutSine, outBack, outElastic, outBounce; { ease, delay }
@@ -396,11 +404,41 @@ export interface ProjectTypeInfo {
   tags?: string[];
   /** Audio files (audio/). */
   audio?: string[];
+  /** Data tables: name → columns (for typed rows). */
+  tables?: Record<string, { description?: string; columns: { name: string; type: string; help?: string }[] }>;
 }
 
 const tsType = (v: unknown) => (typeof v === 'number' ? 'number' : typeof v === 'boolean' ? 'boolean' : 'string');
 const union = (names: string[]) => (names.length ? names.map((n) => JSON.stringify(n)).join(' | ') + ' | (string & {})' : 'string');
 const members = (entries: ApiEntry[]) => entries.map((e) => `  /** ${e.doc.replace(/\*\//g, '*\\/')} */\n  ${e.ts};`).join('\n');
+
+const cellTs = (t: string) => (t === 'number' ? 'number' : t === 'bool' ? 'boolean' : t === 'list' ? 'readonly string[]' : 'string');
+const typeName = (n: string) => n.replace(/(^|_)([a-z0-9])/g, (_, __, c: string) => c.toUpperCase()) + 'Row';
+
+/** Typed rows for every data table + the Db interface (db.weapons → WeaponsRow[]). */
+function dbTypes(tables: NonNullable<ProjectTypeInfo['tables']>): string {
+  const rows = Object.entries(tables).map(([name, t]) => `/** ${(t.description ?? 'Row of data/' + name + '.json').replace(/\*\//g, '')} */\ninterface ${typeName(name)} {\n${t.columns.map((c) => `${c.help ? `  /** ${c.help.replace(/\*\//g, '')} */\n` : ''}  readonly ${c.name}: ${cellTs(c.type)};`).join('\n')}\n}`);
+  const names = Object.keys(tables);
+  return `${rows.join('\n\n')}
+type TableName = ${union(names)};
+interface DbTables {
+${names.map((n) => `  ${n}: ${typeName(n)};`).join('\n')}
+}
+type RowOf<T> = T extends keyof DbTables ? DbTables[T] : Record<string, any> & { readonly id: string };
+interface Db {
+  <T extends TableName>(table: T): readonly RowOf<T>[];
+  <T extends TableName>(table: T, id: string): RowOf<T> | null;
+  /** One row by id (null when missing). */
+  get<T extends TableName>(table: T, id: string): RowOf<T> | null;
+  /** Rows matching every field of the object (list columns: contains), or a test function. */
+  where<T extends TableName>(table: T, test: Partial<Record<keyof RowOf<T>, any>> | ((row: RowOf<T>) => boolean)): RowOf<T>[];
+  /** Column definitions of a table. */
+  columns(table: TableName): { name: string; type: string; table?: string; help?: string }[];
+  /** Names of the tables. */
+  readonly tables: string[];
+${names.map((n) => `  readonly ${n}: readonly ${typeName(n)}[];`).join('\n')}
+}`;
+}
 
 /** spritifer.d.ts: globals, Behaviour, Instance, Ui and the project's names (components, objects, scenes...). */
 export function buildTypeDefinitions(p: ProjectTypeInfo, relativeToScripts = './'): string {
@@ -425,6 +463,8 @@ type KeyName = 'left' | 'right' | 'up' | 'down' | 'action' | 'action2' | 'space'
 interface ComponentMap {
 ${comps}
 }
+
+${dbTypes(p.tables ?? {})}
 type ComponentName = keyof ComponentMap | (string & {});
 
 interface GameVars {

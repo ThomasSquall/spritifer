@@ -1,6 +1,6 @@
 /** Client for the game project, scenes and sprite assets used by the game editors. */
 
-import type { GameProject, Scene, SpriteAsset } from '../core/game/types.js';
+import type { DataTable, GameProject, Scene, SpriteAsset } from '../core/game/types.js';
 import type { Problem } from '../core/game/catalog.js';
 import type { ScriptInfo } from '../core/game/script.js';
 import { apiBase } from './api.js';
@@ -17,6 +17,15 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
 }
 
 const enc = encodeURIComponent;
+
+export interface TableSummary {
+  name: string;
+  rows: number;
+  columns: string[];
+  description?: string;
+  updatedAt: number;
+  rev: string;
+}
 
 export interface ProjectInfo {
   id: string;
@@ -85,6 +94,12 @@ export const gameApi = {
   createDialogue: (name: string) => req<{ name: string }>('POST', `${apiBase()}/dialogues`, { name }),
   deleteDialogue: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/dialogues/${enc(name)}`),
   renameDialogue: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/dialogues/${enc(name)}/rename`, { to }),
+  listTables: () => req<TableSummary[]>('GET', `${apiBase()}/data`),
+  getTable: (name: string) => req<DataTable>('GET', `${apiBase()}/data/${enc(name)}`),
+  saveTable: (t: DataTable) => req<{ rev: string; table: DataTable }>('PUT', `${apiBase()}/data/${enc(t.name)}`, t),
+  createTable: (name: string, columns?: DataTable['columns']) => req<DataTable>('POST', `${apiBase()}/data`, { name, ...(columns ? { columns } : {}) }),
+  deleteTable: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/data/${enc(name)}`),
+  renameTable: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/data/${enc(name)}/rename`, { to }),
   dialogueInfo: () => req<{ nodes: string[]; errors: { file: string; line: number; message: string }[] }>('GET', `${apiBase()}/dialogues/_info`),
   projects: () => req<ProjectsResponse>('GET', '/api/projects'),
   createProject: (name: string, template: string) => req<ProjectInfo>('POST', '/api/projects', { name, template }),

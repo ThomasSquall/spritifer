@@ -4,9 +4,12 @@ import fs from 'node:fs';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { BEHAVIOR_MAP, SOUNDS, catalogReference, describeEvent, describeStep } from '../core/game/catalog.js';
+import { checkExpr } from '../core/game/expr.js';
 import { type PlaytestInput, runPlaytest } from '../core/game/engine.js';
 import { renameComponentRefs, renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
 import {
+  type DataRow,
+  type DataTable,
   type GameEvent,
   type GameProject,
   type ObjectType,
@@ -20,8 +23,12 @@ import {
   normalizeGame,
   normalizeTags,
   normalizeActions,
+  normalizeAtmosphere,
+  normalizeLight,
+  MOTE_PRESETS,
   normalizeObject,
   normalizeScene,
+  normalizeTable,
   resizeScene,
 } from '../core/game/types.js';
 import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePreview, renderViewport } from './game.js';
@@ -60,6 +67,8 @@ Model:
 - RPGs: top-down player (topdown + camera, sprite tags walk_<dir>/idle_<dir>), scene y_sort and persistent (towns remember chests/positions after battles), solid tile layers for walls, NPCs and chests via dialogues (~ self.opened = true), an intro via a scene event (start → dialogue), battles in a scene driven by a scene component (class Battle extends Behaviour { async start() {...} } attached to the battle scene).
 - Juice and polish: particles(x, y, "dust"|"sparks"|"explosion"...) or the event action Particles (and the ParticleEmitter component), animation events on frames (set_frame_events: "hit" on the swing frame → onAnimationEvent / trigger "Animation event"), music per scene (import_audio, update_scene music, music("name")), camera zoom/dead zone/look ahead, tweens, fades.
 - Menus and HUD: inside onDraw use ui.menu / ui.button / ui.window (keyboard, gamepad and mouse ready) and pause(true) for pause menus and inventories. Input actions (set_game actions: { attack: ["x", "pad:b"] }) give controls names usable everywhere like keys.
+- Data tables (write_data / update_data / read_data / list_data): the game's database in data/<table>.json — items, weapons with tiers and prices, classes, skills, enemy stats, shop stock, quest rewards. Scripts read db.weapons, db.get('weapons', 'bronze'), db.where('weapons', { tier: 2 }); events, dialogues and activeIf read db("weapons", "bronze", "price"). Prefer tables over constants in scripts for anything a designer would tweak.
+- Things that appear as the game progresses (a town that grows: new buildings, residents, upgraded shops, opened bridges): place them once with active_if (an expression such as "inn_lv >= 1" or "quest_bram == 2"); the engine shows them only while it is true, checking continuously. fn("name", args) in expressions calls a func() from a plain script (synchronous), for conditions too complex for an expression.
 - Projects: list_projects / open_project / create_project switch between games; each project folder has its own sprites, scenes, scripts and game.json.
 
 Workflow that works:
@@ -67,7 +76,7 @@ Workflow that works:
 2. set_game (resolution, e.g. 320x180; gravity) and set_object for each kind of thing. The player gets platformer or topdown + camera.
 3. create_scene, paint_tiles (rows + legend like draw_pixels, chars → tile indices; set solid on collision layers with set_tile_layer), place_instances.
 4. Events: collisions (collect coins: add score, destroy other, sound coin), hazards (restartScene), goals (gotoScene), HUD text objects.
-5. ALWAYS verify: validate_game, preview_scene, then playtest with scripted inputs (e.g. hold right 2s, tap up) and read the final state, logs and screenshot. Fix and re-test until it plays as intended.
+5. ALWAYS verify: validate_game, preview_scene, then playtest with scripted inputs (vars: {...} starts at a later stage, player_at: [x, y] puts the player next to what you test) (e.g. hold right 2s, tap up) and read the final state, logs and screenshot. Fix and re-test until it plays as intended.
 6. export_game and tell the user where index.html is (it runs offline and can be uploaded to itch.io as an HTML game).
 `;
 
@@ -134,7 +143,38 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
     return problems.length ? `Problems (${problems.length}):\n${problems.map((p) => `- ${p.where}: ${p.message}`).join('\n')}` : 'No problems found.';
   };
 
-  const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
+  const checkedExpr = (src: string) => {
+    const err = checkExpr(src.trim());
+    if (err) throw new Error(`active_if: ${err}`);
+    return src.trim();
+  };
+
+  const lightSchema = z.object({
+  radius: z.number().min(0).describe('Reach in px (0 = off). Torch ~40, campfire ~64, lamp ~48, crystal ~56, firefly ~10'),
+  color: z.string().optional().describe('e.g. "#ffb070" fire, "#ffe6a0" lamp, "#80e8ff" crystal, "#c080ff" magic'),
+  intensity: z.number().min(0).max(4).optional().describe('Default 1'),
+  flicker: z.number().min(0).max(1).optional().describe('Fire ~0.2, none for crystals'),
+  pulse: z.number().min(0).max(1).optional().describe('Slow breathing (magic, crystals) ~0.3'),
+  x: z.number().optional().describe('Offset from the sprite center'),
+  y: z.number().optional(),
+});
+const atmosphereSchema = z.object({
+  ambient: z.string().optional().describe('Multiplied over the world. "#ffffff" plain day, "#fff0dc" warm day, "#c8d0ff" overcast, "#8a7ab8" dusk, "#3a3c70" night, "#2a2440" dark cave. Lights cut through it.'),
+  glow: z.number().min(0).max(2).optional().describe('Bloom added by lights (default 0.6)'),
+  shadows: z.boolean().optional().describe('Soft contact shadows under instances (default true): width = object hitbox width, or the object type "shadow"'),
+  shadow_color: z.string().optional(),
+  shadow_opacity: z.number().min(0).max(1).optional().describe('Default 0.38'),
+  vignette: z.number().min(0).max(1).optional().describe('Darken screen edges, ~0.3'),
+  vignette_color: z.string().optional(),
+  clouds: z.object({ sprite: z.string(), opacity: z.number().min(0).max(1).optional(), speed_x: z.number().optional(), speed_y: z.number().optional() }).nullable().optional().describe('Drifting cloud shadows: a tileable sprite of dark soft blobs on transparent'),
+  tint: z.string().optional().describe('Soft-light color grade, e.g. "#ffb070" golden hour, "#5080ff" cold'),
+  tint_amount: z.number().min(0).max(1).optional(),
+  motes: z.object({ preset: z.enum(MOTE_PRESETS), count: z.number().int().min(0).max(400).optional(), color: z.union([z.string(), z.array(z.string())]).optional() }).nullable().optional().describe('Ambient floating particles'),
+});
+const toAtmosphere = (a: z.infer<typeof atmosphereSchema>) =>
+  normalizeAtmosphere({ ambient: a.ambient, glow: a.glow, shadows: a.shadows, shadowColor: a.shadow_color, shadowOpacity: a.shadow_opacity, vignette: a.vignette, vignetteColor: a.vignette_color, clouds: a.clouds ? { sprite: a.clouds.sprite, opacity: a.clouds.opacity, speedX: a.clouds.speed_x, speedY: a.clouds.speed_y } : undefined, tint: a.tint, tintAmount: a.tint_amount, motes: a.motes ?? undefined });
+
+const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
   const stepSchema = z.record(z.string(), valueSchema).describe('{ type: "...", ...params }');
   const eventSchema = z.object({
     trigger: stepSchema,
@@ -235,6 +275,8 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       text_color: z.string().optional(),
       text_size: z.number().int().min(1).max(8).optional(),
       hud: z.boolean().optional().describe('Draw in screen space (ignores the camera)'),
+      light: lightSchema.nullable().optional().describe('Light it gives off (seen in scenes with an atmosphere: darker ambient + glow). null removes'),
+      shadow: z.number().min(0).nullable().optional().describe('Contact shadow width in px (0 = none, null = automatic: hitbox width). Flat things (rugs, doormats, flowerbeds) want 0'),
       extends: z.string().nullable().optional().describe('Make it a VARIANT of another object type (like a Unity prefab variant): it inherits sprite, hitbox, properties, tags, components (params can be overridden by listing the same component with only the changed params) and events, and stores only what differs. null = standalone again. Queries and events on the parent type (find("slime"), "collides with slime", count) include its variants.'),
       tags: z.array(z.string()).optional().describe('Group tags for scripts (self.hasTag, findWithTag, raycast/overlap filters, countTag()), e.g. ["enemy"]. Replaces the list.'),
       properties: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
@@ -288,6 +330,15 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
         if (a.hud !== undefined) {
           if (a.hud) o.hud = true;
           else delete o.hud;
+        }
+        if (a.light !== undefined) {
+          const l = a.light === null ? undefined : normalizeLight(a.light);
+          if (l) o.light = l;
+          else delete o.light;
+        }
+        if (a.shadow !== undefined) {
+          if (a.shadow === null) delete o.shadow;
+          else o.shadow = Math.round(a.shadow);
         }
         for (const [k, v] of Object.entries(a.properties ?? {})) {
           assertIdentifier('property', k);
@@ -418,7 +469,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
   }, (a) => {
     const s = ws.loadScene(a.scene);
     const lines = [describeScene(s), '', 'Instances:'];
-    for (const i of s.instances) lines.push(`- ${i.id}: ${i.name ? `"${i.name}" (${i.object})` : i.object}${i.sprite ? ` sprite ${i.sprite}` : ''} at ${i.x},${i.y} (tile ${Math.floor(i.x / s.tileSize)},${Math.floor(i.y / s.tileSize)})${i.flipX ? ' flipped' : ''}${i.props ? ' ' + JSON.stringify(i.props) : ''}`);
+    for (const i of s.instances) lines.push(`- ${i.id}: ${i.name ? `"${i.name}" (${i.object})` : i.object}${i.sprite ? ` sprite ${i.sprite}` : ''} at ${i.x},${i.y} (tile ${Math.floor(i.x / s.tileSize)},${Math.floor(i.y / s.tileSize)})${i.flipX ? ' flipped' : ''}${i.props ? ' ' + JSON.stringify(i.props) : ''}${i.components ? ' components ' + JSON.stringify(i.components) : ''}${i.activeIf ? ` active if (${i.activeIf})` : ''}`);
     if (a.layer) {
       const l = s.layers.find((x) => x.name === a.layer);
       if (!l) throw new Error(`No layer "${a.layer}"`);
@@ -438,7 +489,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
 
   tool(
     'update_scene',
-    'Change scene properties: size (keeps the top-left content), tileset, background color, parallax background sprites, scene variables, y-sort, name.',
+    'Change scene properties: size (keeps the top-left content), tileset, background color, parallax background sprites, scene variables, y-sort, name, atmosphere (lighting, contact shadows, cloud shadows, color grade, vignette, ambient particles).',
     {
       scene: z.string(),
       new_name: z.string().optional(),
@@ -452,6 +503,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       persistent: z.boolean().optional().describe('Remember instances when leaving (positions, properties, destroyed ones), e.g. an RPG town you come back to after a battle'),
       components: z.array(stepSchema).optional().describe('Scene components (replace the list): [{ type: "script", name: "Battle", foeHp: 12 }] — managers, level logic, HUD'),
       music: z.string().nullable().optional().describe('Music when the scene starts: an audio file name (list_audio), "-" for silence, null = keep what plays'),
+      atmosphere: atmosphereSchema.nullable().optional().describe('Lighting and mood (replaces the whole atmosphere; null removes it). Lights come from object types / instances with "light".'),
     },
     (a) => {
       const { scene } = mutateScene(a.scene, (s) => {
@@ -474,6 +526,12 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           }
         }
         if (a.background !== undefined) s.background = a.background;
+        if (a.atmosphere !== undefined) {
+          const atm = a.atmosphere === null ? undefined : toAtmosphere(a.atmosphere);
+          if (atm?.clouds && !ws.exists(atm.clouds.sprite)) throw new Error(`Clouds sprite "${atm.clouds.sprite}" not found`);
+          if (atm) s.atmosphere = atm;
+          else delete s.atmosphere;
+        }
         if (a.music !== undefined) {
           if (a.music === null || a.music === '') delete s.music;
           else {
@@ -613,6 +671,8 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
         components: z.record(z.string(), z.record(z.string(), valueSchema)).optional().describe('Component params for this instance, by component name: { Patrol: { speed: 80 } }. A component the object type lacks is added to this instance only; { enabled: false } turns one off.'),
         flip_x: z.boolean().optional(),
         tags: z.array(z.string()).optional().describe('Extra group tags for this instance (e.g. ["boss"])'),
+        active_if: z.string().optional().describe('Expression: the instance exists only while true (checked at scene start and continuously), e.g. "armory_lv >= 2" or "res_mage". For things that appear as the game progresses: new buildings, residents, upgrades.'),
+        light: lightSchema.optional().describe('Light of this instance (overrides the type\'s; radius 0 = off)'),
       })).min(1),
       tiles: z.boolean().optional(),
     },
@@ -637,7 +697,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
           }
           const id = newGameId();
           ids.push(id);
-          s.instances.push({ id, object: i.object, x, y, ...(i.name ? { name: i.name } : {}), ...(i.sprite ? { sprite: i.sprite } : {}), ...(i.animation ? { animation: i.animation } : {}), ...(i.props ? { props: i.props } : {}), ...(i.components ? { components: i.components as Record<string, Record<string, Value>> } : {}), ...(i.flip_x ? { flipX: true } : {}), ...(normalizeTags(i.tags) ? { tags: normalizeTags(i.tags) } : {}) });
+          s.instances.push({ id, object: i.object, x, y, ...(i.name ? { name: i.name } : {}), ...(i.sprite ? { sprite: i.sprite } : {}), ...(i.animation ? { animation: i.animation } : {}), ...(i.props ? { props: i.props } : {}), ...(i.components ? { components: i.components as Record<string, Record<string, Value>> } : {}), ...(i.flip_x ? { flipX: true } : {}), ...(normalizeTags(i.tags) ? { tags: normalizeTags(i.tags) } : {}), ...(i.active_if?.trim() ? { activeIf: checkedExpr(i.active_if) } : {}), ...(i.light ? { light: normalizeLight(i.light, true) } : {}) });
         }
       });
       return text(`Placed ${ids.length} instance(s): ${ids.join(', ')}. Scene now has ${scene.instances.length}.`);
@@ -661,6 +721,8 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       name: z.string().nullable().optional().describe('Rename (null clears)'),
       sprite: z.string().nullable().optional().describe('Sprite override (null = the object type\'s)'),
       animation: z.string().nullable().optional(),
+      active_if: z.string().nullable().optional().describe('Expression: the instance exists only while true (null or "" = always)'),
+      light: lightSchema.nullable().optional().describe('Light override (radius 0 = off, null = the object type\'s)'),
       props: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       components: z.record(z.string(), z.union([z.record(z.string(), z.union([valueSchema, z.null()])), z.null()])).optional().describe('Component params by component name (merged; null value deletes a param, null component removes the override)'),
     },
@@ -695,6 +757,15 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
             if (v === undefined) continue;
             if (v === null || v === '') delete i[key];
             else i[key] = v;
+          }
+          if (a.active_if !== undefined) {
+            if (a.active_if === null || !a.active_if.trim()) delete i.activeIf;
+            else i.activeIf = checkedExpr(a.active_if);
+          }
+          if (a.light !== undefined) {
+            const l = a.light === null ? undefined : normalizeLight(a.light, true);
+            if (l) i.light = l;
+            else delete i.light;
           }
           for (const [k, v] of Object.entries(a.props ?? {})) {
             i.props ??= {};
@@ -746,15 +817,16 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
     return [...text(`Tileset "${a.sprite}": ${cols}x${rows} = ${cols * rows} tiles of ${gw}x${gh}px. Index = row * ${cols} + column.`), image(encodePng(rr.out))];
   }, { readOnlyHint: true });
 
-  tool('preview_scene', 'Render a whole scene as laid out (tiles, instances at their start positions; the orange box is the starting camera view).', {
+  tool('preview_scene', 'Render a whole scene as laid out (tiles, instances at their start positions; the orange box is the starting camera view). Conditional instances follow the initial variables, or vars.', {
     scene: z.string(),
     grid: z.boolean().optional().describe('Overlay the tile grid'),
     region: z.object({ x: z.number().int(), y: z.number().int(), w: z.number().int().min(1), h: z.number().int().min(1) }).optional().describe('Pixel region to zoom into'),
     scale: z.number().int().min(1).max(8).optional(),
+    vars: z.record(z.string(), valueSchema).optional().describe('Global variables for this preview: conditional instances (active_if) show as they would with these values, e.g. { inn_lv: 2, town_rank: 10 } to see the grown town'),
   }, (a) => {
     const loaded = loadGameBundle(ws);
-    const { png, width, height } = renderScenePreview(loaded, a.scene, { grid: a.grid, region: a.region, scale: a.scale });
-    return [...text(`Scene "${a.scene}" preview ${width}x${height}px.`), image(png)];
+    const { png, width, height, hidden } = renderScenePreview(loaded, a.scene, { grid: a.grid, region: a.region, scale: a.scale, vars: a.vars as Record<string, Value> | undefined });
+    return [...text(`Scene "${a.scene}" preview ${width}x${height}px.${hidden.length ? `\nHidden (active_if false${a.vars ? ' with these vars' : ' with the initial variables'}): ${hidden.join(', ')}` : ''}`), image(png)];
   }, { readOnlyHint: true });
 
   tool(
@@ -770,6 +842,8 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
       seed: z.number().int().optional(),
       choices: z.array(z.number().int().min(0)).optional().describe('Menu answers for choose() dialogs, in order (default: first entry)'),
       auto_dialog: z.boolean().optional().describe('Confirm dialogs automatically (default true); false = drive them with "action" key inputs'),
+      vars: z.record(z.string(), valueSchema).optional().describe('Start with these global variables (test a later stage of the game without playing up to it: { gold: 500, armory_lv: 2 })'),
+      player_at: z.tuple([z.number(), z.number()]).optional().describe('Put the player at this position (px) when the first scene starts'),
     },
     async (a) => {
       const loaded = loadGameBundle(ws);
@@ -785,6 +859,8 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
         inputs: a.inputs as PlaytestInput[] | undefined,
         sampleAt: a.sample_at,
         seed: a.seed,
+        vars: a.vars as Record<string, Value> | undefined,
+        playerAt: a.player_at,
         onSample: a.screenshots ? (w) => shots.push(renderViewport(w, loaded.sheets, scale)) : undefined,
       });
       const fmtState = (s: (typeof r)['final']) =>
@@ -962,6 +1038,95 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
   tool('delete_dialogue', 'Delete a dialogue file.', { file: z.string() }, (a) => {
     ws.removeDialogue(a.file);
     return text(`Deleted dialogues/${a.file}.dialogue.\n${dialogueSummary()}`);
+  }, { destructiveHint: true });
+
+  // ------------------------------------------------------------------ data tables
+
+  const columnSchema = z.object({
+    name: z.string(),
+    type: z.enum(['text', 'number', 'bool', 'list', 'ref']).optional().describe('list = array of texts; ref = id of a row in another table (set table)'),
+    table: z.string().optional().describe('ref columns: the table the ids belong to'),
+    help: z.string().optional(),
+  });
+  const cellSchema = z.union([z.number(), z.string(), z.boolean(), z.array(z.string()), z.null()]);
+
+  const tableText = (t: DataTable, limit = 200) => {
+    const cols = t.columns.map((c) => `${c.name}:${c.type}${c.table ? `→${c.table}` : ''}`).join(', ');
+    const rows = t.rows.slice(0, limit).map((r) => '  ' + JSON.stringify(r));
+    return [`Table "${t.name}" (${t.rows.length} rows)${t.description ? ` — ${t.description}` : ''}`, `Columns: ${cols}`, ...rows, t.rows.length > limit ? `  ... ${t.rows.length - limit} more` : ''].filter(Boolean).join('\n');
+  };
+
+  tool('list_data', 'List the data tables (data/<name>.json): the game\'s database of items, weapons, classes, skills, enemies, quests, shop stock... Scripts read them with db.<table> / db.get(table, id) / db.where(table, {...}); expressions and dialogues with db("table", id, "column").', {}, () => {
+    const list = ws.listTables();
+    return text(list.length ? list.map((t) => `- ${t.name}: ${t.rows} rows, columns ${t.columns.join(', ')}${t.description ? ` — ${t.description}` : ''}`).join('\n') : 'No data tables yet. Create one with write_data.');
+  }, { readOnlyHint: true });
+
+  tool('read_data', 'Read a data table: columns with types and every row as JSON.', { table: z.string(), limit: z.number().int().min(1).max(2000).optional() }, (a) => text(tableText(ws.loadTable(a.table), a.limit)), { readOnlyHint: true });
+
+  tool(
+    'write_data',
+    'Create or replace a data table (data/<name>.json). Rows are objects with a unique text "id" (e.g. "bronze_sword") plus the columns. Column types: text, number, bool, list (array of texts, e.g. ["power", "twin"]), ref (id of a row in another table). Columns are inferred from the rows when omitted. Use tables for game data that designers tweak (prices, stats, tiers, unlock levels, rewards) instead of hard-coding it in scripts.',
+    {
+      table: z.string().describe('Identifier, e.g. "weapons", "classes"'),
+      description: z.string().optional(),
+      columns: z.array(columnSchema).optional(),
+      rows: z.array(z.record(z.string(), cellSchema)),
+    },
+    (a) => {
+      assertIdentifier('data table', a.table);
+      const t = ws.saveTable(normalizeTable({ name: a.table, description: a.description, columns: a.columns, rows: a.rows }, a.table), AUTHOR);
+      return text(`Saved data/${t.name}.json.\n${tableText(t, 20)}\n\n${problemsText()}`);
+    },
+  );
+
+  tool(
+    'update_data',
+    'Change part of a data table: upsert rows by id (only the given columns change; null clears a cell), delete rows, add or remove columns, set the description.',
+    {
+      table: z.string(),
+      upsert: z.array(z.record(z.string(), cellSchema)).optional().describe('Rows with an "id": existing ids are merged, new ids appended'),
+      delete_ids: z.array(z.string()).optional(),
+      add_columns: z.array(columnSchema).optional(),
+      remove_columns: z.array(z.string()).optional(),
+      description: z.string().optional(),
+    },
+    (a) => {
+      const t = ws.loadTable(a.table);
+      if (a.description !== undefined) t.description = a.description;
+      for (const c of a.add_columns ?? []) {
+        if (t.columns.some((x) => x.name === c.name)) t.columns = t.columns.map((x) => (x.name === c.name ? { ...x, ...c, type: c.type ?? x.type } : x));
+        else t.columns.push({ name: c.name, type: c.type ?? 'text', ...(c.table ? { table: c.table } : {}), ...(c.help ? { help: c.help } : {}) });
+      }
+      if (a.remove_columns?.length) {
+        t.columns = t.columns.filter((c) => c.name === 'id' || !a.remove_columns!.includes(c.name));
+        for (const r of t.rows) for (const k of a.remove_columns) if (k !== 'id') delete r[k];
+      }
+      if (a.delete_ids?.length) t.rows = t.rows.filter((r) => !a.delete_ids!.includes(r.id));
+      let added = 0;
+      let changed = 0;
+      for (const u of a.upsert ?? []) {
+        const id = String(u.id ?? '');
+        if (!id) throw new Error('Every upserted row needs an "id"');
+        let row = t.rows.find((r) => r.id === id);
+        if (!row) {
+          row = { id } as DataRow;
+          t.rows.push(row);
+          added++;
+        } else changed++;
+        for (const [k, v] of Object.entries(u)) {
+          if (k === 'id') continue;
+          if (v === null) delete row[k];
+          else (row as Record<string, unknown>)[k] = v;
+        }
+      }
+      const saved = ws.saveTable(t, AUTHOR);
+      return text(`Updated data/${saved.name}.json: ${added} added, ${changed} changed, ${a.delete_ids?.length ?? 0} deleted. ${saved.rows.length} rows, columns ${saved.columns.map((c) => c.name).join(', ')}.`);
+    },
+  );
+
+  tool('delete_data', 'Delete a data table.', { table: z.string() }, (a) => {
+    ws.removeTable(a.table);
+    return text(`Deleted data/${a.table}.json.`);
   }, { destructiveHint: true });
 
   tool('validate_game', 'Check the game for problems: unknown triggers/actions/behaviors, bad expressions, missing sprites, objects and scenes.', {}, () => text(problemsText()), { readOnlyHint: true });

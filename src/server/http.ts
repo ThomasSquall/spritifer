@@ -9,7 +9,7 @@ import { encodePng } from './png.js';
 import { exportSpritesheet, previewPng, spriteFromPng } from './ops.js';
 import type { Workspace } from './store.js';
 import { ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
-import { createScene, normalizeGame, normalizeScene } from '../core/game/types.js';
+import { assertIdentifier, createScene, normalizeGame, normalizeScene, normalizeTable } from '../core/game/types.js';
 import { buildGameHtml, exportGame, loadGameBundle, loadRuntime, renderScenePreview } from './game.js';
 import { renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
 import { addLibraryComponents, checkScriptSyntax, inspectScripts, refreshScriptTypes, scriptTemplate } from './scripts.js';
@@ -55,6 +55,9 @@ export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1
   });
 
   const wss = new WebSocketServer({ server, path: '/ws' });
+  // ws re-emits the HTTP server's errors (e.g. EADDRINUSE): the listen promise below reports them,
+  // an unhandled 'error' here would crash the process (and with it the MCP server).
+  wss.on('error', () => {});
   const clients = new Set<WebSocket>();
   wss.on('connection', (sock) => {
     clients.add(sock);
@@ -79,6 +82,11 @@ export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1
           rev = name && pws.scriptExists(name) ? String(Date.now()) : null;
         } else if (kind === 'dialogue') {
           rev = pws.dialogueExists(name) ? String(Date.now()) : null;
+        } else if (kind === 'data') {
+          refreshScriptTypes(pws);
+          const t = pws.loadTable(name);
+          rev = t.rev;
+          updatedBy = t.updatedBy;
         } else if (kind === 'scene') {
           const sc = pws.loadScene(name);
           rev = sc.rev;
@@ -102,9 +110,13 @@ export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1
   };
 
   return new Promise((resolve, reject) => {
-    server.once('error', reject);
+    server.once('error', (err) => {
+      stopWatching();
+      wss.close();
+      reject(err);
+    });
     server.listen(port, host, () => {
-      server.off('error', reject);
+      server.removeAllListeners('error');
       resolve({
         server,
         url: `http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`,
@@ -185,6 +197,7 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
   if (parts[1] === 'scenes') return handleScenes(ws, req, res, parts.slice(2), url);
   if (parts[1] === 'scripts') return handleScripts(ws, req, res, parts.slice(2));
   if (parts[1] === 'dialogues') return handleDialogues(ws, req, res, parts.slice(2));
+  if (parts[1] === 'data') return handleData(ws, req, res, parts.slice(2));
   if (parts[1] === 'audio') return handleAudio(ws, req, res, parts.slice(2));
 
   if (parts[1] !== 'sprites') throw new HttpError(404, 'Not found');
@@ -473,6 +486,48 @@ async function handleDialogues(ws: Workspace, req: http.IncomingMessage, res: ht
     if (ws.dialogueExists(body.to)) throw new HttpError(409, `Dialogue file "${body.to}" already exists`);
     ws.writeDialogue(body.to, ws.readDialogue(name));
     ws.removeDialogue(name);
+    return sendJson(res, 200, { name: body.to });
+  }
+  throw new HttpError(404, 'Not found');
+}
+
+/** Data tables: /api/data (list, create), /api/data/<name> (get, put, delete), /api/data/<name>/rename. */
+async function handleData(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {
+  const method = req.method ?? 'GET';
+  const name = parts[0];
+  if (!name) {
+    if (method === 'GET') return sendJson(res, 200, ws.listTables());
+    if (method === 'POST') {
+      const body = (await readJson(req)) as { name: string; description?: string; columns?: unknown[]; rows?: unknown[] };
+      assertIdentifier('data table', body.name);
+      if (ws.tableExists(body.name)) throw new HttpError(409, `Data table "${body.name}" already exists`);
+      const t = ws.saveTable(normalizeTable({ name: body.name, description: body.description, columns: body.columns ?? [{ name: 'name', type: 'text' }], rows: body.rows ?? [] }, body.name), 'editor');
+      return sendJson(res, 201, t);
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  const sub = parts[1];
+  if (!sub) {
+    if (method === 'GET') return sendJson(res, 200, ws.loadTable(name));
+    if (method === 'PUT') {
+      const body = (await readJson(req)) as Record<string, unknown>;
+      const t = ws.saveTable(normalizeTable({ ...body, name }, name), 'editor');
+      return sendJson(res, 200, { rev: t.rev, table: t });
+    }
+    if (method === 'DELETE') {
+      ws.removeTable(name);
+      return sendJson(res, 200, { ok: true });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (sub === 'rename' && method === 'POST') {
+    const body = (await readJson(req)) as { to: string };
+    assertIdentifier('data table', body.to);
+    if (ws.tableExists(body.to)) throw new HttpError(409, `Data table "${body.to}" already exists`);
+    const t = ws.loadTable(name);
+    t.name = body.to;
+    ws.saveTable(t, 'editor');
+    ws.removeTable(name);
     return sendJson(res, 200, { name: body.to });
   }
   throw new HttpError(404, 'Not found');

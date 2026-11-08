@@ -19,7 +19,7 @@ Avvia l'editor web (sprite salvati in `./sprites`):
 npm start
 ```
 
-Poi apri http://localhost:7420. Le schede in alto sono le parti del gioco: **Sprites** (asset), **Objects** (tipi di oggetto), **Scenes** (livelli), **Dialogues** (conversazioni), **Scripts** (codice), **Game** (impostazioni ed export), più **Play** ed **Export**. Il pulsante con il nome del progetto, in alto a sinistra, apre la pagina **Projects**.
+Poi apri http://localhost:7420. Le schede in alto sono le parti del gioco: **Sprites** (asset), **Objects** (tipi di oggetto), **Scenes** (livelli), **Dialogues** (conversazioni), **Scripts** (codice), **Data** (tabelle: oggetti, armi, classi, nemici…), **Game** (impostazioni ed export), più **Play** ed **Export**. Il pulsante con il nome del progetto, in alto a sinistra, apre la pagina **Projects**.
 
 ### Progetti
 
@@ -198,6 +198,24 @@ Dagli script: `camera.zoom = 2` (anche con `tween`), `camera.follow(boss)`, `cam
 
 Il resto dell'API: `loadGame('slot1')`, `hasSave('slot1')` (per un pulsante "Continua"), `listSaves()`, `deleteSave()`. Negli eventi ci sono le azioni **Save game** / **Load game** e la condizione `hasSave("slot1")`. Le istanze create a runtime con `spawn` non vengono salvate.
 
+**Tabelle dati (Database).** La scheda **Data** contiene il database del gioco: file `data/<tabella>.json` con colonne tipizzate (`text`, `number`, `bool`, `list`, `ref` verso un'altra tabella) e righe con un `id` univoco. Si modificano come un foglio di calcolo (righe e colonne, filtro, salvataggio automatico) invece di cambiare il codice: oggetti e prezzi, armi per livello del negozio, classi e abilità, statistiche dei nemici, ricompense delle missioni.
+
+- Negli script: `db.weapons` (righe), `db.get('weapons', 'bronze')`, `db.where('weapons', { tier: 2 })` o `db.where('items', r => r.price <= vars.gold)`, `db.tables`. Le righe sono di sola lettura; `spritifer.d.ts` ha i tipi di ogni tabella, quindi l'IDE completa anche le colonne.
+- In eventi, dialoghi e condizioni: `db("weapons", "bronze", "price")`; `db("weapons", "bronze")` dice se la riga esiste, `db("weapons")` conta le righe.
+- `fn("nome", argomenti)` nelle espressioni chiama una `func()` di uno script semplice e ne usa il risultato (`* Compra [if fn("canAfford", "bronze")]`).
+- La validazione segnala tabelle mancanti in `db(...)` e riferimenti `ref` a righe che non esistono. Gli sprite nominati nelle tabelle (es. `monsters.sprite`) fanno parte del gioco.
+- MCP: `list_data`, `read_data`, `write_data`, `update_data` (aggiunge o modifica righe per id, colonne), `delete_data`.
+
+**Istanze condizionali (città che crescono).** Ogni istanza piazzata può avere **Active if** (inspector della scena, MCP `active_if`): un'espressione come `lv_inn >= 1` o `town_rank >= 6`. L'istanza esiste solo finché è vera: il motore la controlla all'avvio della scena e di continuo mentre gioca, quindi un edificio, un abitante o una decorazione compare nel momento in cui la condizione diventa vera (e sparisce se torna falsa, senza contare come distrutta). Nella gerarchia le istanze condizionali hanno il segno **?**. `refreshInstances()` le ricontrolla subito. `preview_scene` e `playtest` accettano `vars` per vedere la mappa o giocare a uno stadio avanzato (`{ lv_inn: 2, town_rank: 10 }`); `playtest` anche `player_at`.
+
+**Trigger invisibili.** Un tipo di oggetto senza sprite ma con una hitbox è un trigger invisibile (uscite ai bordi della mappa con il componente Door/Warp, zone che avviano una cutscene): non viene disegnato e la validazione non lo segnala.
+
+**Spawn con aspetto proprio.** `spawn('follower', x, y, { resident: 'orin' }, { sprite: 'orin', name: 'Orin' })` crea un'istanza con un altro sprite, un nome (per i dialoghi) e proprietà già impostate quando i componenti si svegliano.
+
+**Atmosfera e luci.** Ogni scena può avere un'**atmosfera** (MCP `update_scene` → `atmosphere`): luce ambiente moltiplicata sul mondo (`#ffffff` giorno, `#3a3c70` notte o grotta), bagliore delle luci (si attenua da solo di giorno), ombre morbide sotto le istanze, ombre di nuvole che scorrono (uno sprite ripetibile), color grading, vignettatura e particelle d'ambiente (`fireflies`, `dust`, `snow`, `embers`, `leaves`, `spores`, `bubbles`). Tipi di oggetto e istanze possono emettere luce (`light: { radius, color, intensity, flicker, pulse, x, y }`); `shadow` imposta la larghezza dell'ombra (0 = nessuna). L'interfaccia disegnata in `onDraw` resta fuori dall'illuminazione.
+
+**Regole del tileset.** In `game.json → tilesets.<tileset>` un tileset può trasformare i tile dipinti in terreno che non sembra una griglia: `grid` (una texture grande tagliata in pezzi k×k, scelti per posizione), `random` (varianti), `blob` (autotile a 47 forme dai vicini: boschi, scogliere, muri), `frames`/`fps` (tile animati: acqua, lava) e `edges` (sovrapposizioni dove un terreno tocca un altro: erba sui sentieri, schiuma sulle rive; `empty: true` conta le celle vuote come l'altro terreno). La scena salva solo il tile dipinto, quindi collisioni ed editor non cambiano; `paintable` limita la palette ai tile da dipingere. Gli sprite possono superare 2048 px su un lato (fino a 8192, entro 2048×2048 pixel totali) per i tileset generati.
+
 **Inspector dal vivo.** Nel Play, la scheda **Inspector** accanto al Log permette di:
 
 - mettere in pausa e avanzare di un frame alla volta;
@@ -294,6 +312,7 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Verifica | `preview` (righelli con coordinate, `region` per lo zoom, `tags` = una riga per animazione, `onion`, `diff`, `compare`/`underlay` col riferimento), `lint` (problemi con coordinate), `read_pixels` (griglia testuale) |
 | Export/import | `export_spritesheet` (PNG + JSON), `import_png` |
 | Gioco | `game_reference` (vocabolario completo di trigger, condizioni, azioni, comportamenti ed espressioni), `get_game`, `set_game`, `set_object`, `delete_object`, `set_events` |
+| Dati | `list_data`, `read_data`, `write_data`, `update_data`, `delete_data` (tabelle in `data/`); `place_instances` / `update_instances` con `active_if` |
 | Scene | `create_scene`, `get_scene` (anche la mappa come griglia di caratteri), `update_scene`, `delete_scene`, `set_tile_layer`, `paint_tiles` (righe + legenda come `draw_pixels`, o rettangoli), `place_instances`, `update_instances`, `tileset_preview` (indici dei tile) |
 | Dialoghi | `dialogue_reference`, `list_dialogues`, `read_dialogue`, `write_dialogue` (controllato prima di salvare), `edit_dialogue`, `delete_dialogue`; `place_instances` / `update_instances` con nome, sprite e `props.dialogue` per istanza |
 | Audio e input | `list_audio`, `import_audio` (da un file sul computer), `delete_audio`; `update_scene` con `music`; `set_game` con `actions`; `set_frame_events` (eventi sui frame) |
@@ -409,7 +428,8 @@ Il workspace (default `./sprites`) contiene tutto il progetto:
 - `<nome>.scene.json`: dimensioni in tile, tileset, livelli tile (indici, `-1` = vuoto), istanze, eventi e variabili della scena;
 - `game.json`: impostazioni, variabili globali e tipi di oggetto con comportamenti ed eventi;
 - `scripts/<cartella>/<Nome>.js`: gli script del gioco (componenti e moduli), più `jsconfig.json` e `spritifer.d.ts` generati per l'autocompletamento negli IDE;
-- `dialogues/<nome>.dialogue`: i dialoghi.
+- `dialogues/<nome>.dialogue`: i dialoghi;
+- `data/<tabella>.json`: le tabelle dati (colonne tipizzate e righe con `id`).
 
 Sono JSON leggibili e versionabili. L'editor e il server MCP leggono e scrivono gli stessi file; un watcher notifica le modifiche al browser via WebSocket.
 

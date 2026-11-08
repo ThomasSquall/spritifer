@@ -339,7 +339,8 @@ if expr / elif expr / else      branches, with indented blocks
 -> name             jump to another dialogue; -> end stops
 # comment
 
-Expressions are the same as in events: gold >= 10 && !self.angry, count("slime") == 0, random(1, 6).
+Expressions are the same as in events: gold >= 10 && !self.angry, count("slime") == 0, random(1, 6),
+db("weapons", "bronze", "price") (data tables), fn("canAfford", "bronze") (a func() from a plain script).
 
 USING THEM
 - Give an object type the behavior "Talks (dialogue)" (type "dialogue"). Each placed instance can set its own "dialogue" property (and Name, sprite) in the scene inspector,

@@ -4,7 +4,7 @@
  */
 
 import { checkExpr } from './expr.js';
-import type { Behavior, EventStep, GameEvent, GameProject, Scene, Value } from './types.js';
+import type { Behavior, DataTable, EventStep, GameEvent, GameProject, Scene, Value } from './types.js';
 import { resolveObjectTypes } from './variants.js';
 
 export type ParamType =
@@ -194,7 +194,9 @@ export function catalogReference(): string {
       'Names: globals (score), self.<field|property>, other.<...> (the instance from a collision/overlap), scene.<scene variable>, game.time (seconds since scene start), game.dt. ' +
       'Instance fields: x, y, vx, vy, width, height, flipX, visible, opacity, angle, onGround, animation, object, text. ' +
       'Functions: random(a,b), randint(a,b), floor, ceil, round, abs, sign, min, max, clamp(v,lo,hi), sqrt, sin(deg), cos(deg), atan2(y,x), dist(x1,y1,x2,y2), lerp(a,b,t), ' +
-      'count("object"), countTag("enemy"), hasSave("slot"), keyDown("key"), nearest("object", "x"|"y"), str(v), num(v).',
+      'count("object"), countTag("enemy"), hasSave("slot"), keyDown("key"), nearest("object", "x"|"y"), str(v), num(v), ' +
+      'db("table", "id", "column") (a data table cell; db("table", "id") = the row exists, db("table") = row count), fn("name", args...) (calls a synchronous func() of a plain script and uses its result).',
+    'CONDITIONAL INSTANCES: a placed instance can have activeIf (place_instances/update_instances active_if): it exists only while the expression is true, checked when the scene starts and continuously — towns that grow, upgraded shops, opened gates.',
   ].join('\n\n');
 }
 
@@ -299,8 +301,36 @@ function checkEvents(where: string, events: GameEvent[], ctx: { objects: Set<str
 }
 
 /** Static checks: unknown types, bad expressions, missing objects/scenes/sprites. */
-export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<string>, scripts?: ScriptShape, dialogues?: { nodes: string[]; errors: { file: string; line: number; message: string }[] }, audio?: string[]): Problem[] {
+export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<string>, scripts?: ScriptShape, dialogues?: { nodes: string[]; errors: { file: string; line: number; message: string }[] }, audio?: string[], tables?: Record<string, DataTable>): Problem[] {
   const out: Problem[] = [];
+  // db("table", ...) in an expression must name a table.
+  const checkDb = (where: string, src: string) => {
+    if (!tables) return;
+    for (const m of src.matchAll(/\bdb\(\s*["']([^"']+)["']/g)) if (!tables[m[1]]) out.push({ where, message: `no data table "${m[1]}"` });
+  };
+  for (const t of Object.values(tables ?? {})) {
+    for (const c of t.columns) {
+      if (c.type !== 'ref' || !c.table) continue;
+      const target = tables?.[c.table];
+      if (!target) {
+        out.push({ where: `data ${t.name}.${c.name}`, message: `refers to a missing table "${c.table}"` });
+        continue;
+      }
+      for (const r of t.rows) {
+        const v = r[c.name];
+        if (typeof v === 'string' && v && !target.rows.some((x) => x.id === v)) out.push({ where: `data ${t.name} row ${r.id}.${c.name}`, message: `no row "${v}" in table ${c.table}` });
+      }
+    }
+  }
+  for (const s of scenes) {
+    for (const i of s.instances) {
+      if (!i.activeIf) continue;
+      const where = `scene ${s.name} instance ${i.name ?? i.object} activeIf`;
+      const err = checkExpr(i.activeIf);
+      if (err) out.push({ where, message: err });
+      else checkDb(where, i.activeIf);
+    }
+  }
   for (const e of dialogues?.errors ?? []) out.push({ where: `dialogues/${e.file}.dialogue line ${e.line}`, message: e.message });
   const resolved = resolveObjectTypes(game.objects);
   for (const e of resolved.errors) out.push({ where: `object ${e.object}`, message: e.message });
@@ -339,7 +369,8 @@ export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<st
   for (const o of game.objects) {
     const full = eff(o.name) ?? o;
     if (o.sprite && !sprites.has(o.sprite)) out.push({ where: `object ${o.name}`, message: `sprite "${o.sprite}" not found` });
-    if (!full.sprite && full.text === undefined) out.push({ where: `object ${o.name}`, message: 'has neither a sprite nor text (it will be invisible)' });
+    // No sprite but a hitbox = an invisible trigger (map exits, cutscene zones): intended.
+    if (!full.sprite && full.text === undefined && !full.hitbox) out.push({ where: `object ${o.name}`, message: 'has neither a sprite nor text nor a hitbox (it will be invisible and empty)' });
     o.behaviors.forEach((b, i) => {
       const spec = BEHAVIOR_MAP.get(b.type);
       if (!spec) out.push({ where: `object ${o.name} behavior ${i}`, message: `unknown behavior "${b.type}"` });

@@ -46,6 +46,13 @@ Oltre a quanto richiesto (un behaviour per file, cartelle, ciclo di vita, parame
 - **Widget per l'interfaccia**: `ui.menu`, `ui.button`, `ui.window`, `ui.mouse`, `pause()` con `pausedUpdate`.
 - **Eventi sui frame delle animazioni**: campo ⚑ nell'editor degli sprite, `set_frame_events`, `onAnimationEvent` e il trigger *Animation event*.
 
+## Fatto nel sesto giro (città che cresce in Crystal Vale)
+
+- **Tabelle dati** (scheda Data, `db` negli script, `db()` nelle espressioni, strumenti MCP, tipi nella `d.ts`).
+- **Istanze condizionali** (`activeIf`): edifici, abitanti e decorazioni che compaiono quando una condizione diventa vera.
+- `fn()` nelle espressioni, `spawn()` con sprite/nome, `preview_scene` e `playtest` con `vars`, `playtest` con `player_at`.
+- Correzione: il server MCP non va più in crash se l'editor è già aperto sulla porta 7420.
+
 Tutte le proposte di questo documento sono state realizzate.
 
 ## Prossimi passi consigliati (in ordine)

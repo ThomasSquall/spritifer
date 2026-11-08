@@ -3,6 +3,8 @@
  * Everything here is plain JSON so the editor, the MCP server and the exported runtime share it.
  */
 
+import { type TilesetRules, normalizeTilesetRules } from './tilerules.js';
+
 export type Value = number | string | boolean;
 
 /** One parameter value of a trigger, condition, action or behavior. Expressions are strings. */
@@ -70,6 +72,10 @@ export interface ObjectType {
   hud?: boolean;
   /** Group tags ("enemy", "pickup") for scripts: self.hasTag(), findWithTag(), raycast/overlap filters. */
   tags?: string[];
+  /** Light the instance gives off (lamps, fires, crystals, magic). Seen when the scene has an ambient darker than white, and as glow. */
+  light?: LightDef;
+  /** Soft contact shadow under the instance: width in px (0 = none). Absent = automatic (hitbox width) when the scene has shadows. */
+  shadow?: number;
   /** Instance variables with their default values (self.hp, self.speed...). */
   properties: Record<string, Value>;
   behaviors: Behavior[];
@@ -87,6 +93,52 @@ export interface TileLayer {
   parallax?: number;
   /** Draw order relative to objects (objects default to z 0; layers default to -10 + index). */
   z?: number;
+}
+
+/** A point light. Offsets are from the center of the sprite. */
+export interface LightDef {
+  /** Reach in pixels. */
+  radius: number;
+  color?: string;
+  /** 0..2 (default 1). */
+  intensity?: number;
+  /** 0..1: how much it flickers (fire ~0.15, crystals 0). */
+  flicker?: number;
+  /** Slow breathing pulse 0..1 (magic, crystals). */
+  pulse?: number;
+  x?: number;
+  y?: number;
+}
+
+/** Ambient particles that float in view (fireflies, dust motes, snow, embers, falling leaves). */
+export interface SceneMotes {
+  preset: 'fireflies' | 'dust' | 'snow' | 'embers' | 'leaves' | 'spores' | 'bubbles';
+  /** Particles on screen at once (default 24). */
+  count?: number;
+  /** Override the preset colors. */
+  color?: string | string[];
+}
+
+/** Lighting and atmosphere of a scene: what makes it feel like a place and not a grid. */
+export interface SceneAtmosphere {
+  /** Multiplied over the world: "#ffffff" = plain daylight, "#ffe8d0" warm afternoon, "#6a6aa8" dusk, "#2a2c50" night/caves. Lights cut through it. */
+  ambient?: string;
+  /** How much lights add a glow on top (bloom), 0..2 (default 0.6). */
+  glow?: number;
+  /** Soft contact shadows under instances (default true). */
+  shadows?: boolean;
+  /** Shadow color (default a cool dark purple) and opacity 0..1 (default 0.38). */
+  shadowColor?: string;
+  shadowOpacity?: number;
+  /** Darken the screen edges 0..1. */
+  vignette?: number;
+  vignetteColor?: string;
+  /** Drifting cloud shadows: a tileable sprite (dark blobs on transparent) moved by the wind. */
+  clouds?: { sprite: string; opacity?: number; speedX?: number; speedY?: number };
+  /** Color grade: blend a tint over the frame (sunset orange, cold blue), 0..1. */
+  tint?: string;
+  tintAmount?: number;
+  motes?: SceneMotes;
 }
 
 export interface Instance {
@@ -107,6 +159,14 @@ export interface Instance {
   components?: ComponentOverrides;
   /** Extra tags for this instance (added to the object type's). */
   tags?: string[];
+  /**
+   * Expression: the instance exists only while it is true (e.g. `armoryLevel >= 2`, `quest_ring == 2`).
+   * Checked when the scene starts and continuously while it runs: the instance appears or disappears
+   * (a disappearing one is not "destroyed": it comes back when the condition holds again). Towns that grow.
+   */
+  activeIf?: string;
+  /** Light of this instance (overrides the object type's; null-like radius 0 = no light). */
+  light?: LightDef;
 }
 
 export interface SceneBackground {
@@ -142,6 +202,8 @@ export interface Scene {
   variables: Record<string, Value>;
   /** Scene components (managers, level logic, HUD): `{ type: "script", name, ...params }`. */
   components?: Behavior[];
+  /** Lighting, shadows, clouds, color grade and ambient particles. */
+  atmosphere?: SceneAtmosphere;
   rev: string;
   updatedBy?: string;
 }
@@ -171,6 +233,8 @@ export interface GameProject {
    * like a key. A name like "action" or "up" remaps that built-in key.
    */
   actions?: Record<string, string[]>;
+  /** Tileset rules by tileset sprite name: autotiling, big seamless textures, random variants, edge overlays. */
+  tilesets?: Record<string, TilesetRules>;
   rev: string;
   updatedBy?: string;
 }
@@ -273,6 +337,9 @@ export function normalizeObject(v: unknown): ObjectType {
   const tags = normalizeTags(o.tags);
   if (tags) obj.tags = tags;
   if (typeof o.extends === 'string' && o.extends && o.extends !== obj.name) obj.extends = o.extends;
+  const light = normalizeLight(o.light);
+  if (light) obj.light = light;
+  if (typeof o.shadow === 'number' && Number.isFinite(o.shadow)) obj.shadow = Math.max(0, Math.round(o.shadow));
   return obj;
 }
 
@@ -294,9 +361,20 @@ export function normalizeGame(v: unknown): GameProject {
     objects: Array.isArray(o.objects) ? o.objects.map(normalizeObject) : [],
     ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
     ...(normalizeActions(o.actions) ? { actions: normalizeActions(o.actions) } : {}),
+    ...(normalizeTilesets(o.tilesets) ? { tilesets: normalizeTilesets(o.tilesets) } : {}),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
   };
+}
+
+function normalizeTilesets(v: unknown): Record<string, TilesetRules> | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const out: Record<string, TilesetRules> = {};
+  for (const [k, r] of Object.entries(v)) {
+    const n = normalizeTilesetRules(r);
+    if (n) out[k] = n;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** Input actions: identifier → unique key names (lowercase, e.g. "space", "arrowup", "pad:a"). */
@@ -308,6 +386,47 @@ export function normalizeActions(v: unknown): Record<string, string[]> | undefin
     const list = (Array.isArray(keys) ? keys : typeof keys === 'string' ? keys.split(',') : []).map((x) => String(x).trim().toLowerCase()).filter((x) => /^[a-z0-9:_-]{1,24}$/.test(x));
     out[k] = [...new Set(list)];
   }
+  return Object.keys(out).length ? out : undefined;
+}
+
+const COLOR_RE = /^#[0-9a-fA-F]{3,8}$/;
+const clampN = (v: unknown, lo: number, hi: number): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : undefined);
+const colorOr = (v: unknown): string | undefined => (typeof v === 'string' && COLOR_RE.test(v) ? v : undefined);
+const compact = <T extends object>(o: T): T => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
+
+/** A light definition, or undefined. With allowOff a radius 0 light is kept (an instance switching its type's light off). */
+export function normalizeLight(v: unknown, allowOff = false): LightDef | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const L = v as Record<string, unknown>;
+  const radius = clampN(L.radius, 0, 1024);
+  if (radius === undefined || (!radius && !allowOff)) return undefined;
+  return compact({ radius, color: colorOr(L.color), intensity: clampN(L.intensity, 0, 4), flicker: clampN(L.flicker, 0, 1), pulse: clampN(L.pulse, 0, 1), x: clampN(L.x, -4096, 4096), y: clampN(L.y, -4096, 4096) });
+}
+
+export const MOTE_PRESETS = ['fireflies', 'dust', 'snow', 'embers', 'leaves', 'spores', 'bubbles'] as const;
+
+export function normalizeAtmosphere(v: unknown): SceneAtmosphere | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const A = v as Record<string, unknown>;
+  const C = A.clouds as Record<string, unknown> | undefined;
+  const M = A.motes as Record<string, unknown> | undefined;
+  const motes: SceneMotes | undefined =
+    M && typeof M === 'object' && (MOTE_PRESETS as readonly string[]).includes(String(M.preset))
+      ? compact({ preset: M.preset as SceneMotes['preset'], count: clampN(M.count, 0, 400), color: Array.isArray(M.color) ? M.color.filter((c): c is string => !!colorOr(c)) : colorOr(M.color) })
+      : undefined;
+  const out: SceneAtmosphere = compact({
+    ambient: colorOr(A.ambient),
+    glow: clampN(A.glow, 0, 2),
+    shadows: typeof A.shadows === 'boolean' ? A.shadows : undefined,
+    shadowColor: colorOr(A.shadowColor),
+    shadowOpacity: clampN(A.shadowOpacity, 0, 1),
+    vignette: clampN(A.vignette, 0, 1),
+    vignetteColor: colorOr(A.vignetteColor),
+    clouds: C && typeof C === 'object' && typeof C.sprite === 'string' && C.sprite ? compact({ sprite: C.sprite, opacity: clampN(C.opacity, 0, 1), speedX: clampN(C.speedX, -500, 500), speedY: clampN(C.speedY, -500, 500) }) : undefined,
+    tint: colorOr(A.tint),
+    tintAmount: clampN(A.tintAmount, 0, 1),
+    motes,
+  });
   return Object.keys(out).length ? out : undefined;
 }
 
@@ -343,6 +462,9 @@ export function normalizeScene(v: unknown): Scene {
     if (comps) inst.components = comps;
     const itags = normalizeTags(I.tags);
     if (itags) inst.tags = itags;
+    if (typeof I.activeIf === 'string' && I.activeIf.trim()) inst.activeIf = I.activeIf.trim();
+    const light = normalizeLight(I.light, true);
+    if (light) inst.light = light;
     return inst;
   });
   const backgrounds: SceneBackground[] = (Array.isArray(o.backgrounds) ? o.backgrounds : []).map((b: unknown) => {
@@ -367,6 +489,7 @@ export function normalizeScene(v: unknown): Scene {
     ...(typeof o.music === 'string' && o.music ? { music: o.music } : {}),
     variables: vars(o.variables),
     ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
+    ...(normalizeAtmosphere(o.atmosphere) ? { atmosphere: normalizeAtmosphere(o.atmosphere) } : {}),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
   };
@@ -423,6 +546,120 @@ export interface SpriteAsset {
   image?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Data tables (data/<name>.json): the game's database — items, weapons, classes, quests, enemies...
+
+export type DataValue = number | string | boolean | string[];
+export type DataRow = Record<string, DataValue> & { id: string };
+export const DATA_COLUMN_TYPES = ['text', 'number', 'bool', 'list', 'ref'] as const;
+export type DataColumnType = (typeof DATA_COLUMN_TYPES)[number];
+
+export interface DataColumn {
+  name: string;
+  type: DataColumnType;
+  /** ref columns: the table whose ids the values are. */
+  table?: string;
+  /** Shown as a tooltip in the editor and in references. */
+  help?: string;
+}
+
+/** A table: typed columns and rows with a unique text id. Scripts read it as db.<name>, expressions as db("name", id, column). */
+export interface DataTable {
+  format: 'spritifer-table';
+  version: 1;
+  name: string;
+  /** What the table is for (shown in the editor, list_data and the generated types). */
+  description?: string;
+  columns: DataColumn[];
+  rows: DataRow[];
+  rev: string;
+  updatedBy?: string;
+}
+
+const DATA_ID_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
+
+function dataValue(v: unknown, type: DataColumnType): DataValue | undefined {
+  if (v === undefined || v === null) return undefined;
+  switch (type) {
+    case 'number': {
+      const n = typeof v === 'number' ? v : Number(v);
+      return Number.isFinite(n) ? n : 0;
+    }
+    case 'bool':
+      return v === true || v === 'true' || v === 1 || v === '1';
+    case 'list':
+      return (Array.isArray(v) ? v : String(v).split(',')).map((x) => String(x).trim()).filter(Boolean);
+    default:
+      return Array.isArray(v) ? v.join(',') : String(v);
+  }
+}
+
+const inferType = (v: unknown): DataColumnType => (typeof v === 'number' ? 'number' : typeof v === 'boolean' ? 'bool' : Array.isArray(v) ? 'list' : 'text');
+
+/** Normalizes a table: columns (inferred from the rows when missing, "id" always first), typed values, unique ids. */
+export function normalizeTable(v: unknown, name?: string): DataTable {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+  const rawRows = (Array.isArray(o) ? o : Array.isArray(o.rows) ? o.rows : []) as unknown[];
+  const columns: DataColumn[] = [];
+  const seen = new Set<string>();
+  const addColumn = (c: DataColumn) => {
+    if (seen.has(c.name) || !GAME_NAME_RE.test(c.name)) return;
+    seen.add(c.name);
+    columns.push(c);
+  };
+  addColumn({ name: 'id', type: 'text' });
+  if (Array.isArray(o.columns)) {
+    for (const c of o.columns as unknown[]) {
+      const C = (c && typeof c === 'object' ? c : { name: c }) as Record<string, unknown>;
+      const type = (DATA_COLUMN_TYPES as readonly string[]).includes(String(C.type)) ? (C.type as DataColumnType) : 'text';
+      const col: DataColumn = { name: str(C.name, ''), type };
+      if (col.name === 'id') continue;
+      if (type === 'ref' && typeof C.table === 'string' && C.table) col.table = C.table;
+      if (typeof C.help === 'string' && C.help) col.help = C.help;
+      addColumn(col);
+    }
+  }
+  for (const r of rawRows) {
+    if (!r || typeof r !== 'object') continue;
+    for (const [k, x] of Object.entries(r)) if (!seen.has(k)) addColumn({ name: k, type: inferType(x) });
+  }
+  const ids = new Set<string>();
+  const rows: DataRow[] = [];
+  rawRows.forEach((r, i) => {
+    if (!r || typeof r !== 'object') return;
+    const R = r as Record<string, unknown>;
+    let id = String(R.id ?? '').trim();
+    if (!DATA_ID_RE.test(id)) id = `row${i + 1}`;
+    while (ids.has(id)) id += '_';
+    ids.add(id);
+    const row = { id } as DataRow;
+    for (const c of columns) {
+      if (c.name === 'id') continue;
+      const val = dataValue(R[c.name], c.type);
+      if (val !== undefined) row[c.name] = val;
+    }
+    rows.push(row);
+  });
+  return {
+    format: 'spritifer-table',
+    version: 1,
+    name: str(o.name, name ?? 'table'),
+    ...(typeof o.description === 'string' && o.description ? { description: o.description } : {}),
+    columns,
+    rows,
+    rev: str(o.rev, newGameId()),
+    ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
+  };
+}
+
+/** Value of a column for a row, with the column's default when missing (0, "", false, []). */
+export function cellValue(t: DataTable, row: DataRow, col: string): DataValue {
+  const v = row[col];
+  if (v !== undefined) return v;
+  const c = t.columns.find((x) => x.name === col);
+  return c?.type === 'number' ? 0 : c?.type === 'bool' ? false : c?.type === 'list' ? [] : '';
+}
+
 /** Everything needed to run the game. */
 export interface GameBundle {
   game: GameProject;
@@ -434,4 +671,6 @@ export interface GameBundle {
   dialogues?: Record<string, string>;
   /** Audio files by name (audio/<name>.mp3...): data URLs in played/exported games, "" in headless runs. */
   audio?: Record<string, string>;
+  /** Data tables by name (data/<name>.json). */
+  data?: Record<string, DataTable>;
 }

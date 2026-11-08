@@ -8,13 +8,13 @@ import {
   newId,
   serializeSprite,
 } from '../core/sprite.js';
-import { type GameProject, type Scene, assertIdentifier, createGame, newGameId, normalizeGame, normalizeScene } from '../core/game/types.js';
+import { type DataTable, type GameProject, type Scene, assertIdentifier, createGame, newGameId, normalizeGame, normalizeScene, normalizeTable } from '../core/game/types.js';
 
 const SUFFIX = '.sprite.json';
 const SCENE_SUFFIX = '.scene.json';
 export const GAME_FILE = 'game.json';
 
-export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script' | 'dialogue';
+export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data';
 const SCRIPT_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
 const AUDIO_MIME: Record<string, string> = { mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4' };
 /** Script names are paths in scripts/ without .js: "enemies/Patrol". */
@@ -392,6 +392,66 @@ export class Workspace {
     fs.rmSync(this.dialogueFile(name));
   }
 
+  // ------------------------------------------------------------------ data tables
+
+  get dataDir(): string {
+    return path.join(this.dir, 'data');
+  }
+
+  tableFile(name: string): string {
+    assertIdentifier('data table', name);
+    return path.join(this.dataDir, `${name}.json`);
+  }
+
+  tableExists(name: string): boolean {
+    return fs.existsSync(this.tableFile(name));
+  }
+
+  listTables(): { name: string; rows: number; columns: string[]; description?: string; updatedAt: number; rev: string }[] {
+    if (!fs.existsSync(this.dataDir)) return [];
+    const out = [];
+    for (const f of fs.readdirSync(this.dataDir)) {
+      if (!f.endsWith('.json') || f.startsWith('.')) continue;
+      const name = f.slice(0, -5);
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(name)) continue;
+      try {
+        const t = this.loadTable(name);
+        out.push({ name, rows: t.rows.length, columns: t.columns.map((c) => c.name), ...(t.description ? { description: t.description } : {}), updatedAt: fs.statSync(path.join(this.dataDir, f)).mtimeMs, rev: t.rev });
+      } catch {
+        // Unreadable file: skipped (validate_game reports it).
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  loadTable(name: string): DataTable {
+    const f = this.tableFile(name);
+    if (!fs.existsSync(f)) {
+      const names = this.listTables().map((t) => t.name);
+      throw new Error(`Data table "${name}" not found.${names.length ? ' Tables: ' + names.join(', ') : ' There are no data tables yet.'}`);
+    }
+    return normalizeTable(JSON.parse(fs.readFileSync(f, 'utf8')), name);
+  }
+
+  loadTables(): Record<string, DataTable> {
+    return Object.fromEntries(this.listTables().map((t) => [t.name, this.loadTable(t.name)]));
+  }
+
+  saveTable(table: DataTable, updatedBy?: string): DataTable {
+    const t = normalizeTable({ ...table, rev: newGameId(), ...(updatedBy ? { updatedBy } : {}) }, table.name);
+    t.name = table.name;
+    const f = this.tableFile(t.name);
+    fs.mkdirSync(this.dataDir, { recursive: true });
+    const tmp = path.join(this.dataDir, `.${t.name}.${process.pid}.tmp`);
+    fs.writeFileSync(tmp, JSON.stringify(t, null, 1));
+    fs.renameSync(tmp, f);
+    return t;
+  }
+
+  removeTable(name: string): void {
+    fs.rmSync(this.tableFile(name));
+  }
+
   private atomicWrite(target: string, data: string): void {
     const tmp = path.join(this.dir, `.${path.basename(target)}.${process.pid}.tmp`);
     fs.writeFileSync(tmp, data);
@@ -461,10 +521,22 @@ export class Workspace {
         onChange(name, 'dialogue');
       }, 40));
     });
+    fs.mkdirSync(this.dataDir, { recursive: true });
+    const dataWatcher = fs.watch(this.dataDir, (_event, filename) => {
+      if (!filename || !filename.endsWith('.json') || filename.startsWith('.')) return;
+      const name = filename.slice(0, -5);
+      const key = 'data:' + name;
+      clearTimeout(timers.get(key));
+      timers.set(key, setTimeout(() => {
+        timers.delete(key);
+        onChange(name, 'data');
+      }, 40));
+    });
     return () => {
       watcher.close();
       scriptWatcher.close();
       dialogueWatcher.close();
+      dataWatcher.close();
     };
   }
 }

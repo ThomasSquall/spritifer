@@ -15,6 +15,7 @@ import { renderProjects } from './projectsView.js';
 import { renderScripts } from './scriptsView.js';
 import { pushScriptsToPlay } from './play.js';
 import { renderDialogues } from './dialoguesView.js';
+import { renderData } from './dataView.js';
 import { currentProjectId } from './api.js';
 
 const root = document.getElementById('app')!;
@@ -24,7 +25,7 @@ let current: { editor: Editor; view: ReturnType<typeof mountEditor> } | null = n
 let sceneEd: SceneEditorHandle | null = null;
 /** Re-renders the current list page after remote changes. */
 let refreshPage: (() => void) | null = null;
-let page: 'sprites' | 'objects' | 'scenes' | 'scripts' | 'dialogues' | 'game' | 'sprite' | 'scene' | 'projects' = 'sprites';
+let page: 'sprites' | 'objects' | 'scenes' | 'scripts' | 'dialogues' | 'data' | 'game' | 'sprite' | 'scene' | 'projects' = 'sprites';
 let scriptsPage: { refresh: () => void; destroy: () => void } | null = null;
 
 /** The previous in-app page, so "back" from the sprite editor returns where the user came from. */
@@ -102,6 +103,13 @@ async function route(): Promise<void> {
     refreshPage = scriptsPage.refresh;
     return;
   }
+  if ((m = /^#\/data(?:\/(.+))?$/.exec(hash))) {
+    page = 'data';
+    document.title = 'Data · Spritifer';
+    scriptsPage = renderData(root, m[1] ? decodeURIComponent(m[1]) : null, (name) => go(name ? `#/data/${encodeURIComponent(name)}` : '#/data'));
+    refreshPage = scriptsPage.refresh;
+    return;
+  }
   if ((m = /^#\/scripts(?:\/(.+))?$/.exec(hash))) {
     page = 'scripts';
     document.title = 'Scripts · Spritifer';
@@ -165,13 +173,19 @@ state.subscribe(() => {
 });
 
 async function onRemoteChange(e: ChangeEvent): Promise<void> {
-  const kind = e.type.replace('-changed', '') as 'sprite' | 'scene' | 'game' | 'script' | 'dialogue';
+  const kind = e.type.replace('-changed', '') as 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data';
   const fromSelf = e.updatedBy === 'editor';
   // Changes to other projects (e.g. Claude working elsewhere) only show a note.
   const mine = currentProjectId();
   if (e.project && mine && e.project !== mine) {
     if (page === 'projects') refreshSoon();
     if (e.updatedBy === 'claude') toast(`Claude is editing project "${e.project}"`, 'claude');
+    return;
+  }
+  if (kind === 'data') {
+    await state.remote('data', e.rev);
+    if (page === 'data' && !fromSelf) refreshSoon();
+    if (e.updatedBy === 'claude') toast(`Data table "${e.name}" updated by Claude`, 'claude');
     return;
   }
   if (kind === 'dialogue') {

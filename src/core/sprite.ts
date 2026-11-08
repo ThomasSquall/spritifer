@@ -165,6 +165,9 @@ export interface SpriteFile {
 }
 
 export const MAX_SIZE = 2048;
+/** Tall strips (generated tilesets, long spritesheets) may exceed MAX_SIZE on one side, within this many pixels. */
+export const MAX_SIDE = 8192;
+export const MAX_AREA = MAX_SIZE * MAX_SIZE;
 export const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_\-]{0,63}$/;
 
 const TAG_COLORS = ['#e43b44', '#feae34', '#63c74d', '#0099db', '#b55088', '#f77622', '#2ce8f5', '#c28569'];
@@ -184,8 +187,8 @@ export function assertValidName(name: string): void {
 }
 
 function assertSize(width: number, height: number): void {
-  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > MAX_SIZE || height > MAX_SIZE) {
-    throw new Error(`Invalid size ${width}x${height}. Width and height must be integers between 1 and ${MAX_SIZE}.`);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > MAX_SIDE || height > MAX_SIDE || width * height > MAX_AREA) {
+    throw new Error(`Invalid size ${width}x${height}. Width and height must be integers between 1 and ${MAX_SIDE}, at most ${MAX_AREA} pixels in all.`);
   }
 }
 

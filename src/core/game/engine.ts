@@ -7,13 +7,23 @@
 import { ACTION_MAP, BEHAVIOR_MAP, CONDITION_MAP, TRIGGER_MAP, withDefaults } from './catalog.js';
 import { type ExprContext, MATH_FUNCTIONS, compile, fmt, parseTarget, toNum, truthy } from './expr.js';
 import { measureText } from './font.js';
-import type { Behavior, ComponentOverrides, EventStep, GameBundle, GameEvent, GameProject, Hitbox, ObjectType, Scene, SpriteAsset, Value } from './types.js';
+import { type Behavior, type ComponentOverrides, type DataRow, type DataTable, type EventStep, type GameBundle, type GameEvent, type GameProject, type Hitbox, type Instance, type LightDef, type ObjectType, type Scene, type SpriteAsset, type Value, cellValue } from './types.js';
 import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, fieldsOf, wrapText } from './script.js';
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
 import { resolveObjectTypes } from './variants.js';
 import { ParticleSystem } from './particles.js';
+import { TileResolver } from './tilerules.js';
+import { MoteField, type ScreenLight, drawClouds, drawShadows, postProcess } from './atmosphere.js';
 
 export const STEP = 1 / 60;
+
+function deepFreeze<T>(o: T): T {
+  if (o && typeof o === 'object' && !Object.isFrozen(o)) {
+    Object.freeze(o);
+    for (const v of Object.values(o as object)) deepFreeze(v);
+  }
+  return o;
+}
 
 export interface InputFrame {
   /** Logical keys held this frame (left, right, up, down, space, action, a..z, ...). */
@@ -43,6 +53,8 @@ export interface EngineOptions {
   scene?: string;
   /** How scripts are evaluated (the server uses node:vm). */
   evaluator?: ScriptEvaluator;
+  /** Global variables that override the game's initial values (playtests of later stages). */
+  vars?: Record<string, Value>;
   /** Headless runs: confirm dialogs automatically after `delay` seconds, picking menu entries from `choices` (default 0). */
   autoDialog?: { choices: number[]; delay: number };
 }
@@ -94,6 +106,8 @@ export class Actor {
   destroyed = false;
   textOverride: string | null = null;
   flashUntil = 0;
+  /** Light it gives off (object type's, or the instance's override). */
+  light: LightDef | undefined;
   createdAt: number;
   facing: 'down' | 'up' | 'left' | 'right' = 'down';
   /** Name given to the placed instance (hierarchy / dialogue speaker). */
@@ -127,6 +141,7 @@ export class Actor {
     this.createdAt = now;
     this.anim = type.animation ?? '';
     this.tags = new Set(type.tags ?? []);
+    this.light = type.light;
   }
 
   /** Group tags of the object type (+ the instance's own). */
@@ -253,6 +268,16 @@ export class World {
   cameraTarget: Actor | null | undefined = undefined;
   /** Visual particles (world space). */
   readonly particles = new ParticleSystem(() => this.random());
+  /** Ambient floating particles of the scene atmosphere (own random: gameplay stays deterministic). */
+  readonly motes = new MoteField();
+  private resolvers = new Map<string, TileResolver>();
+  /** Tile rules of a tileset (autotiling, textures, overlays). */
+  tileResolver(tileset: string): TileResolver {
+    let r = this.resolvers.get(tileset);
+    if (!r) this.resolvers.set(tileset, (r = new TileResolver(this.game.tilesets?.[tileset])));
+    return r;
+  }
+  private motesFor: unknown = null;
   /** Smoothed look-ahead offset of the camera (px). */
   private lookX = 0;
   /** Screen shake, timed with `clock` (keeps running while dialogs pause the scene, so it always ends). */
@@ -276,6 +301,10 @@ export class World {
     return a.type.name === objectName || (this.lineage.get(a.type.name)?.includes(objectName) ?? false);
   }
   private errors = new Set<string>();
+  /** Placed instances of the current scene whose activeIf is false right now (not destroyed: they can come back). */
+  private dormant = new Set<string>();
+  /** Data tables (data/<name>.json) by name. */
+  readonly data: Record<string, DataTable>;
   private solidLayers: number[][] = [];
   private started = false;
   private gameStarted = false;
@@ -377,6 +406,9 @@ export class World {
         }
       }
     }
+    // Scripts get the tables read-only (a script can't corrupt the database for the next run).
+    if (opts.vars) Object.assign(this.globals, opts.vars);
+    this.data = deepFreeze(structuredClone(bundle.data ?? {}));
     this.dialogues = buildDialogueBook(bundle.dialogues ?? {});
     for (const e of this.dialogues.errors) this.log(`ERROR dialogues/${e.file}.dialogue line ${e.line}: ${e.message}`);
     this.scripts = new ScriptHost(this);
@@ -461,35 +493,89 @@ export class World {
     this.lookX = 0;
     this.solidLayers = scene.layers.filter((l) => l.solid).map((l) => l.tiles);
     this.scripts?.resetScene();
+    this.dormant.clear();
+    this.sceneMemory = remembered;
     for (const inst of scene.instances) {
-      const type = this.objectMap.get(inst.object);
-      if (!type) continue;
+      if (!this.objectMap.has(inst.object)) continue;
       const mem = remembered?.get(inst.id);
       if (mem?.destroyed) continue;
-      const a = this.makeActor(type, inst.x, inst.y, inst.sprite);
-      a.sceneId = inst.id;
-      a.instName = inst.name ?? null;
-      if (inst.animation) a.anim = inst.animation;
-      if (inst.props) Object.assign(a.vars, inst.props);
-      if (inst.flipX) a.flipX = true;
-      for (const t of inst.tags ?? []) a.tags.add(t);
-      a.componentConfig = inst.components;
-      if (mem) {
-        a.componentRestore = mem.comps;
-        a.x = a.startX = mem.x ?? a.x;
-        a.y = a.startY = mem.y ?? a.y;
-        if (mem.vars) a.vars = { ...mem.vars };
-        if (mem.flipX !== undefined) a.flipX = mem.flipX;
-        if (mem.facing) a.facing = mem.facing;
-        if (mem.anim !== undefined) {
-          a.anim = mem.anim;
-          if (a.hasTag(mem.anim)) a.animLock = Infinity;
-        }
+      if (inst.activeIf && !this.isActive(inst)) {
+        this.dormant.add(inst.id);
+        continue;
       }
-      this.actors.push(a);
+      this.actors.push(this.placeInstance(inst, mem));
     }
     this.started = false;
     this.log(`scene "${name}" started`);
+  }
+
+  /** What the current scene remembered when it loaded (persistent scenes, loaded saves). */
+  private sceneMemory: Map<string, MemoryEntry> | undefined;
+
+  /** Creates the actor of a placed instance (with what a persistent scene remembered about it). */
+  private placeInstance(inst: Instance, mem: MemoryEntry | undefined): Actor {
+    const type = this.objectMap.get(inst.object)!;
+    const a = this.makeActor(type, inst.x, inst.y, inst.sprite);
+    a.sceneId = inst.id;
+    a.instName = inst.name ?? null;
+    if (inst.animation) a.anim = inst.animation;
+    if (inst.props) Object.assign(a.vars, inst.props);
+    if (inst.flipX) a.flipX = true;
+    if (inst.light) a.light = inst.light.radius > 0 ? inst.light : undefined;
+    for (const t of inst.tags ?? []) a.tags.add(t);
+    a.componentConfig = inst.components;
+    if (mem) {
+      a.componentRestore = mem.comps;
+      a.x = a.startX = mem.x ?? a.x;
+      a.y = a.startY = mem.y ?? a.y;
+      if (mem.vars) a.vars = { ...mem.vars };
+      if (mem.flipX !== undefined) a.flipX = mem.flipX;
+      if (mem.facing) a.facing = mem.facing;
+      if (mem.anim !== undefined) {
+        a.anim = mem.anim;
+        if (a.hasTag(mem.anim)) a.animLock = Infinity;
+      }
+    }
+    return a;
+  }
+
+  /** Is a placed instance's activeIf true? (Errors are reported once and count as active.) */
+  private isActive(inst: Instance): boolean {
+    if (!inst.activeIf) return true;
+    try {
+      return truthy(compile(inst.activeIf)(this.ctx({})));
+    } catch (err) {
+      this.error(`instance ${inst.name ?? inst.object}#${inst.id} activeIf`, err);
+      return true;
+    }
+  }
+
+  /**
+   * Conditional instances (activeIf) appear when their condition becomes true and disappear when it turns false.
+   * Runs a few times per second and right after variables change through events, dialogues or refreshInstances().
+   */
+  refreshConditional(): void {
+    if (!this.started) return;
+    for (const inst of this.scene.instances) {
+      if (!inst.activeIf) continue;
+      const active = this.isActive(inst);
+      if (active && this.dormant.has(inst.id)) {
+        this.dormant.delete(inst.id);
+        const mem = this.scene.persistent ? this.memory.get(this.scene.name)?.get(inst.id) : this.sceneMemory?.get(inst.id);
+        const a = this.placeInstance(inst, mem?.destroyed ? undefined : mem);
+        this.actors.push(a);
+        this.onCreated(a);
+        this.fireObject(a, 'start');
+      } else if (!active) {
+        const a = this.actors.find((x) => x.sceneId === inst.id && !x.destroyed);
+        if (!a) continue;
+        // Not destroyed: no "destroyed" event, no memory of it; it comes back when the condition holds.
+        a.destroyed = true;
+        this.talking.delete(a);
+        for (const c of [...a.components]) this.scripts.remove(c);
+        this.dormant.add(inst.id);
+      }
+    }
   }
 
   /** State of the placed instances of the current scene (destroyed ones too when asked). */
@@ -504,7 +590,7 @@ export class World {
       }
       out.set(a.sceneId, { x: a.x, y: a.y, vars: { ...a.vars }, flipX: a.flipX, facing: a.facing, anim: a.anim, ...(a.components.length ? { comps } : {}) });
     }
-    if (withDestroyed) for (const i of this.scene.instances) if (!out.has(i.id)) out.set(i.id, { destroyed: true });
+    if (withDestroyed) for (const i of this.scene.instances) if (!out.has(i.id) && !this.dormant.has(i.id)) out.set(i.id, { destroyed: true });
     return out;
   }
 
@@ -853,6 +939,12 @@ export class World {
       return;
     }
     this.particles.tick(dt);
+    const moteCfg = this.scene.atmosphere?.motes;
+    if (moteCfg !== this.motesFor) {
+      this.motesFor = moteCfg;
+      this.motes.reset(moteCfg);
+    }
+    this.motes.tick(dt, { x: this.camera.x, y: this.camera.y, w: this.viewWidth, h: this.viewHeight });
 
     // Dialogs pause the game; the frame that closes one doesn't run gameplay either (the key press is used up).
     const confirm = input.pressed.has('action') || input.pressed.has('enter') || input.clicks.length > 0;
@@ -970,6 +1062,8 @@ export class World {
     sh.invokeAll(this.sceneComponents, 'lateUpdate', dt);
     for (const a of [...this.actors]) if (!a.destroyed && a.components.length) sh.invokeAll(a.components, 'lateUpdate', dt);
 
+    // Conditional instances follow their activeIf (6 times per second is enough and cheap).
+    if (this.frame % 10 === 0) this.refreshConditional();
     this.updateTexts();
 
     this.actors = this.actors.filter((a) => !a.destroyed);
@@ -1835,12 +1929,17 @@ export class World {
     for (const c of [...a.components]) this.scripts.remove(c);
   }
 
-  spawn(objectName: string, x: number, y: number, vx = 0, vy = 0): Actor | undefined {
+  spawn(objectName: string, x: number, y: number, vx = 0, vy = 0, opts: { props?: Record<string, Value>; sprite?: string; name?: string; animation?: string } = {}): Actor | undefined {
     const type = this.objectMap.get(objectName);
     if (!type) throw new Error(`no object type "${objectName}"`);
-    const a = this.makeActor(type, x, y);
+    if (opts.sprite && !this.bundle.sprites[opts.sprite]) throw new Error(`no sprite "${opts.sprite}" (only sprites used by the game are loaded: name it in a script or scene)`);
+    const a = this.makeActor(type, x, y, opts.sprite);
     a.vx = vx;
     a.vy = vy;
+    // Before onCreated, so awake() sees them.
+    if (opts.props) Object.assign(a.vars, opts.props);
+    if (opts.name) a.instName = opts.name;
+    if (opts.animation) a.anim = opts.animation;
     this.actors.push(a);
     if (this.started) this.onCreated(a);
     return a;
@@ -2109,6 +2208,28 @@ export class World {
     throw new Error(`cannot assign "${path.join('.')}"`);
   }
 
+  /** A data table by name (throws a helpful error when missing). */
+  table(name: string): DataTable {
+    const t = this.data[name];
+    if (!t) throw new Error(`no data table "${name}"${Object.keys(this.data).length ? ` (tables: ${Object.keys(this.data).join(', ')})` : ' (create one in the Data tab)'}`);
+    return t;
+  }
+
+  row(table: string, id: string): DataRow | undefined {
+    return this.table(table).rows.find((r) => r.id === id);
+  }
+
+  /** Expressions: db("table") = row count, db("table", id) = row exists, db("table", id, "column") = value. */
+  private dbValue(args: Value[]): Value {
+    const t = this.table(String(args[0] ?? ''));
+    if (args.length < 2) return t.rows.length;
+    const row = t.rows.find((r) => r.id === String(args[1]));
+    if (args.length < 3) return !!row;
+    if (!row) return 0;
+    const v = cellValue(t, row, String(args[2]));
+    return Array.isArray(v) ? v.join(', ') : v;
+  }
+
   nearest(from: Actor, objectName: string): Actor | undefined {
     let best: Actor | undefined;
     let bd = Infinity;
@@ -2140,6 +2261,15 @@ export class World {
             if (!c.self) return 0;
             const n = this.nearest(c.self, String(args[0]));
             return n ? (this.actorField(n, String(args[1] ?? 'x')) ?? 0) : 0;
+          }
+          case 'db': return this.dbValue(args);
+          case 'fn': {
+            const name = String(args[0] ?? '');
+            const f = this.scripts.functions.get(name) as ((...a: unknown[]) => unknown) | undefined;
+            if (!f) throw new Error(`no script function "${name}" (define it with func("${name}", ...))`);
+            const r = f(c.self ? this.scripts.handle(c.self) : undefined, c.other ? this.scripts.handle(c.other) : undefined, ...args.slice(1));
+            if (r && typeof (r as Promise<unknown>).then === 'function') throw new Error(`fn("${name}") returned a promise: functions used in expressions must not be async`);
+            return typeof r === 'number' || typeof r === 'string' || typeof r === 'boolean' ? r : r === undefined || r === null ? 0 : fmt(JSON.stringify(r));
           }
           case 'str': return fmt(args[0]);
           case 'num': return toNum(args[0]);
@@ -2184,6 +2314,25 @@ export interface Renderer {
   image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, opts: { flipX: boolean; opacity: number; angle: number; scale?: number }): void;
   rect(x: number, y: number, w: number, h: number, color: string, alpha?: number): void;
   text(text: string, x: number, y: number, color: string, scale: number): void;
+  /** Multiplies the frame by the ambient color plus the lights, then adds their glow (scene atmosphere). */
+  lighting?(ambient: string, lights: ScreenLight[], glow: number): void;
+  /** Soft-light color grade over the frame. */
+  grade?(tint: string, amount: number): void;
+  /** Darkens the screen edges. */
+  vignette?(strength: number, color: string): void;
+}
+
+/** Frame of an animated tileset at this time (0 for a still one). */
+function tilesetFrame(ts: SpriteAsset, clock: number): number {
+  const n = ts.frames.length;
+  if (n < 2) return 0;
+  const total = ts.frames.reduce((t, f) => t + Math.max(10, f.duration || 100), 0);
+  let t = (clock * 1000) % total;
+  for (let i = 0; i < n; i++) {
+    t -= Math.max(10, ts.frames[i].duration || 100);
+    if (t < 0) return i;
+  }
+  return 0;
 }
 
 /** A renderer that draws nothing (headless UI). */
@@ -2233,7 +2382,8 @@ export function renderWorld(w: World, r: Renderer): void {
     if (!layer.visible || !tileset || !tileset.frames.length) return;
     const grid = tileset.grid ?? { width: ts, height: ts };
     const tcols = Math.max(1, Math.floor(tileset.width / grid.width));
-    const f0 = tileset.frames[0];
+    // A tileset with several frames animates (water, lava, flowers): every tile shows the current frame.
+    const f0 = tileset.frames[tilesetFrame(tileset, w.clock)];
     const par = layer.parallax ?? 1;
     items.push({
       z: layer.z ?? li - 10,
@@ -2245,19 +2395,28 @@ export function renderWorld(w: World, r: Renderer): void {
         const y0 = Math.max(0, Math.floor(ly / ts));
         const x1 = Math.min(scene.cols - 1, Math.floor((lx + vw / zoom) / ts));
         const y1 = Math.min(scene.rows - 1, Math.floor((ly + vh / zoom) / ts));
+        const resolver = w.tileResolver(tileset.name);
+        const opts = img((ts / grid.width) || 1);
+        const draw: number[] = [];
         for (let ty = y0; ty <= y1; ty++) {
           for (let tx = x0; tx <= x1; tx++) {
             const t = layer.tiles[ty * scene.cols + tx];
             if (t < 0) continue;
-            const sx = f0.x + (t % tcols) * grid.width;
-            const sy = f0.y + Math.floor(t / tcols) * grid.height;
-            r.image(tileset.name, sx, sy, grid.width, grid.height, zx(tx * ts - lx), zx(ty * ts - ly), img((ts / grid.width) || 1));
+            resolver.resolve(layer, scene.cols, scene.rows, tx, ty, draw, w.clock);
+            for (const d of draw) {
+              const sx = f0.x + (d % tcols) * grid.width;
+              const sy = f0.y + Math.floor(d / tcols) * grid.height;
+              r.image(tileset.name, sx, sy, grid.width, grid.height, zx(tx * ts - lx), zx(ty * ts - ly), opts);
+            }
           }
         }
       },
     });
   });
 
+  const atm = scene.atmosphere;
+  // Contact shadows: above the ground layers, below everything standing on them.
+  if (atm) items.push({ z: -1.5, order: 0, draw: () => drawShadows(w, r, atm, camX, camY, zoom) });
   // Particles: behind the instances (above tiles), and in front of them.
   items.push({ z: -1, order: 1e9, draw: () => w.particles.draw(r, camX, camY, zoom, true) });
   items.push({ z: 50, order: 1e9, draw: () => w.particles.draw(r, camX, camY, zoom, false) });
@@ -2273,6 +2432,11 @@ export function renderWorld(w: World, r: Renderer): void {
   });
   items.sort((p, q) => p.z - q.z || p.order - q.order);
   for (const it of items) it.draw();
+  if (atm) {
+    drawClouds(w, r, atm, camX, camY, zoom);
+    w.motes.draw(r, camX, camY, zoom);
+    postProcess(w, r, atm, camX, camY, zoom);
+  }
   hud.sort((p, q) => p.z - q.z);
   for (const a of hud) drawActor(w, r, a, 0, 0);
   w.scripts.draw(r, camX, camY, zoom);
@@ -2405,6 +2569,10 @@ export interface PlaytestOptions {
   /** Confirm dialogs automatically (default true). Set false to drive them with "action" inputs. */
   autoDialog?: boolean;
   evaluator?: EngineOptions['evaluator'];
+  /** Global variables to start with (test later stages of a game). */
+  vars?: Record<string, Value>;
+  /** Put the player here when the first scene starts. */
+  playerAt?: [number, number];
 }
 
 /** Runs the game headless. Async so script continuations (await say/wait...) run between frames. */
@@ -2414,7 +2582,15 @@ export async function runPlaytest(bundle: GameBundle, opts: PlaytestOptions): Pr
     scene: opts.scene,
     evaluator: opts.evaluator,
     autoDialog: opts.autoDialog === false ? undefined : { choices: [...(opts.choices ?? [])], delay: 0.4 },
+    vars: opts.vars,
   });
+  if (opts.playerAt) {
+    const p = world.actors.find((a) => a.behaviors.some((b) => b.type === 'platformer' || b.type === 'topdown'));
+    if (p) {
+      p.x = p.startX = opts.playerAt[0];
+      p.y = p.startY = opts.playerAt[1];
+    }
+  }
   const inputs = opts.inputs ?? [];
   const frames = Math.round(Math.min(600, Math.max(0, opts.seconds)) / STEP);
   const samples: PlaytestResult['samples'] = [];

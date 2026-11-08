@@ -4,7 +4,7 @@ import { h, icon } from './dom.js';
 import { openExport, openPlay } from './play.js';
 import { state } from './gameState.js';
 
-export type NavTab = 'sprites' | 'objects' | 'scenes' | 'dialogues' | 'scripts' | 'game';
+export type NavTab = 'sprites' | 'objects' | 'scenes' | 'dialogues' | 'scripts' | 'data' | 'game';
 
 const TABS: { id: NavTab; label: string; href: string }[] = [
   { id: 'sprites', label: 'Sprites', href: '#/' },
@@ -12,6 +12,7 @@ const TABS: { id: NavTab; label: string; href: string }[] = [
   { id: 'scenes', label: 'Scenes', href: '#/scenes' },
   { id: 'dialogues', label: 'Dialogues', href: '#/dialogues' },
   { id: 'scripts', label: 'Scripts', href: '#/scripts' },
+  { id: 'data', label: 'Data', href: '#/data' },
   { id: 'game', label: 'Game', href: '#/game' },
 ];
 

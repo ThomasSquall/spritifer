@@ -60,6 +60,8 @@ export interface CompleteContext {
   tags?: string[];
   /** Audio files (audio/). */
   audio?: string[];
+  /** Data tables: name → column names. */
+  tables?: Record<string, string[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +187,8 @@ type T =
   | { k: 'component'; name: string }
   | { k: 'this'; cls: ClassScope }
   | { k: 'array'; of: T | null }
-  | { k: 'vars' | 'scene' | 'game' | 'camera' | 'ui' | 'math' | 'json' | 'string' };
+  | { k: 'row'; table: string }
+  | { k: 'vars' | 'scene' | 'game' | 'camera' | 'ui' | 'math' | 'json' | 'string' | 'db' };
 
 const HANDLE_NAMES = new Set(['self', 'other', 'player', 'target', 'hero', 'npc', 'enemy', 'foe']);
 
@@ -304,6 +307,12 @@ function typeOf(a: Analysis, expr: string, depth = 0): T | null {
       case 'find':
         t = { k: 'array', of: { k: 'handle' } };
         break;
+      case 'db': {
+        const tb = firstArg(head.call);
+        const two = /,/.test(head.call ?? '');
+        t = tb ? (two ? { k: 'row', table: tb } : { k: 'array', of: { k: 'row', table: tb } }) : null;
+        break;
+      }
       case 'findComponent': {
         const n = compArg(head.call);
         t = n ? { k: 'component', name: n } : null;
@@ -326,6 +335,7 @@ function typeOf(a: Analysis, expr: string, depth = 0): T | null {
       case 'scene': t = { k: 'scene' }; break;
       case 'game': t = { k: 'game' }; break;
       case 'camera': t = { k: 'camera' }; break;
+      case 'db': t = { k: 'db' }; break;
       case 'ui': t = { k: 'ui' }; break;
       case 'Math': t = { k: 'math' }; break;
       case 'JSON': t = { k: 'json' }; break;
@@ -347,6 +357,14 @@ function typeOf(a: Analysis, expr: string, depth = 0): T | null {
       continue;
     }
     const m = seg.name;
+    if (t.k === 'db') {
+      const tb = firstArg(seg.call);
+      if ((m === 'get') && tb) t = { k: 'row', table: tb };
+      else if (m === 'where' && tb) t = { k: 'array', of: { k: 'row', table: tb } };
+      else if (seg.call === undefined && a.ctx.tables?.[m]) t = { k: 'array', of: { k: 'row', table: m } };
+      else t = null;
+      continue;
+    }
     if (t.k === 'array') {
       t = m === 'find' && seg.call !== undefined ? t.of : m === 'filter' || m === 'slice' ? t : null;
       continue;
@@ -452,6 +470,16 @@ function membersOf(a: Analysis, t: T): CompletionItem[] {
       return GAME_MEMBERS.map((e) => entryItem(e));
     case 'camera':
       return CAMERA_MEMBERS.map((e) => entryItem(e));
+    case 'db':
+      return [
+        ...Object.entries(c.tables ?? {}).map(([n, cols]) => plain(n, 'property', `${n}: rows`, `Data table (${cols.join(', ')})`)),
+        { label: 'get', kind: 'method' as const, insert: "get('$0')", detail: 'get(table, id): row | null' },
+        { label: 'where', kind: 'method' as const, insert: "where('$0')", detail: 'where(table, { column: value } | row => bool): rows' },
+        { label: 'columns', kind: 'method' as const, insert: "columns('$0')", detail: 'columns(table)' },
+        plain('tables', 'property', 'tables: string[]'),
+      ];
+    case 'row':
+      return (c.tables?.[t.table] ?? ['id']).map((col) => plain(col, 'property', `${col}`, `Column of data table ${t.table}`));
     case 'ui':
       return UI_MEMBERS.map((e) => entryItem(e));
     case 'math':
@@ -503,6 +531,7 @@ const STRING_ARGS: Record<string, (c: CompleteContext) => CompletionItem[]> = {
   type: () => PARAM_TYPES.map((t) => plain(t, 'value', 'param type')),
   tag: (c) => (c.tags ?? []).map((t) => plain(t, 'value', 'tag')),
   slot: () => ['auto', 'slot1', 'slot2', 'slot3'].map((t) => plain(t, 'value', 'save slot')),
+  table: (c) => Object.keys(c.tables ?? {}).map((t) => plain(t, 'value', 'data table')),
 };
 
 const FN_ARG: Record<string, keyof typeof STRING_ARGS> = {
@@ -513,6 +542,7 @@ const FN_ARG: Record<string, keyof typeof STRING_ARGS> = {
   findWithTag: 'tag', hasTag: 'tag', addTag: 'tag', removeTag: 'tag', isA: 'object',
   music: 'music',
   saveGame: 'slot', loadGame: 'slot', hasSave: 'slot', deleteSave: 'slot',
+  db: 'table', get: 'table', where: 'table', columns: 'table',
 };
 
 // ---------------------------------------------------------------------------

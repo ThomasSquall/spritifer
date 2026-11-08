@@ -1,7 +1,9 @@
 /** Scene editor: paint tile layers, place and move instances, edit scene settings and events. */
 
+import { TileResolver } from '../core/game/tilerules.js';
 import { type Instance, type Scene, type TileLayer, type Value, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
 import { renderEventSheet } from './eventSheet.js';
+import { checkExpr } from '../core/game/expr.js';
 import { componentListCard, instanceComponents } from './componentsUi.js';
 import { type LoadedAsset, gameApi } from './gameApi.js';
 import { state } from './gameState.js';
@@ -255,12 +257,16 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       items.push({ z: l.z ?? li - 10, o: li, d: () => {
         if (!tileset) return;
         ctx.globalAlpha = dimOthers && li !== activeLayer ? 0.3 : 1;
+        // Same tile rules as the game (autotiling, textures, edge overlays).
+        const resolver = new TileResolver(state.game!.tilesets?.[tileset.name]);
+        const list: number[] = [];
         for (let ty = 0; ty < scene.rows; ty++) {
           for (let tx = 0; tx < scene.cols; tx++) {
-            const t = l.tiles[ty * scene.cols + tx];
-            if (t < 0) continue;
-            const s = tileSrc(t);
-            if (s) ctx.drawImage(tileset.img, s[0], s[1], s[2], s[3], tx * ts(), ty * ts(), ts(), ts());
+            if (l.tiles[ty * scene.cols + tx] < 0) continue;
+            for (const t of resolver.resolve(l, scene.cols, scene.rows, tx, ty, list)) {
+              const s = tileSrc(t);
+              if (s) ctx.drawImage(tileset.img, s[0], s[1], s[2], s[3], tx * ts(), ty * ts(), ts(), ts());
+            }
           }
         }
         ctx.globalAlpha = 1;
@@ -745,7 +751,9 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     }
     const g = tileset.grid ?? { width: ts(), height: ts() };
     const cols = Math.max(1, Math.floor(tileset.width / g.width));
-    const rows = Math.max(1, Math.floor(tileset.height / g.height));
+    // Tilesets with rules show only the paintable tiles (the rest are generated pieces).
+    const paintable = state.game!.tilesets?.[tileset.name]?.paintable;
+    const rows = Math.max(1, Math.min(Math.floor(tileset.height / g.height), paintable ? Math.ceil(paintable / cols) : Infinity));
     const scale = Math.max(1, Math.min(4, Math.floor(200 / (cols * g.width))));
     const pc = h('canvas', { class: 'palette-canvas', width: cols * g.width * scale, height: rows * g.height * scale });
     const pctx = pc.getContext('2d')!;
@@ -872,6 +880,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         },
           h('span', { class: 'hier-thumb' }, spr ? h('img', { src: api.previewUrl(spr.name, spr.rev, 1), alt: '' }) : h('span', { class: 'txt-badge' }, obj?.text !== undefined ? 'Aa' : '?')),
           h('span', { class: 'hier-name' }, inst.name ?? inst.object),
+          inst.activeIf ? h('span', { class: 'hier-cond', title: `Only while: ${inst.activeIf}` }, '?') : null,
           inst.name ? h('span', { class: 'hier-type muted' }, inst.object) : null,
           talk ? h('span', { class: 'hier-talk', title: `Dialogue: ${talk}` }, '💬') : null,
           obj ? null : h('span', { class: 'danger-text small' }, '?'),
@@ -974,6 +983,23 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       );
     }
 
+    // Active if: the instance exists in the game only while this expression is true (towns that grow, upgrades).
+    function activeIfRow(): HTMLElement {
+      const err = h('div', { class: 'small problem' });
+      const showErr = (src: string) => (err.textContent = src.trim() ? (checkExpr(src.trim()) ?? '') : '');
+      const input = h('input', { type: 'text', value: inst!.activeIf ?? '', placeholder: 'always (e.g. inn_lv >= 1, quest_bram == 2)', spellcheck: false,
+        oninput: () => showErr(input.value),
+        onchange: () => edit(() => {
+          const v = input.value.trim();
+          if (v && !checkExpr(v)) inst!.activeIf = v;
+          else if (!v) delete inst!.activeIf;
+          renderRight();
+        }),
+      });
+      showErr(input.value);
+      return h('label', { class: 'inspector-activeif', title: 'Expression: the instance exists in the game only while it is true. Checked when the scene starts and continuously while it runs. Variables, db("table", id, "column"), fn("name").' }, 'Active if', input, err);
+    }
+
     const props = h('div', { class: 'props' });
     const keys = new Set([...Object.keys(obj?.properties ?? {}), ...Object.keys(inst.props ?? {})]);
     keys.delete('dialogue');
@@ -992,6 +1018,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('div', { class: 'row2' }, h('label', {}, 'Animation', animSel), h('label', { class: 'inline flip-in' }, flip, 'Flip')),
         h('label', { title: `Extra group tags for this instance${obj?.tags?.length ? ` (the type has: ${obj.tags.join(', ')})` : ''}` }, 'Tags', h('input', { type: 'text', value: (inst.tags ?? []).join(', '), placeholder: obj?.tags?.length ? `+ ${obj.tags.join(', ')}` : 'boss…', spellcheck: false, onchange: (e: Event) => edit(() => { const t = normalizeTags((e.target as HTMLInputElement).value); if (t) inst.tags = t; else delete inst.tags; }) })),
         dialogueRow,
+        activeIfRow(),
         h('div', { class: 'row2' }, num('x', () => inst.x, (v) => (inst.x = v)), num('y', () => inst.y, (v) => (inst.y = v))),
         h('div', {}, h('div', { class: 'muted small' }, keys.size ? 'Properties (empty = default of the type)' : 'Properties'), props,
           h('button', { class: 'small ghost', onclick: async () => {

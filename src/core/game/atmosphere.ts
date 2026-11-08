@@ -4,8 +4,32 @@
  * passes that need blending modes go through optional Renderer methods, with plain fallbacks.
  */
 
-import type { Actor, Renderer, World } from './engine.js';
-import type { LightDef, SceneAtmosphere, SceneMotes } from './types.js';
+import type { Renderer } from './engine.js';
+import type { Hitbox, LightDef, SceneAtmosphere, SceneMotes, SpriteAsset } from './types.js';
+
+/** An instance as the atmosphere passes see it (the engine's Actor, or a placed instance in the scene editor). */
+export interface AtmosphereActor {
+  readonly id: number;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly opacity: number;
+  readonly visible: boolean;
+  readonly destroyed: boolean;
+  readonly light: LightDef | undefined;
+  readonly asset: { width: number; height: number } | undefined;
+  readonly type: { hud?: boolean; shadow?: number; hitbox?: Hitbox };
+  box(): { x: number; y: number; w: number; h: number };
+}
+
+/** What the atmosphere passes read: the running World, or the scene editor's preview of a scene. */
+export interface AtmosphereWorld {
+  readonly clock: number;
+  readonly game: { width: number; height: number };
+  readonly actors: readonly AtmosphereActor[];
+  readonly motes: MoteField;
+  readonly bundle: { sprites: Record<string, SpriteAsset | undefined> };
+}
 
 /** A light in viewport pixels, ready to draw. */
 export interface ScreenLight {
@@ -31,7 +55,7 @@ function wobble(t: number, seed: number): number {
 }
 
 /** Lights of the visible instances and glowing motes, in viewport coordinates. */
-export function collectLights(w: World, camX: number, camY: number, zoom: number): ScreenLight[] {
+export function collectLights(w: AtmosphereWorld, camX: number, camY: number, zoom: number): ScreenLight[] {
   const out: ScreenLight[] = [];
   const vw = w.game.width;
   const vh = w.game.height;
@@ -55,14 +79,14 @@ export function collectLights(w: World, camX: number, camY: number, zoom: number
 }
 
 /** Shadow width of an instance in pixels (0 = none). */
-function shadowWidth(a: Actor): number {
+function shadowWidth(a: AtmosphereActor): number {
   if (a.type.shadow !== undefined) return a.type.shadow;
   if (!a.type.hitbox || a.z < 0) return 0;
   return a.type.hitbox.w + 2;
 }
 
 /** Soft elliptical contact shadows under the instances (drawn above the ground, below the instances). */
-export function drawShadows(w: World, r: Renderer, atm: SceneAtmosphere, camX: number, camY: number, zoom: number): void {
+export function drawShadows(w: AtmosphereWorld, r: Renderer, atm: SceneAtmosphere, camX: number, camY: number, zoom: number): void {
   if (atm.shadows === false) return;
   const color = atm.shadowColor ?? '#1a1030';
   const op = atm.shadowOpacity ?? 0.38;
@@ -95,7 +119,7 @@ function ellipse(r: Renderer, cx: number, cy: number, rx: number, ry: number, co
 }
 
 /** Cloud shadows: the clouds sprite tiled over the world and moved by the wind. */
-export function drawClouds(w: World, r: Renderer, atm: SceneAtmosphere, camX: number, camY: number, zoom: number): void {
+export function drawClouds(w: AtmosphereWorld, r: Renderer, atm: SceneAtmosphere, camX: number, camY: number, zoom: number): void {
   const c = atm.clouds;
   if (!c) return;
   const asset = w.bundle.sprites[c.sprite];
@@ -114,7 +138,7 @@ export function drawClouds(w: World, r: Renderer, atm: SceneAtmosphere, camX: nu
 }
 
 /** The full-frame passes: lighting, color grade, vignette. */
-export function postProcess(w: World, r: Renderer, atm: SceneAtmosphere, camX: number, camY: number, zoom: number): void {
+export function postProcess(w: AtmosphereWorld, r: Renderer, atm: SceneAtmosphere, camX: number, camY: number, zoom: number): void {
   const ambient = atm.ambient ?? '#ffffff';
   const lights = collectLights(w, camX, camY, zoom);
   const dark = !WHITE.test(ambient);

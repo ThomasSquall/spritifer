@@ -11,6 +11,8 @@ import { state } from './gameState.js';
 import { appNav } from './nav.js';
 import { clear, confirmDialog, h, icon, iconButton, promptText, toast } from './dom.js';
 import { componentCard, componentPicker } from './componentsUi.js';
+import { lightEditor } from './atmosphereUi.js';
+import { VALUE_HINT, formatValue, parseValue } from './values.js';
 
 interface Template {
   id: string;
@@ -262,6 +264,19 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
     drawPreview();
   }));
   const zIn = h('input', { type: 'number', class: 'num', value: String(obj.z ?? 0), oninput: () => { obj.z = Number(zIn.value) || 0; if (!obj.z) delete obj.z; changed(); } });
+  // Light and contact shadow (seen in scenes with an atmosphere; the scene editor previews them).
+  const hooks = { before: () => {}, changed };
+  const lightBox = lightEditor({ ...hooks, get: () => obj.light, set: (v) => { if (v) obj.light = v; else delete obj.light; },
+    inherited: parent ? { light: parent.light, from: `inherit from ${obj.extends}` } : undefined });
+  const inheritedShadow = parent?.shadow;
+  const shadowIn = h('input', { type: 'number', class: 'num', min: '0', step: '1', value: obj.shadow === undefined ? '' : String(obj.shadow),
+    placeholder: inheritedShadow !== undefined ? `${inheritedShadow} (inherited)` : 'auto = hitbox width',
+    onchange: () => {
+      const v = shadowIn.value.trim();
+      if (v === '' || !Number.isFinite(Number(v))) delete obj.shadow;
+      else obj.shadow = Math.max(0, Math.round(Number(v)));
+      changed();
+    } });
 
   const isText = obj.text !== undefined;
   const textPreviewEl = h('div', { class: 'text-preview' });
@@ -317,6 +332,8 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
           h('label', { class: 'inline' }, hbAuto, 'Hitbox = whole frame'),
           h('div', { class: 'row4' }, ...hbIns.map((inp, i) => h('label', {}, ['x', 'y', 'width', 'height'][i], inp))),
           h('label', {}, 'Draw order (z)', zIn),
+          h('label', { title: 'Soft contact shadow under instances in scenes with an atmosphere: width in px. Empty = automatic (hitbox width), 0 = none (rugs, doormats, flowerbeds)' }, 'Shadow width (px)', shadowIn),
+          lightBox,
         ),
       ),
       h('label', { class: 'inline text-toggle' }, textToggle, 'Text object (score, label, timer)'),
@@ -340,7 +357,7 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
 
 function propertiesCard(obj: ObjectType, changed: () => void, onKeys: () => void, parent?: ObjectType): HTMLElement {
   const body = h('div', { class: 'props' });
-  const parse = (s: string): Value => (s === 'true' ? true : s === 'false' ? false : s.trim() !== '' && Number.isFinite(Number(s)) ? Number(s) : s);
+  const parse = parseValue;
   const render = () => {
     clear(body);
     // Inherited properties: shown with the parent's value, overridable.
@@ -350,7 +367,7 @@ function propertiesCard(obj: ObjectType, changed: () => void, onKeys: () => void
         iconButton('pencil', 'Override for this variant', () => { obj.properties[k] = v; changed(); render(); }, { class: 'icon-btn tiny' })));
     }
     for (const [k, v] of Object.entries(obj.properties)) {
-      const valIn = h('input', { type: 'text', value: String(v), spellcheck: false, oninput: () => { obj.properties[k] = parse(valIn.value); changed(); } });
+      const valIn = h('input', { type: 'text', title: VALUE_HINT, value: formatValue(v), spellcheck: false, oninput: () => { obj.properties[k] = parse(valIn.value); changed(); } });
       body.append(h('div', { class: 'prop-row' }, h('code', {}, `self.${k}`), valIn, iconButton('close', 'Remove', () => { delete obj.properties[k]; changed(); render(); onKeys(); }, { class: 'icon-btn tiny' })));
     }
     if (!Object.keys(obj.properties).length && !Object.keys(parent?.properties ?? {}).length) body.append(h('p', { class: 'muted small' }, 'Instance variables, e.g. hp = 3, speed = 50. Read and change them in events as self.hp.'));

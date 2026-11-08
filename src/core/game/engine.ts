@@ -12,7 +12,7 @@ import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, field
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
 import { resolveObjectTypes } from './variants.js';
 import { ParticleSystem } from './particles.js';
-import { TileResolver } from './tilerules.js';
+import { TileResolver, tilesetFrame } from './tilerules.js';
 import { MoteField, type ScreenLight, drawClouds, drawShadows, postProcess } from './atmosphere.js';
 
 export const STEP = 1 / 60;
@@ -2320,19 +2320,6 @@ export interface Renderer {
   grade?(tint: string, amount: number): void;
   /** Darkens the screen edges. */
   vignette?(strength: number, color: string): void;
-}
-
-/** Frame of an animated tileset at this time (0 for a still one). */
-function tilesetFrame(ts: SpriteAsset, clock: number): number {
-  const n = ts.frames.length;
-  if (n < 2) return 0;
-  const total = ts.frames.reduce((t, f) => t + Math.max(10, f.duration || 100), 0);
-  let t = (clock * 1000) % total;
-  for (let i = 0; i < n; i++) {
-    t -= Math.max(10, ts.frames[i].duration || 100);
-    if (t < 0) return i;
-  }
-  return 0;
 }
 
 /** A renderer that draws nothing (headless UI). */

@@ -10,7 +10,7 @@
  * The scene stores only the painted tile; collisions use it too. Rules live in game.json → tilesets.
  */
 
-import type { TileLayer } from './types.js';
+import type { SpriteAsset, TileLayer } from './types.js';
 
 export interface TileRule {
   /** The painted tile index. */
@@ -186,4 +186,29 @@ export function normalizeTilesetRules(v: unknown): TilesetRules | undefined {
   const paintable = int(o.paintable);
   if (paintable) out.paintable = paintable;
   return Object.keys(out).length ? out : undefined;
+}
+
+/** Frame of an animated tileset at this time (0 for a still one). */
+export function tilesetFrame(ts: SpriteAsset, clock: number): number {
+  const n = ts.frames.length;
+  if (n < 2) return 0;
+  const total = ts.frames.reduce((t, f) => t + Math.max(10, f.duration || 100), 0);
+  let t = (clock * 1000) % total;
+  for (let i = 0; i < n; i++) {
+    t -= Math.max(10, ts.frames[i].duration || 100);
+    if (t < 0) return i;
+  }
+  return 0;
+}
+
+/** One-line summary of a tileset's rules, e.g. "12 rules (10 grid, 2 blob), 3 edge overlays, paintable 48". */
+export function describeTilesetRules(r: TilesetRules): string {
+  const rules = r.rules ?? [];
+  const kinds = new Map<string, number>();
+  for (const x of rules) kinds.set(x.kind, (kinds.get(x.kind) ?? 0) + 1);
+  const parts = [`${rules.length} rule${rules.length === 1 ? '' : 's'}${rules.length ? ` (${[...kinds].map(([k, n]) => `${n} ${k}`).join(', ')})` : ''}`];
+  const edges = r.edges?.length ?? 0;
+  parts.push(`${edges} edge overlay${edges === 1 ? '' : 's'}`);
+  if (r.paintable) parts.push(`paintable ${r.paintable}`);
+  return parts.join(', ');
 }

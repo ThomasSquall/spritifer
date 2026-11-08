@@ -22,6 +22,10 @@ import { api } from './api.js';
 import { CanvasView } from './canvas.js';
 import { type ChangeKind, type Editor, type ToolName } from './editor.js';
 import { clear, confirmDialog, h, icon, iconButton, modal, promptText, toast } from './dom.js';
+import { mountRamps } from './rampsPanel.js';
+import { mountReferenceControls } from './referencePanel.js';
+import { mountGuide } from './guidePanel.js';
+import { mountRig } from './rigPanel.js';
 
 const TOOLS: { id: ToolName; label: string; key: string }[] = [
   { id: 'pencil', label: 'Pencil', key: 'B' },
@@ -55,6 +59,25 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
   const onionBtn = iconButton('onion', 'Onion skin', () => { ed.onion = !ed.onion; ed.emit('view'); });
   const mirrorBtn = iconButton('mirror', 'Horizontal symmetry (Shift+M)', () => { ed.mirrorX = !ed.mirrorX; ed.emit('view'); });
   const liveDot = h('span', { class: 'live-dot', title: 'Live sync' });
+  // Reference picture, pose guide and rig (also editable by Claude through MCP).
+  const refControls = mountReferenceControls(ed, view);
+  const ramps = mountRamps(ed);
+  const guide = mountGuide(ed, view);
+  const rig = mountRig(ed, view);
+  const DOCK_KEY = 'spritifer.characterDock';
+  let dockOpen = (() => {
+    try {
+      const v = localStorage.getItem(DOCK_KEY);
+      if (v !== null) return v === '1';
+    } catch { /* storage unavailable */ }
+    return !!(ed.sprite.rig || ed.sprite.guide);
+  })();
+  const dockBtn = h('button', { class: 'ghost small', title: 'Pose guide & character rig panel', onclick: () => {
+    dockOpen = !dockOpen;
+    try { localStorage.setItem(DOCK_KEY, dockOpen ? '1' : '0'); } catch { /* storage unavailable */ }
+    renderDock();
+  } }, icon('rig', 15), 'Rig & guide');
+  const guideBtn = iconButton('skeleton', 'Show / hide the pose guide', () => { ed.guideShow = !ed.guideShow; ed.emit('view'); });
   const saveLabel = h('span', { class: 'save-label' });
 
   const topbar = h('header', { class: 'topbar' },
@@ -62,6 +85,8 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
     h('span', { class: 'logo small' }),
     nameBtn,
     sizeBtn,
+    refControls.el,
+    dockBtn,
     h('div', { class: 'sep' }),
     undoBtn, redoBtn,
     h('div', { class: 'sep' }),
@@ -70,7 +95,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
     iconButton('plus', 'Zoom in (+)', () => view.zoomBy(1)),
     iconButton('fit', 'Fit (0)', () => view.fit()),
     h('div', { class: 'sep' }),
-    gridBtn, onionBtn, mirrorBtn,
+    gridBtn, onionBtn, mirrorBtn, guideBtn,
     h('div', { class: 'spacer' }),
     h('span', { class: 'status-pill' }, liveDot, saveLabel),
     iconButton('help', 'Shortcuts & help', helpDialog),
@@ -94,12 +119,18 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
 
   function setTool(t: ToolName) {
     ed.tool = t;
+    view.interaction = null;
     ed.emit('tool');
   }
 
   function renderToolState() {
-    for (const [id, b] of toolButtons) b.classList.toggle('active', ed.tool === id);
+    for (const [id, b] of toolButtons) b.classList.toggle('active', ed.tool === id && !view.interaction);
     clear(toolOptions);
+    if (view.interaction) {
+      toolOptions.append(h('span', { class: 'tool-name' }, 'Canvas mode'), h('span', { class: 'muted small' }, 'Esc or pick a tool to go back to drawing'));
+      view.requestRender();
+      return;
+    }
     const t = ed.tool;
     toolOptions.append(h('span', { class: 'tool-name' }, TOOLS.find((x) => x.id === t)?.label ?? ''));
     if (t === 'pencil' || t === 'eraser' || t === 'line') toolOptions.append(h('label', { class: 'inline' }, 'Size', brushSel));
@@ -196,6 +227,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
         ed.edit((s) => s.palette.push(ed.primary), 'structure');
       } }, '+'),
     );
+    ramps.render();
     renderColors();
   }
 
@@ -299,6 +331,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
     h('section', { class: 'panel' },
       h('div', { class: 'panel-title' }, 'Palette', h('div', { class: 'spacer' }), presetSel, iconButton('plus', 'Add colors used in the sprite', collectColors, { class: 'icon-btn tiny' })),
       palGrid,
+      ramps.el,
     ),
     h('section', { class: 'panel grow' },
       h('div', { class: 'panel-title' }, 'Layers', h('div', { class: 'spacer' }), h('label', { class: 'inline small', title: 'Opacity' }, 'Opacity', opacityIn)),
@@ -542,7 +575,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
   root.append(
     h('div', { class: 'editor' },
       topbar,
-      h('div', { class: 'workspace' }, toolbar, h('main', { class: 'center' }, view.el, statusbar), sidebar),
+      h('div', { class: 'workspace' }, toolbar, h('main', { class: 'center' }, view.el, statusbar), sidebar, h('aside', { class: 'sprite-dock' }, guide.el, rig.el)),
       timeline,
     ),
   );
@@ -718,6 +751,11 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
       return;
     }
     if (mod || e.altKey) return;
+    if (e.key === 'Escape' && view.interaction) {
+      view.interaction = null;
+      ed.emit('tool');
+      return;
+    }
     const tool = TOOLS.find((x) => x.key.toLowerCase() === k);
     if (tool && !e.shiftKey) return setTool(tool.id);
     switch (e.key) {
@@ -771,7 +809,13 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
     gridBtn.classList.toggle('active', ed.grid);
     onionBtn.classList.toggle('active', ed.onion);
     mirrorBtn.classList.toggle('active', ed.mirrorX);
+    guideBtn.classList.toggle('active', ed.guideShow && !!ed.sprite.guide);
+    guideBtn.style.display = ed.sprite.guide ? '' : 'none';
   };
+  function renderDock() {
+    root.querySelector('.workspace')?.classList.toggle('with-dock', dockOpen);
+    dockBtn.classList.toggle('on', dockOpen);
+  }
 
   disposers.push(
     ed.on((kind: ChangeKind) => {
@@ -785,17 +829,28 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
           renderPalette();
           renderLayers();
           renderTimeline();
+          renderToggles();
+          refControls.render();
+          guide.render();
+          rig.render('structure');
           break;
         case 'view':
           renderToggles();
           renderFrameInfo();
           runPlayback();
+          refControls.render();
+          guide.render();
+          rig.render('view');
           break;
         case 'tool':
           renderToolState();
+          refControls.render();
+          guide.render();
+          rig.render('view');
           break;
         case 'color':
           renderColors();
+          ramps.renderColors();
           break;
       }
       renderStatus();
@@ -809,6 +864,10 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
   renderToolState();
   renderToggles();
   renderStatus();
+  refControls.render();
+  guide.render();
+  rig.render('structure');
+  renderDock();
 
   function guard(fn: () => void) {
     try {

@@ -52,6 +52,7 @@ const ICONS: Record<string, string> = {
   left: '<path d="M15 10H5M9.5 5.5L5 10l4.5 4.5"/>',
   right: '<path d="M5 10h10M10.5 5.5L15 10l-4.5 4.5"/>',
   merge: '<path d="M10 3v9M6 8l4 4 4-4M4 16h12"/>',
+  sun: '<circle cx="10" cy="10" r="3.4"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"/>',
   eye: '<path d="M2.5 10s3-5 7.5-5 7.5 5 7.5 5-3 5-7.5 5-7.5-5-7.5-5z"/><circle cx="10" cy="10" r="2.2"/>',
   eyeoff: '<path d="M2.5 10s3-5 7.5-5 7.5 5 7.5 5-3 5-7.5 5-7.5-5-7.5-5z" opacity=".35"/><path d="M4 16L16 4"/>',
   export: '<path d="M10 3v10M6 7l4-4 4 4"/><path d="M4 12v4h12v-4"/>',
@@ -61,6 +62,11 @@ const ICONS: Record<string, string> = {
   fit: '<path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/>',
   help: '<circle cx="10" cy="10" r="7.5"/><path d="M8 8a2 2 0 1 1 3 1.7c-.7.4-1 .9-1 1.6"/><circle cx="10" cy="14" r=".6" fill="currentColor"/>',
   resize: '<path d="M3 3h9v9H3z"/><path d="M12 8h5v9H8v-5"/>',
+  image: '<rect x="3" y="4" width="14" height="12" rx="1"/><circle cx="7.5" cy="8.5" r="1.4"/><path d="M3.5 14.5l4-4 3 3 2-2 4 4"/>',
+  skeleton: '<circle cx="10" cy="4" r="1.8"/><path d="M10 5.8v6M6 8h8M10 11.8l-3 5M10 11.8l3 5"/><circle cx="6" cy="8" r=".9" fill="currentColor"/><circle cx="14" cy="8" r=".9" fill="currentColor"/>',
+  rig: '<rect x="7.5" y="2.5" width="5" height="4.5" rx="1"/><rect x="6.5" y="8" width="7" height="5.5" rx="1"/><path d="M6.5 9l-3 4M13.5 9l3 4M8.5 13.5l-1 4M11.5 13.5l1 4"/>',
+  target: '<circle cx="10" cy="10" r="6"/><path d="M10 2v4M10 14v4M2 10h4M14 10h4"/><circle cx="10" cy="10" r="1" fill="currentColor"/>',
+  crop: '<path d="M5.5 2.5v12h12"/><path d="M2.5 5.5h12v12"/>',
 };
 
 export function icon(name: keyof typeof ICONS | string, size = 18): SVGSVGElement {

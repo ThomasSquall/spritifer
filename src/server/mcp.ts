@@ -9,7 +9,6 @@ import {
   type Facing,
   type PartPose,
   type Pose,
-  type PoseGuide,
   type Sprite,
   type SpriteFile,
   addFrame,
@@ -33,18 +32,15 @@ import {
 import {
   RIG_LAYER_NAME,
   bakeRig,
-  bitmapToView,
   describeRig,
-  ensureRig,
-  findPart,
   layoutPose,
   renderPose,
   restPose,
-  rigFacings,
-  topoParts,
   viewKey,
 } from '../core/rig.js';
-import { type AnimName, type Keyframe, generateAnimation, interpolateKeyframes } from '../core/animate.js';
+import { type AnimName, type Keyframe } from '../core/animate.js';
+import { animateRig, facingsOf, keyframeRig, poseFrames, removeRigPart, setRigPart } from '../core/rigEdit.js';
+import { attachReference, describeGuide, editGuide, preparePicture, setRamp } from '../core/reference.js';
 import { kmeansPalette, pixelize, pixelizeAuto } from '../core/pixelize.js';
 import {
   type Mask,
@@ -68,7 +64,6 @@ import {
   shadeMask,
   shapeMask,
   type SilhouetteDiff,
-  removeBackground,
   silhouetteDiff,
   castShadow,
   shapeCoverage,
@@ -78,7 +73,6 @@ import {
   valueStats,
   luminance,
 } from '../core/shapes.js';
-import { bytesToBase64 } from '../core/base64.js';
 import type { Bitmap } from '../core/sprite.js';
 import {
   clearRect,
@@ -511,31 +505,6 @@ export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string 
     return image(encodePng(renderBitmapRows(s, [bitmaps], { scale, pixelGrid: true, rulers: true }).image));
   };
 
-  /** Replaces (or creates) the frames of a tag with posed frames. A fresh character's lone rest frame is reused. */
-  const writeTagFrames = (s: Sprite, tagName: string, poses: Pose[], durations: number[], direction: 'forward' | 'pingpong' = 'forward') => {
-    const reuseRest = s.tags.length === 0 && s.frames.length === 1;
-    const existing = s.tags.find((t) => t.name === tagName);
-    const at = existing ? existing.from : s.frames.length;
-    poses.forEach((pose, i) => {
-      const f = addFrame(s, at + i, { duration: durations[i] });
-      f.pose = pose;
-    });
-    if (existing) {
-      // addFrame already shifted the old tag past the inserted frames; drop its frames.
-      const { from: oldFrom, to: oldTo } = existing;
-      for (let i = oldTo; i >= oldFrom; i--) removeFrame(s, i);
-    }
-    if (reuseRest) removeFrame(s, 0);
-    const from = s.frames.findIndex((f) => f.pose === poses[0]);
-    setTag(s, { name: tagName, from, to: from + poses.length - 1, direction });
-  };
-
-  const facingsOf = (s: Sprite, wanted?: Facing[]) => {
-    const available = rigFacings(s);
-    const list = wanted?.length ? wanted : available.length ? available : (['down'] as Facing[]);
-    return list;
-  };
-
   tool(
     'create_character',
     `Start a game character built from a cut-out rig (top-down, 4 facings: down, left, right, up). Creates the sprite, a "rig" layer and a rest-pose frame.
@@ -588,20 +557,6 @@ Tips: give limbs a 1px overlap with the body so joints never open when rotating;
     },
     (a) => {
       const { sprite, result } = mutate(a.sprite, (s) => {
-        const rig = ensureRig(s);
-        let part = rig.parts.find((p) => p.name === a.name);
-        if (!part) {
-          part = { name: a.name, parent: null, views: {} };
-          rig.parts.push(part);
-        }
-        if (a.parent !== undefined) {
-          if (a.parent !== null) findPart(rig, a.parent);
-          if (a.parent === a.name) throw new Error('A part cannot be its own parent');
-          part.parent = a.parent;
-          topoParts(rig); // throws on cycles
-        }
-        const key = viewKey(a.facing, a.variant);
-        const prev = part.views[key];
         let bmp: Bitmap | undefined;
         if (a.rows) {
           if (!a.legend) throw new Error('rows need a legend');
@@ -618,19 +573,16 @@ Tips: give limbs a 1px overlap with the body so joints never open when rotating;
           const src = f.layer !== undefined ? celBitmap(s, resolveLayer(s, f.layer).id, resolveFrame(s, f.frame).id) : compositeFrame(s, f.frame ?? 0);
           bmp = extractRegion(src, f);
         }
-        if (bmp) {
-          const pivot = a.pivot ?? prev?.pivot;
-          if (!pivot) throw new Error('A new drawing needs a pivot [x, y] (the joint pixel inside the part grid)');
-          part.views[key] = bitmapToView(bmp, pivot, a.at ?? prev?.at, a.z ?? prev?.z);
-        } else {
-          if (!prev) throw new Error(`Part "${a.name}" has no "${key}" drawing yet: pass rows+legend or from`);
-          if (a.pivot) prev.pivot = a.pivot;
-          if (a.at) prev.at = a.at;
-          if (a.z !== undefined) prev.z = a.z;
-        }
-        if (!a.variant && !part.views[key].at) part.views[key].at = [0, 0];
-        if (!s.frames.some((f) => f.pose)) s.frames[0].pose = restPose(a.facing);
-        return bakeRig(s);
+        return setRigPart(s, {
+          name: a.name,
+          facing: a.facing,
+          variant: a.variant,
+          parent: a.parent,
+          bitmap: bmp,
+          pivot: a.pivot as [number, number] | undefined,
+          at: a.at as [number, number] | undefined,
+          z: a.z,
+        });
       });
       const out = text(`Part "${a.name}" ${viewKey(a.facing, a.variant)} saved; re-rendered ${result} posed frame(s).\n${describeRig(sprite)}`);
       if (a.preview === false) return out;
@@ -643,20 +595,7 @@ Tips: give limbs a 1px overlap with the body so joints never open when rotating;
     'Delete a rig part, or only one of its drawings (facing + optional variant).',
     { sprite: P.sprite, name: z.string(), facing: facingEnum.optional(), variant: z.string().optional() },
     (a) => {
-      const { sprite } = mutate(a.sprite, (s) => {
-        const rig = ensureRig(s);
-        const part = findPart(rig, a.name);
-        if (a.facing) {
-          const key = viewKey(a.facing, a.variant);
-          if (!part.views[key]) throw new Error(`Part "${a.name}" has no "${key}" drawing`);
-          delete part.views[key];
-        } else {
-          const children = rig.parts.filter((p) => p.parent === a.name);
-          for (const c of children) c.parent = part.parent;
-          rig.parts = rig.parts.filter((p) => p !== part);
-        }
-        bakeRig(s);
-      });
+      const { sprite } = mutate(a.sprite, (s) => removeRigPart(s, a.name, a.facing, a.variant));
       return text(describeRig(sprite));
     },
     { destructiveHint: true },
@@ -696,29 +635,9 @@ Use it for hand-made keyframes or to tweak what rig_animate generated (e.g. {"he
       preview: P.preview,
     },
     (a) => {
-      const { sprite, result } = mutate(a.sprite, (s) => {
-        const rig = ensureRig(s);
-        for (const name of Object.keys(a.parts ?? {})) findPart(rig, name);
-        let idx = a.frames ?? [];
-        if (a.new) {
-          if (!a.facing) throw new Error('A new frame needs a facing');
-          addFrame(s, undefined, { duration: a.duration });
-          idx = [s.frames.length - 1];
-        }
-        if (!idx.length) throw new Error('Pass frames or new: true');
-        for (const i of idx) {
-          const f = resolveFrame(s, i);
-          const facing = (a.facing ?? f.pose?.facing) as Facing | undefined;
-          if (!facing) throw new Error(`Frame ${i} has no pose yet: pass a facing`);
-          const base = a.replace || !f.pose ? {} : f.pose.parts;
-          const parts: Record<string, PartPose> = { ...base };
-          for (const [name, v] of Object.entries(a.parts ?? {})) parts[name] = a.replace ? { ...v } : { ...base[name], ...v };
-          f.pose = { facing, parts };
-          if (a.duration) f.duration = a.duration;
-        }
-        bakeRig(s, idx);
-        return idx;
-      });
+      const { sprite, result } = mutate(a.sprite, (s) =>
+        poseFrames(s, { frames: a.frames, new: a.new, facing: a.facing as Facing | undefined, parts: a.parts as Record<string, PartPose> | undefined, replace: a.replace, duration: a.duration }),
+      );
       return withPreview(text(`Posed frame(s) ${result.join(', ')}.`), sprite, result[0], a.preview);
     },
   );
@@ -738,20 +657,9 @@ Afterwards check with preview tags=[...] and adjust single frames with rig_pose.
       preview: z.boolean().optional().describe('Return the generated animations, one row per facing (default true)'),
     },
     (a) => {
-      const { sprite, result } = mutate(a.sprite, (s) => {
-        if (!s.rig?.parts.length) throw new Error('The rig has no parts yet. Draw them with rig_part.');
-        const facings = facingsOf(s, a.facings as Facing[] | undefined);
-        const tags: string[] = [];
-        // A fresh character only has its rest frame: reuse it.
-        for (const facing of facings) {
-          const gen = generateAnimation(s, a.animation as AnimName, facing, { frames: a.frames, strength: a.strength, duration: a.duration });
-          const tagName = `${a.animation}_${facing}`;
-          writeTagFrames(s, tagName, gen.poses, gen.durations);
-          tags.push(tagName);
-        }
-        bakeRig(s);
-        return tags;
-      });
+      const { sprite, result } = mutate(a.sprite, (s) =>
+        animateRig(s, a.animation as AnimName, a.facings as Facing[] | undefined, { frames: a.frames, strength: a.strength, duration: a.duration }),
+      );
       const out = text(`Generated ${result.join(', ')}.\n${describe(sprite)}`);
       if (a.preview === false) return out;
       return [...out, image(previewPng(sprite, { tags: result, pixelGrid: false }))];
@@ -916,9 +824,7 @@ Give explicit colors, or a base color to generate a hue-shifted ramp (shadows dr
         if (a.colors?.length) ramp = a.colors.map((c) => normalizeHex(toHex(color(s, c))));
         else if (a.base) ramp = generateRamp(color(s, a.base), { steps: a.steps, hueShift: a.hue_shift, contrast: a.contrast });
         else throw new Error('Give colors or a base color');
-        s.ramps[a.name] = ramp;
-        for (const c of ramp) if (!s.palette.includes(c)) s.palette.push(c);
-        return ramp;
+        return setRamp(s, a.name, ramp);
       });
       return text(`Ramp "${a.name}": ${result.map((c, i) => `${a.name}.${i}=${c}`).join(' ')}`);
     },
@@ -1045,22 +951,7 @@ Typical flow: block in each material with one flat color (draw_shapes fill / dra
   /** Reads a PNG, optionally cropped and with its background removed. */
   const loadPicture = (file: string, crop?: { x: number; y: number; width: number; height: number }, removeBg?: boolean, tolerance?: number) => {
     const full = decodePng(fs.readFileSync(path.resolve(file)));
-    let src = crop ? extractRegion(full, crop) : full;
-    if (removeBg) src = removeBackground(src, tolerance);
-    return { src, full };
-  };
-
-  /** Stores a picture as the sprite's reference, scaled to `height` canvas pixels (default: fit) and placed at x/y (default: centered, bottom). */
-  const attachReference = (s: Sprite, src: Bitmap, height?: number, px?: number, py?: number) => {
-    const h = height ?? Math.min(s.height, Math.floor((src.height * s.width) / src.width));
-    const w = Math.max(1, Math.round((src.width * h) / src.height));
-    const scaled = downscale(src, w, h);
-    // Keep the picture at up to 4x the canvas size so silhouette_check can see thin details.
-    const hi = src.height > h * 4 ? downscale(src, w * 4, h * 4) : src;
-    const x = px ?? Math.floor((s.width - w) / 2);
-    const y = py ?? s.height - h;
-    s.reference = { width: w, height: h, pixels: bytesToBase64(scaled.data), x, y, source: { width: hi.width, height: hi.height, pixels: bytesToBase64(hi.data) } };
-    return { w, h, x, y };
+    return { src: preparePicture(full, crop, removeBg, tolerance), full };
   };
 
   tool(
@@ -1181,14 +1072,9 @@ Creates/replaces tag <name> (frames are rendered from the rig). Check with previ
       preview: z.boolean().optional().describe('Return the animation with onion skin (default true)'),
     },
     (a) => {
-      const { sprite } = mutate(a.sprite, (s) => {
-        const rig = ensureRig(s);
-        for (const k of a.keys) for (const name of Object.keys(k.parts)) findPart(rig, name);
-        const poses = interpolateKeyframes(a.keys as Keyframe[], a.frames, !!a.loop).map((parts) => ({ facing: a.facing as Facing, parts }));
-        if (a.durations && a.durations.length !== a.frames) throw new Error(`durations needs ${a.frames} values`);
-        writeTagFrames(s, a.name, poses, a.durations ?? Array(a.frames).fill(a.duration ?? 100));
-        bakeRig(s);
-      });
+      const { sprite } = mutate(a.sprite, (s) =>
+        keyframeRig(s, { name: a.name, facing: a.facing as Facing, frames: a.frames, keys: a.keys as Keyframe[], loop: a.loop, duration: a.duration, durations: a.durations }),
+      );
       const out = text(`Tag "${a.name}" now has ${a.frames} frame(s).\n${describe(sprite)}`);
       if (a.preview === false) return out;
       return [...out, image(previewPng(sprite, { tags: [a.name], onion: true, rulers: false }))];
@@ -1272,28 +1158,6 @@ Creates/replaces tag <name> (frames are rendered from the rig). Check with previ
 
   // ------------------------------------------------------------------ pose guides
 
-  const DEFAULT_BONES: [string, string][] = [
-    ['head', 'neck'], ['neck', 'pelvis'],
-    ['neck', 'shoulder_f'], ['shoulder_f', 'elbow_f'], ['elbow_f', 'hand_f'],
-    ['neck', 'shoulder_b'], ['shoulder_b', 'elbow_b'], ['elbow_b', 'hand_b'],
-    ['pelvis', 'hip_f'], ['hip_f', 'knee_f'], ['knee_f', 'foot_f'],
-    ['pelvis', 'hip_b'], ['hip_b', 'knee_b'], ['knee_b', 'foot_b'],
-    ['hand_f', 'weapon_tip'], ['hand_b', 'shield'],
-  ];
-
-  const describeGuide = (g: PoseGuide) => {
-    const lines = g.bones
-      .filter(([a, b]) => g.joints[a] && g.joints[b])
-      .map(([a, b]) => {
-        const [x0, y0] = g.joints[a];
-        const [x1, y1] = g.joints[b];
-        const len = Math.hypot(x1 - x0, y1 - y0);
-        const ang = (Math.atan2(y1 - y0, x1 - x0) * 180) / Math.PI;
-        return `${a}→${b}: ${len.toFixed(1)}px at ${Math.round(ang)}°`;
-      });
-    return `Joints: ${Object.entries(g.joints).map(([n, [x, y]]) => `${n}(${x},${y})`).join(' ')}\nBones: ${lines.join('; ')}`;
-  };
-
   tool(
     'pose_guide',
     `Place a gesture skeleton (joints in canvas pixels) to plan a pose BEFORE drawing, then draw the shapes along its bones. It is stored with the sprite, drawn over previews (preview guide: true) and never exported.
@@ -1309,16 +1173,7 @@ Standard joints (bones are connected automatically): head (top of skull center),
     },
     (a) => {
       const { sprite } = mutate(a.sprite, (s) => {
-        if (a.clear) {
-          s.guide = null;
-          return;
-        }
-        const g: PoseGuide = s.guide ?? { joints: {}, bones: [] };
-        Object.assign(g.joints, a.joints ?? {});
-        for (const n of a.remove ?? []) delete g.joints[n];
-        const extra = [...g.bones.filter((b) => !DEFAULT_BONES.some((d) => d[0] === b[0] && d[1] === b[1])), ...(a.bones ?? [])];
-        g.bones = [...DEFAULT_BONES.filter(([x, y]) => g.joints[x] && g.joints[y]), ...extra.filter(([x, y]) => g.joints[x] && g.joints[y])];
-        s.guide = g;
+        editGuide(s, { joints: a.joints as Record<string, [number, number]> | undefined, remove: a.remove, bones: a.bones as [string, string][] | undefined, clear: a.clear });
       });
       if (!sprite.guide) return text('Pose guide removed.');
       const out = text(describeGuide(sprite.guide));

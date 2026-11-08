@@ -104,6 +104,21 @@ describe('game MCP tools', () => {
     expect(JSON.stringify(s.events)).toContain('count(\\"gem\\")');
   });
 
+  it('sets, describes and clears tileset rules', async () => {
+    await call('create_sprite', { name: 'tiles', width: 64, height: 16, tile_width: 16, tile_height: 16 });
+    const r = textOf(await call('set_tileset_rules', { tileset: 'tiles', rules: [{ tile: 0, kind: 'grid', first: 2, size: 1 }, { tile: 1, kind: 'blob', first: 3 }], edges: [{ on: [1], from: [0], first: 3 }], paintable: 2 }));
+    expect(r).toContain('2 rules (1 grid, 1 blob), 1 edge overlay, paintable 2');
+    expect(ws.loadGame().tilesets?.tiles?.rules).toHaveLength(2);
+    // Only the given fields change.
+    await call('set_tileset_rules', { tileset: 'tiles', edges: null });
+    expect(ws.loadGame().tilesets?.tiles?.edges).toBeUndefined();
+    expect(ws.loadGame().tilesets?.tiles?.rules).toHaveLength(2);
+    expect(textOf(await call('get_game'))).toContain('Tileset rules: tiles (2 rules');
+    await call('set_tileset_rules', { tileset: 'tiles', clear: true });
+    expect(ws.loadGame().tilesets).toBeUndefined();
+    await expect(call('set_tileset_rules', { tileset: 'nope', clear: true })).rejects.toThrow('No sprite');
+  });
+
   it('builds a standalone HTML page with the bundle embedded', async () => {
     await buildPlatformer();
     const { bundle } = loadGameBundle(ws, { images: true });

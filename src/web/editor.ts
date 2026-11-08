@@ -34,6 +34,16 @@ export class Editor {
   range: [number, number] | null = null;
   playing = false;
   playTag: string | null = null;
+  /** Reference picture display (never exported). */
+  refShow = true;
+  refOpacity = 0.45;
+  refMode: 'under' | 'over' | 'side' = 'under';
+  /** Draw the stored hi-res picture (smoothed) instead of the canvas-sized one. */
+  refHiRes = true;
+  /** Pose guide skeleton overlay. */
+  guideShow = true;
+  /** Rig pivots / selected part overlay. */
+  rigShow = true;
 
   saveState: 'saved' | 'saving' | 'dirty' | 'error' = 'saved';
   lastRev: string;
@@ -102,6 +112,16 @@ export class Editor {
   commit(kind: ChangeKind = 'pixels'): void {
     this.emit(kind);
     this.scheduleSave();
+  }
+
+  /** Like `edit`, but reports errors as a return value instead of throwing (for UI handlers). */
+  tryEdit(fn: (s: Sprite) => void, kind: ChangeKind = 'structure'): Error | null {
+    try {
+      this.edit(fn, kind);
+      return null;
+    } catch (err) {
+      return err as Error;
+    }
   }
 
   /** Runs a structural edit with undo support. */

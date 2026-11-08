@@ -38,6 +38,7 @@ import type { Workspace } from './store.js';
 import { addLibraryComponents, checkScriptSyntax, inspectScripts, nodeEvaluator, refreshScriptTypes } from './scripts.js';
 import { LIBRARY } from '../core/game/library.js';
 import { scriptBaseName } from '../core/game/modules.js';
+import { describeTilesetRules, normalizeTilesetRules } from '../core/game/tilerules.js';
 import { SCRIPT_REFERENCE } from '../core/game/script.js';
 import { DIALOGUE_REFERENCE, buildDialogueBook, parseDialogues } from '../core/game/dialogue.js';
 
@@ -196,6 +197,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       `Variables: ${Object.entries(g.variables).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ') || 'none'}`,
       `Global components: ${g.components?.map((b) => describeStep(b, BEHAVIOR_MAP.get('script'))).join('; ') || 'none'}`,
       `Scenes: ${scenes.map((s) => `${s.name} (${s.cols}x${s.rows}, ${s.instances} instances)`).join(', ') || 'none'}`,
+      `Tileset rules: ${Object.entries(g.tilesets ?? {}).map(([n, r]) => `${n} (${describeTilesetRules(r)})`).join('; ') || 'none'}`,
       '',
       ...g.objects.map(describeObject),
       '',
@@ -256,6 +258,56 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         Object.assign(g, normalizeGame(g));
       });
       return text(`Saved. Game "${game.title}" ${game.width}x${game.height}, variables: ${JSON.stringify(game.variables)}`);
+    },
+  );
+
+  const tileRuleSchema = z.object({
+    tile: z.number().int().min(0).describe('The painted tile index'),
+    kind: z.enum(['grid', 'random', 'blob']).describe('grid = big seamless texture cut into size×size pieces by position; random = one of count alternatives by position; blob = 47-shape autotile from the 8 neighbours (size×size pieces per shape)'),
+    first: z.number().int().min(0).describe("First tile of the rule's block in the tileset"),
+    size: z.number().int().min(1).max(16).optional().describe('grid / blob: pieces per side (default 1)'),
+    count: z.number().int().min(1).optional().describe('random: number of alternatives'),
+    group: z.array(z.number().int().min(0)).optional().describe('blob: painted tiles counted as the same terrain (default just tile)'),
+    border: z.boolean().optional().describe('blob: outside the map counts as the same terrain (default true)'),
+    frames: z.number().int().min(1).max(64).optional().describe('Animated: this many copies of the block follow each other (water, lava)'),
+    fps: z.number().min(0.1).max(60).optional().describe('Animation speed (default 4)'),
+  });
+  const edgeRuleSchema = z.object({
+    on: z.array(z.number().int().min(0)).min(1).describe('Cells painted with these tiles get the overlay…'),
+    from: z.array(z.number().int().min(0)).min(1).describe('…on the sides where a neighbour is one of these'),
+    first: z.number().int().min(0).describe('First tile of the 47-shape overlay block'),
+    empty: z.boolean().optional().describe('Empty cells of the layer count as "from" too'),
+    size: z.number().int().min(1).max(16).optional(),
+    frames: z.number().int().min(1).max(64).optional(),
+    fps: z.number().min(0.1).max(60).optional(),
+  });
+
+  tool(
+    'set_tileset_rules',
+    'Tile rules of a tileset (game.json tilesets): autotiling (blob), big seamless textures (grid), random variants, animated tiles and edge overlays (grass creeping onto paths, foam on shores). Scenes keep storing only the painted tile; the game and the scene editor draw the generated pieces. rules / edges replace their whole list when given (null clears); paintable = how many tiles (from 0) the editor palette shows. clear removes all rules of the tileset.',
+    {
+      tileset: z.string().describe('Tileset sprite (has a tile grid)'),
+      rules: z.array(tileRuleSchema).nullable().optional(),
+      edges: z.array(edgeRuleSchema).nullable().optional(),
+      paintable: z.number().int().min(1).nullable().optional(),
+      clear: z.boolean().optional(),
+    },
+    (a) => {
+      if (!ws.exists(a.tileset)) throw new Error(`No sprite "${a.tileset}"`);
+      const { game } = mutateGame((g) => {
+        const cur: Record<string, unknown> = a.clear ? {} : { ...(g.tilesets?.[a.tileset] ?? {}) };
+        if (a.rules !== undefined) cur.rules = a.rules ?? undefined;
+        if (a.edges !== undefined) cur.edges = a.edges ?? undefined;
+        if (a.paintable !== undefined) cur.paintable = a.paintable ?? undefined;
+        const n = normalizeTilesetRules(cur);
+        const all = { ...(g.tilesets ?? {}) };
+        if (n) all[a.tileset] = n;
+        else delete all[a.tileset];
+        if (Object.keys(all).length) g.tilesets = all;
+        else delete g.tilesets;
+      });
+      const r = game.tilesets?.[a.tileset];
+      return text(`Saved. ${a.tileset}: ${r ? describeTilesetRules(r) : 'no rules'}`);
     },
   );
 

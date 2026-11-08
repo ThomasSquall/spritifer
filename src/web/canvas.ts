@@ -1,5 +1,7 @@
 import { parseColor, toHex, type RGBA } from '../core/color.js';
 import { type Point, ellipsePoints, floodFill, getPixel, linePoints, plot, rectPoints, shift } from '../core/draw.js';
+import type { Reference } from '../core/sprite.js';
+import { referencePixels } from '../core/reference.js';
 import type { Editor } from './editor.js';
 
 const ZOOMS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64];
@@ -8,7 +10,34 @@ type Drag =
   | { kind: 'pan'; sx: number; sy: number; ox: number; oy: number }
   | { kind: 'paint'; color: RGBA; last: Point; changed: boolean }
   | { kind: 'shape'; color: RGBA; start: Point; end: Point }
-  | { kind: 'move'; start: Point; original: Uint8ClampedArray; dx: number; dy: number };
+  | { kind: 'move'; start: Point; original: Uint8ClampedArray; dx: number; dy: number }
+  | { kind: 'custom'; handler: CanvasInteraction };
+
+/** Canvas position in sprite pixels with fractions (pixel (3, 4) spans 3..4 × 4..5). */
+export type FPoint = [number, number];
+
+/** Screen mapping handed to overlays: screen = o + pixel * zoom (CSS pixels). */
+export interface CanvasMetrics {
+  ox: number;
+  oy: number;
+  zoom: number;
+}
+
+/** Something drawn over the art (pose guide, rig pivots...). Never exported. */
+export interface CanvasOverlay {
+  draw(ctx: CanvasRenderingContext2D, m: CanvasMetrics): void;
+}
+
+/** Takes over pointer input while active (guide joints, rig pivots, part rectangles...). */
+export interface CanvasInteraction {
+  cursor?: string;
+  /** Return true to capture the pointer until it is released; false lets the drawing tool handle it. */
+  down(p: FPoint, e: PointerEvent): boolean;
+  move?(p: FPoint, e: PointerEvent): void;
+  up?(p: FPoint, e: PointerEvent): void;
+  /** Pointer moving without a button pressed (null when it leaves the canvas). */
+  hover?(p: FPoint | null): void;
+}
 
 /** The zoomable drawing surface: renders the sprite and turns pointer input into tool actions. */
 export class CanvasView {
@@ -28,6 +57,10 @@ export class CanvasView {
   private raf = 0;
   onHover: (p: Point | null, color: string | null) => void = () => {};
   onZoom: (zoom: number) => void = () => {};
+  /** Drawn over the art in registration order. */
+  readonly overlays = new Set<CanvasOverlay>();
+  private interactionHandler: CanvasInteraction | null = null;
+  private refCache: { ref: Reference; low: HTMLCanvasElement; high: HTMLCanvasElement | null } | null = null;
 
   constructor(private editor: Editor) {
     this.el = document.createElement('div');
@@ -45,6 +78,7 @@ export class CanvasView {
     this.canvas.addEventListener('pointercancel', (e) => this.pointerUp(e));
     this.canvas.addEventListener('pointerleave', () => {
       this.hover = null;
+      this.interactionHandler?.hover?.(null);
       this.onHover(null, null);
       this.requestRender();
     });
@@ -60,11 +94,23 @@ export class CanvasView {
     window.addEventListener('keyup', (e) => {
       if (e.code === 'Space') {
         this.spaceDown = false;
-        this.canvas.style.cursor = '';
+        this.canvas.style.cursor = this.interactionHandler?.cursor ?? '';
       }
       if (e.key === 'Shift') this.shiftDown = false;
     });
     editor.on(() => this.requestRender());
+  }
+
+  /** The active pointer handler (null = the drawing tools). */
+  get interaction(): CanvasInteraction | null {
+    return this.interactionHandler;
+  }
+
+  set interaction(h: CanvasInteraction | null) {
+    if (this.drag?.kind === 'custom') this.drag = null;
+    this.interactionHandler = h;
+    this.canvas.style.cursor = h?.cursor ?? '';
+    this.requestRender();
   }
 
   private makeChecker(): CanvasPattern {
@@ -97,15 +143,23 @@ export class CanvasView {
     this.userMoved = false;
     const { width, height } = this.el.getBoundingClientRect();
     const s = this.editor.sprite;
-    const max = Math.min((width - 48) / s.width, (height - 48) / s.height);
+    const across = this.sideBySide ? 2.15 : 1;
+    const max = Math.min((width - 48) / (s.width * across), (height - 48) / s.height);
     this.zoom = ZOOMS.filter((z) => z <= max).pop() ?? 1;
     this.center();
+  }
+
+  /** The reference is drawn in its own box right of the art. */
+  private get sideBySide(): boolean {
+    const ed = this.editor;
+    return ed.refShow && ed.refMode === 'side' && !!ed.sprite.reference;
   }
 
   center(): void {
     const { width, height } = this.el.getBoundingClientRect();
     const s = this.editor.sprite;
-    this.ox = Math.round((width - s.width * this.zoom) / 2);
+    const total = s.width * this.zoom + (this.sideBySide ? Math.max(16, this.zoom * 2) + s.width * this.zoom : 0);
+    this.ox = Math.round((width - total) / 2);
     this.oy = Math.round((height - s.height * this.zoom) / 2);
     this.onZoom(this.zoom);
     this.requestRender();
@@ -170,7 +224,22 @@ export class CanvasView {
       if (editor.frame > 0) drawFrame(editor.frame - 1, 0.28);
       if (editor.frame < s.frames.length - 1) drawFrame(editor.frame + 1, 0.12);
     }
+    const ref = editor.refShow ? s.reference : null;
+    if (ref && editor.refMode === 'under') this.drawReference(ref, this.ox, this.oy);
     drawFrame(editor.frame, 1);
+    if (ref && editor.refMode === 'over') this.drawReference(ref, this.ox, this.oy);
+    if (ref && editor.refMode === 'side') {
+      // Side by side: the reference in its own canvas-sized box to the right of the art.
+      const sx = this.ox + w + Math.max(16, z * 2);
+      ctx.save();
+      this.checker.setTransform(new DOMMatrix().translate(sx, this.oy));
+      ctx.fillStyle = this.checker;
+      ctx.fillRect(sx, this.oy, w, h);
+      ctx.restore();
+      this.drawReference(ref, sx, this.oy, 1);
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.strokeRect(sx - 0.5, this.oy - 0.5, w + 1, h + 1);
+    }
 
     // Shape preview while dragging.
     if (this.drag?.kind === 'shape') {
@@ -223,8 +292,14 @@ export class CanvasView {
     ctx.strokeStyle = 'rgba(0,0,0,0.6)';
     ctx.strokeRect(this.ox - 0.5, this.oy - 0.5, w + 1, h + 1);
 
+    for (const o of this.overlays) {
+      ctx.save();
+      o.draw(ctx, { ox: this.ox, oy: this.oy, zoom: z });
+      ctx.restore();
+    }
+
     // Brush cursor.
-    if (this.hover && !this.drag && ['pencil', 'eraser', 'line', 'rect', 'ellipse'].includes(editor.tool)) {
+    if (this.hover && !this.drag && !this.interactionHandler && ['pencil', 'eraser', 'line', 'rect', 'ellipse'].includes(editor.tool)) {
       const pts = this.withMirror(this.expandBrush([this.hover]));
       ctx.lineWidth = 1;
       for (const [x, y] of pts) {
@@ -236,7 +311,47 @@ export class CanvasView {
     }
   }
 
+  /** Draws the reference picture with its canvas placement, the art's top-left corner at (bx, by). */
+  private drawReference(ref: Reference, bx: number, by: number, alpha = this.editor.refOpacity): void {
+    const { ctx, zoom: z } = this;
+    if (this.refCache?.ref !== ref) {
+      const toCanvas = (width: number, height: number, data: Uint8ClampedArray) => {
+        const c = document.createElement('canvas');
+        c.width = width;
+        c.height = height;
+        c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(data), width, height), 0, 0);
+        return c;
+      };
+      const low = referencePixels(ref);
+      let high: HTMLCanvasElement | null = null;
+      if (ref.source && ref.source.width > ref.width) {
+        const src = referencePixels({ ...ref, width: ref.source.width, height: ref.source.height, pixels: ref.source.pixels });
+        high = toCanvas(src.width, src.height, src.data);
+      }
+      this.refCache = { ref, low: toCanvas(low.width, low.height, low.data), high };
+    }
+    const { low, high } = this.refCache;
+    const s = this.editor.sprite;
+    ctx.save();
+    // Clip to the canvas box: the reference may be placed partly outside.
+    ctx.beginPath();
+    ctx.rect(bx, by, s.width * z, s.height * z);
+    ctx.clip();
+    ctx.globalAlpha = alpha;
+    const hi = this.editor.refHiRes && high;
+    ctx.imageSmoothingEnabled = !!hi;
+    if (hi) ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(hi ? high! : low, bx + ref.x * z, by + ref.y * z, ref.width * z, ref.height * z);
+    ctx.restore();
+  }
+
   // ------------------------------------------------------------------ geometry helpers
+
+  /** Pointer position in fractional sprite pixels. */
+  toCanvasPoint(e: { clientX: number; clientY: number }): FPoint {
+    const r = this.canvas.getBoundingClientRect();
+    return [(e.clientX - r.left - this.ox) / this.zoom, (e.clientY - r.top - this.oy) / this.zoom];
+  }
 
   private toPixel(e: PointerEvent | WheelEvent): Point {
     const r = this.canvas.getBoundingClientRect();
@@ -321,6 +436,12 @@ export class CanvasView {
       return;
     }
     if (e.button !== 0 && e.button !== 2) return;
+    const handler = this.interactionHandler;
+    if (handler && handler.down(this.toCanvasPoint(e), e)) {
+      this.drag = { kind: 'custom', handler };
+      this.requestRender();
+      return;
+    }
     const p = this.toPixel(e);
     const layer = ed.layer;
     if (!layer.visible && ed.tool !== 'picker') {
@@ -378,10 +499,15 @@ export class CanvasView {
 
     const d = this.drag;
     if (!d) {
+      this.interactionHandler?.hover?.(this.toCanvasPoint(e));
       if (prevHover?.[0] !== this.hover?.[0] || prevHover?.[1] !== this.hover?.[1]) this.requestRender();
       return;
     }
     switch (d.kind) {
+      case 'custom':
+        d.handler.move?.(this.toCanvasPoint(e), e);
+        this.requestRender();
+        break;
       case 'pan':
         this.ox = d.ox + (e.clientX - d.sx);
         this.oy = d.oy + (e.clientY - d.sy);
@@ -423,8 +549,12 @@ export class CanvasView {
     if (!d) return;
     const ed = this.editor;
     switch (d.kind) {
+      case 'custom':
+        d.handler.up?.(this.toCanvasPoint(e), e);
+        this.requestRender();
+        break;
       case 'pan':
-        this.canvas.style.cursor = this.spaceDown ? 'grab' : '';
+        this.canvas.style.cursor = this.spaceDown ? 'grab' : (this.interactionHandler?.cursor ?? '');
         break;
       case 'paint':
         if (d.changed) ed.commit('pixels');

@@ -10,6 +10,8 @@ import { openExport, openPlay } from './play.js';
 import { clear, h, icon, iconButton, linkScriptRefs, promptText, toast } from './dom.js';
 import { componentListCard } from './componentsUi.js';
 import { sheetContext } from './objectsView.js';
+import { VALUE_HINT, formatValue, parseValue } from './values.js';
+import { colorInput } from './colorInput.js';
 
 const RESOLUTIONS: [number, number, string][] = [
   [160, 144, 'handheld'],
@@ -120,17 +122,17 @@ export function renderGameSettings(root: HTMLElement): () => void {
     const presets = h('div', { class: 'chips' }, ...RESOLUTIONS.map(([w, hh, label]) => h('button', { type: 'button', class: `chip${g.width === w && g.height === hh ? ' on' : ''}`, title: label, onclick: () => { g.width = w; g.height = hh; changed(); render(); } }, `${w}×${hh}`)));
     const zoomSel = h('select', { onchange: () => { g.zoom = zoomSel.value === 'fit' ? 'fit' : Number(zoomSel.value); changed(); } },
       h('option', { value: 'fit', selected: g.zoom === 'fit' }, 'Fit window (integer)'),
-      ...[1, 2, 3, 4, 5, 6].map((z) => h('option', { value: String(z), selected: g.zoom === z }, `${z}×`)),
+      ...Array.from({ length: 16 }, (_, i) => i + 1).map((z) => h('option', { value: String(z), selected: g.zoom === z }, `${z}×`)),
     );
-    const bgIn = h('input', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(g.background) ? g.background : '#181425', oninput: () => { g.background = bgIn.value; changed(); } });
+    const bgIn = colorInput(g.background, (v) => { if (v) { g.background = v; changed(); } }, { fallback: '#181425' });
     const gravIn = h('input', { type: 'number', value: String(g.gravity), oninput: () => { g.gravity = Number(gravIn.value) || 0; changed(); } });
     const startSel = h('select', { onchange: () => { g.startScene = startSel.value; changed(); } }, ...state.scenes.map((s) => h('option', { value: s.name, selected: s.name === g.startScene }, s.name)));
     const touchIn = h('input', { type: 'checkbox', checked: g.touchControls, onchange: () => { g.touchControls = touchIn.checked; changed(); } });
 
     const vars = h('div', { class: 'props' });
-    const parse = (s: string): Value => (s === 'true' ? true : s === 'false' ? false : s.trim() !== '' && Number.isFinite(Number(s)) ? Number(s) : s);
+    const parse = parseValue;
     for (const [k, v] of Object.entries(g.variables)) {
-      const vi = h('input', { type: 'text', value: String(v), oninput: () => { g.variables[k] = parse(vi.value); changed(); } });
+      const vi = h('input', { type: 'text', title: VALUE_HINT, value: formatValue(v), oninput: () => { g.variables[k] = parse(vi.value); changed(); } });
       vars.append(h('div', { class: 'prop-row' }, h('code', {}, k), vi, iconButton('close', 'Remove', () => { delete g.variables[k]; changed(); render(); }, { class: 'icon-btn tiny' })));
     }
     if (!Object.keys(g.variables).length) vars.append(h('p', { class: 'muted small' }, 'Global variables (score, lives, coins…) are kept across scenes. Use them in events and text.'));

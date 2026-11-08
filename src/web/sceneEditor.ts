@@ -1,7 +1,11 @@
 /** Scene editor: paint tile layers, place and move instances, edit scene settings and events. */
 
-import { TileResolver } from '../core/game/tilerules.js';
-import { type Instance, type Scene, type TileLayer, type Value, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
+import { TileResolver, type TilesetRules, tilesetFrame } from '../core/game/tilerules.js';
+import { type AtmosphereActor, type AtmosphereWorld, MoteField, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
+import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
+import { CanvasRenderer } from '../runtime/canvasRenderer.js';
+import { atmosphereEditor, lightEditor } from './atmosphereUi.js';
+import { openTileRules } from './tileRulesUi.js';
 import { renderEventSheet } from './eventSheet.js';
 import { checkExpr } from '../core/game/expr.js';
 import { componentListCard, instanceComponents } from './componentsUi.js';
@@ -12,6 +16,8 @@ import { openPlay, registerFlusher } from './play.js';
 import { clear, h, icon, iconButton, modal, promptText, toast } from './dom.js';
 import { api } from './api.js';
 import { drawPixelText, previewText, textSize } from './textPreview.js';
+import { VALUE_HINT, formatValue, parseValue } from './values.js';
+import { colorInput } from './colorInput.js';
 
 type Tool = 'paint' | 'rect' | 'fill' | 'erase' | 'place' | 'select';
 
@@ -127,12 +133,15 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     const names = new Set<string>();
     for (const o of state.game!.objects) if (o.sprite) names.add(o.sprite);
     for (const i of scene.instances) if (i.sprite) names.add(i.sprite);
+    for (const b of scene.backgrounds) names.add(b.sprite);
+    if (scene.atmosphere?.clouds) names.add(scene.atmosphere.clouds.sprite);
     await Promise.all(
       [...names].map(async (n) => {
         const a = await state.asset(n);
         if (a) assets.set(n, a);
       }),
     );
+    atmRenderer = null;
     draw();
     renderPalette();
     renderRight();
@@ -156,6 +165,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const gridBtn = iconButton('grid', 'Toggle grid (#)', () => { showGrid = !showGrid; gridBtn.classList.toggle('active', showGrid); draw(); });
   gridBtn.classList.toggle('active', showGrid);
   const dimBtn = iconButton('eye', 'Dim other layers', () => { dimOthers = !dimOthers; dimBtn.classList.toggle('active', dimOthers); draw(); });
+  const lookBtn = iconButton('sun', 'Game look (L): preview lights, shadows, clouds, particles, color grade and animated tiles as in Play', () => setGameLook(!showGameLook));
   const nameBtn = h('button', { class: 'sprite-name', title: 'Rename scene', onclick: async () => {
     const to = await promptText('Rename scene', 'New name', scene.name);
     if (!to || to === scene.name) return;
@@ -185,6 +195,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       iconButton('fit', 'Fit scene', () => fit()),
       gridBtn,
       dimBtn,
+      lookBtn,
       h('span', { class: 'sep' }),
       h('button', { class: 'small', onclick: () => void openEvents() }, icon('tag', 14), 'Scene events'),
       h('span', { class: 'spacer' }),
@@ -209,11 +220,11 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const ro = new ResizeObserver(resize);
   ro.observe(wrap);
 
-  const tileSrc = (t: number): [number, number, number, number] | null => {
+  const tileSrc = (t: number, frame = 0): [number, number, number, number] | null => {
     if (!tileset || !tileset.frames.length) return null;
     const g = tileset.grid ?? { width: ts(), height: ts() };
     const cols = Math.max(1, Math.floor(tileset.width / g.width));
-    const f0 = tileset.frames[0];
+    const f0 = tileset.frames[frame] ?? tileset.frames[0];
     return [f0.x + (t % cols) * g.width, f0.y + Math.floor(t / cols) * g.height, g.width, g.height];
   };
 
@@ -237,11 +248,78 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     return { x: i.x, y: i.y, w: ts(), h: ts() };
   };
 
+  // ---------------------------------------------------------------- game-look preview
+  // The editor draws the scene the way the game does: animated tiles, parallax backgrounds and the
+  // scene atmosphere (contact shadows, cloud shadows, particles, lights, color grade, vignette) through
+  // the same functions and canvas renderer as Play. The visible part of the map acts as the screen.
+  const PREVIEW_KEY = 'spritifer.sceneGameLook';
+  let showGameLook = (() => { try { return localStorage.getItem(PREVIEW_KEY) !== '0'; } catch { return true; } })();
+  const motes = new MoteField();
+  let motesCfg: SceneMotes | undefined;
+  let motesKey = '';
+  let lastTick = performance.now();
+  const clock0 = performance.now();
+  let raf = 0;
+  let atmRenderer: { r: CanvasRenderer; key: string } | null = null;
+  let resolverCache: { cfg: TilesetRules | undefined; r: TileResolver } | null = null;
+  const resolverFor = () => {
+    const cfg = tileset ? state.game!.tilesets?.[tileset.name] : undefined;
+    if (!resolverCache || resolverCache.cfg !== cfg) resolverCache = { cfg, r: new TileResolver(cfg) };
+    return resolverCache.r;
+  };
+  /** Visible part of the scene in scene pixels (the "screen" of the preview). */
+  const visibleRect = () => {
+    const r = wrap.getBoundingClientRect();
+    const W = scene.cols * ts();
+    const H = scene.rows * ts();
+    const x0 = Math.max(0, Math.min(W, Math.floor(-panX / zoom)));
+    const y0 = Math.max(0, Math.min(H, Math.floor(-panY / zoom)));
+    const x1 = Math.max(x0, Math.min(W, Math.ceil((r.width - panX) / zoom)));
+    const y1 = Math.max(y0, Math.min(H, Math.ceil((r.height - panY) / zoom)));
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  };
+  /** Placed instances as the atmosphere passes see them (same light/shadow rules as the engine). */
+  const previewActors = (): AtmosphereActor[] => scene.instances.map((inst, k) => {
+    const obj = state.effective(inst.object);
+    const fr = instanceFrame(inst);
+    const asset = fr ? { width: fr.a.width, height: fr.a.height } : undefined;
+    const hb = obj?.hitbox;
+    const b = hb
+      ? { x: inst.x + (inst.flipX && asset ? asset.width - hb.x - hb.w : hb.x), y: inst.y + hb.y, w: hb.w, h: hb.h }
+      : instanceBox(inst);
+    return {
+      id: k + 1, x: inst.x, y: inst.y, z: obj?.z ?? 0, opacity: 1, visible: true, destroyed: false,
+      light: inst.light ? (inst.light.radius > 0 ? inst.light : undefined) : obj?.light,
+      asset, type: obj ?? {}, box: () => b,
+    };
+  });
+  const animating = () => showGameLook && !!(scene.atmosphere || (tileset && tileset.frames.length > 1));
+  const loop = () => {
+    raf = 0;
+    if (!canvas.isConnected || !animating()) return;
+    draw();
+  };
+  const setGameLook = (on: boolean) => {
+    showGameLook = on;
+    try { localStorage.setItem(PREVIEW_KEY, on ? '1' : '0'); } catch { /* private mode */ }
+    lookBtn.classList.toggle('active', on);
+    draw();
+  };
+
+  lookBtn.classList.toggle('active', showGameLook);
+
   function draw(): void {
     const dpr = window.devicePixelRatio || 1;
     const W = scene.cols * ts();
     const H = scene.rows * ts();
+    const now = performance.now();
+    const clock = (now - clock0) / 1000;
+    const look = showGameLook;
+    const atm = look ? scene.atmosphere : undefined;
+    const view = visibleRect();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle = '#101217';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, panX * dpr, panY * dpr);
@@ -249,22 +327,48 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     ctx.fillStyle = scene.background || state.game!.background;
     ctx.fillRect(0, 0, W, H);
 
+    // Parallax backgrounds, placed as the game places them with the camera at the visible area.
+    if (scene.backgrounds.length && view.w > 0 && view.h > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(view.x, view.y, view.w, view.h);
+      ctx.clip();
+      for (const bg of scene.backgrounds) {
+        const a = assets.get(bg.sprite);
+        if (!a || !a.frames.length) continue;
+        const f = a.frames[0];
+        const ox = view.x + Math.round(-view.x * bg.parallax);
+        const oy = view.y + Math.round(bg.y - view.y * bg.parallax);
+        if (bg.repeatX) {
+          let start = (ox - view.x) % f.w;
+          if (start > 0) start -= f.w;
+          for (let x = view.x + start; x < view.x + view.w; x += f.w) ctx.drawImage(a.img, f.x, f.y, f.w, f.h, Math.round(x), oy, f.w, f.h);
+        } else ctx.drawImage(a.img, f.x, f.y, f.w, f.h, ox, oy, f.w, f.h);
+      }
+      ctx.restore();
+    }
+
     // Tile layers and instances in z order (layers default below objects).
     type Item = { z: number; o: number; d: () => void };
     const items: Item[] = [];
+    const tileFrame = look && tileset ? tilesetFrame(tileset, clock) : 0;
+    const tx0 = Math.max(0, Math.floor(view.x / ts()));
+    const ty0 = Math.max(0, Math.floor(view.y / ts()));
+    const tx1 = Math.min(scene.cols - 1, Math.floor((view.x + view.w) / ts()));
+    const ty1 = Math.min(scene.rows - 1, Math.floor((view.y + view.h) / ts()));
     scene.layers.forEach((l, li) => {
       if (!l.visible) return;
       items.push({ z: l.z ?? li - 10, o: li, d: () => {
         if (!tileset) return;
         ctx.globalAlpha = dimOthers && li !== activeLayer ? 0.3 : 1;
-        // Same tile rules as the game (autotiling, textures, edge overlays).
-        const resolver = new TileResolver(state.game!.tilesets?.[tileset.name]);
+        // Same tile rules as the game (autotiling, textures, edge overlays, animated tiles).
+        const resolver = resolverFor();
         const list: number[] = [];
-        for (let ty = 0; ty < scene.rows; ty++) {
-          for (let tx = 0; tx < scene.cols; tx++) {
+        for (let ty = ty0; ty <= ty1; ty++) {
+          for (let tx = tx0; tx <= tx1; tx++) {
             if (l.tiles[ty * scene.cols + tx] < 0) continue;
-            for (const t of resolver.resolve(l, scene.cols, scene.rows, tx, ty, list)) {
-              const s = tileSrc(t);
+            for (const t of resolver.resolve(l, scene.cols, scene.rows, tx, ty, list, look ? clock : 0)) {
+              const s = tileSrc(t, tileFrame);
               if (s) ctx.drawImage(tileset.img, s[0], s[1], s[2], s[3], tx * ts(), ty * ts(), ts(), ts());
             }
           }
@@ -272,10 +376,29 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         ctx.globalAlpha = 1;
       } });
     });
+    // With an atmosphere: shadows between the ground and the instances, HUD instances above the lighting.
+    const actors = atm ? previewActors() : [];
+    const sprites = Object.fromEntries(assets) as Record<string, LoadedAsset>;
+    const rendererFor = (w: number, hh: number) => {
+      const key = `${w}x${hh}`;
+      if (!atmRenderer || atmRenderer.key !== key) {
+        const images = new Map<string, CanvasImageSource>();
+        for (const [n, a] of assets) images.set(n, a.img);
+        atmRenderer = { r: new CanvasRenderer(ctx, images, Math.max(1, w), Math.max(1, hh)), key };
+      }
+      return atmRenderer.r;
+    };
+    if (atm && atm.shadows !== false) {
+      items.push({ z: -1.5, o: 0, d: () => {
+        drawShadows({ clock, game: { width: W, height: H }, actors, motes, bundle: { sprites } }, rendererFor(view.w, view.h), atm, 0, 0, 1);
+        ctx.globalAlpha = 1;
+      } });
+    }
+    const hudItems: Item[] = [];
     scene.instances.forEach((inst, k) => {
       const obj = state.effective(inst.object);
       const sortKey = scene.ySort ? 1000 + (() => { const b = instanceBox(inst); return b.y + b.h; })() + k / 10000 : 1000 + k;
-      items.push({ z: obj?.z ?? 0, o: sortKey, d: () => {
+      (atm && obj?.hud ? hudItems : items).push({ z: obj?.z ?? 0, o: sortKey, d: () => {
         const fr = instanceFrame(inst);
         ctx.globalAlpha = dimOthers ? 0.5 : 1;
         if (fr) {
@@ -306,6 +429,39 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     items.sort((a, b) => a.z - b.z || a.o - b.o);
     for (const it of items) it.d();
 
+    if (atm && view.w > 0 && view.h > 0) {
+      // Viewport passes: the visible area is the screen (camera at its top-left, zoom 1).
+      const r = rendererFor(view.w, view.h);
+      const world: AtmosphereWorld = { clock, game: { width: view.w, height: view.h }, actors, motes, bundle: { sprites } };
+      const key = JSON.stringify(atm.motes ?? null);
+      if (key !== motesKey) {
+        motesKey = key;
+        motesCfg = atm.motes ? { ...atm.motes } : undefined;
+        motes.reset(motesCfg);
+      }
+      if (motesCfg && atm.motes) {
+        // "On screen" count, scaled to how much of the map is visible.
+        const screens = (view.w * view.h) / Math.max(1, state.game!.width * state.game!.height);
+        motesCfg.count = Math.min(400, Math.round((atm.motes.count ?? 24) * screens));
+      }
+      motes.tick(Math.min(0.1, (now - lastTick) / 1000), view);
+      ctx.save();
+      ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, (panX + view.x * zoom) * dpr, (panY + view.y * zoom) * dpr);
+      ctx.beginPath();
+      ctx.rect(0, 0, view.w, view.h);
+      ctx.clip();
+      drawClouds(world, r, atm, view.x, view.y, 1);
+      motes.draw(r, view.x, view.y, 1);
+      postProcess(world, r, atm, view.x, view.y, 1);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    lastTick = now;
+    hudItems.sort((a, b) => a.z - b.z || a.o - b.o);
+    for (const it of hudItems) it.d();
+    if (animating() && !raf) raf = requestAnimationFrame(loop);
+
     // Screen-space overlays.
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const sx = (x: number) => Math.round(panX + x * zoom) + 0.5;
@@ -334,6 +490,20 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       ctx.lineWidth = 2;
       ctx.strokeRect(sx(b.x) - 1, sy(b.y) - 1, b.w * zoom + 1, b.h * zoom + 1);
       ctx.lineWidth = 1;
+      // Reach of its light (dashed), centered like the engine: sprite center + offset.
+      const so = state.effective(sel.object);
+      const light = sel.light ? (sel.light.radius > 0 ? sel.light : undefined) : so?.light;
+      if (light) {
+        const fr = instanceFrame(sel);
+        const cx = sel.x + (fr ? fr.a.width / 2 : 0) + (light.x ?? 0);
+        const cy = sel.y + (fr ? fr.a.height / 2 : 0) + (light.y ?? 0);
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = light.color ?? '#ffd9a0';
+        ctx.beginPath();
+        ctx.arc(panX + cx * zoom, panY + cy * zoom, light.radius * zoom, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
     }
     // Hover / brush ghost.
     if (hover) {
@@ -682,6 +852,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       showGrid = !showGrid;
       draw();
     }
+    if (e.key.toLowerCase() === 'l') setGameLook(!showGameLook);
     if (e.key === 'Escape') {
       selectedId = null;
       renderInspector();
@@ -726,6 +897,8 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         iconButton('down', 'Move layer down', () => { if (activeLayer > 0) { snapshot(); const [l] = scene.layers.splice(activeLayer, 1); scene.layers.splice(--activeLayer, 0, l); changed(); renderLayers(); } }, { class: 'icon-btn tiny' }),
         h('label', { class: 'inline small', title: 'Draw order: layers with z above 0 are drawn in front of objects' }, 'z',
           h('input', { type: 'number', class: 'num tiny-num', value: String(layer()?.z ?? activeLayer - 10), onchange: (e: Event) => { const l = layer(); if (!l) return; snapshot(); l.z = Number((e.target as HTMLInputElement).value); changed(); } })),
+        h('label', { class: 'inline small', title: 'Parallax: 1 = moves with the world (default), below 1 = far layer that scrolls slower, above 1 = foreground. Shown in Play; the editor draws layers in place' }, 'parallax',
+          h('input', { type: 'number', class: 'num tiny-num', step: '0.05', placeholder: '1', value: layer()?.parallax === undefined ? '' : String(layer()!.parallax), onchange: (e: Event) => { const l = layer(); if (!l) return; const v = (e.target as HTMLInputElement).value.trim(); snapshot(); if (v === '' || Number(v) === 1 || !Number.isFinite(Number(v))) delete l.parallax; else l.parallax = Number(v); changed(); } })),
         h('span', { class: 'spacer' }),
         iconButton('trash', 'Delete layer', () => { if (scene.layers.length <= 1) return toast('A scene needs at least one layer', 'error'); snapshot(); scene.layers.splice(activeLayer, 1); activeLayer = Math.max(0, activeLayer - 1); changed(); renderLayers(); }, { class: 'icon-btn tiny' }),
       ),
@@ -806,7 +979,10 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     const info = h('div', { class: 'muted small' }, brush.w * brush.h > 1 ? `${brush.w}×${brush.h} tiles` : `tile #${brush.tiles[0]}`);
     paletteBox.append(h('div', { class: 'palette-scroll checker' }, pc), info,
       h('p', { class: 'muted small' }, 'Drag over several tiles to paint them as a stamp. Alt+click on the map picks a tile; right-drag erases.'),
-      h('a', { class: 'small', href: `#/edit/${encodeURIComponent(tileset.name)}` }, 'Edit tileset sprite →'));
+      h('div', { class: 'palette-links' },
+        h('button', { class: 'small', title: 'Autotiling, big textures, random variants, animated tiles and edge overlays for this tileset (game.json tilesets, MCP set_tileset_rules)', onclick: () => void openTileRules(tileset!) },
+          icon('grid', 13), `Tile rules${state.game!.tilesets?.[tileset.name] ? ` (${(state.game!.tilesets[tileset.name].rules?.length ?? 0) + (state.game!.tilesets[tileset.name].edges?.length ?? 0)})` : ''}…`),
+        h('a', { class: 'small', href: `#/edit/${encodeURIComponent(tileset.name)}` }, 'Edit tileset sprite →')));
     redraw();
   }
 
@@ -938,7 +1114,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       const inp = h('input', { type: 'number', class: 'num', value: String(get()), onchange: () => edit(() => set(Number(inp.value) || 0)) });
       return h('label', {}, label, inp);
     };
-    const parse = (s: string): Value => (s === 'true' ? true : s === 'false' ? false : s.trim() !== '' && Number.isFinite(Number(s)) ? Number(s) : s);
+    const parse = parseValue;
     const setProp = (k: string, v: Value | undefined) => {
       inst.props ??= {};
       if (v === undefined || v === '') delete inst.props[k];
@@ -1006,7 +1182,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     for (const k of keys) {
       const def = obj?.properties[k];
       const cur = inst.props?.[k];
-      const inp = h('input', { type: 'text', value: cur !== undefined ? String(cur) : '', placeholder: def !== undefined ? String(def) : '', oninput: () => { setProp(k, inp.value === '' ? undefined : parse(inp.value)); changed(); } });
+      const inp = h('input', { type: 'text', title: VALUE_HINT, value: cur !== undefined ? formatValue(cur) : '', placeholder: def !== undefined ? formatValue(def) : '', oninput: () => { setProp(k, inp.value === '' ? undefined : parse(inp.value)); changed(); } });
       props.append(h('div', { class: 'prop-row' }, h('code', { title: def === undefined ? 'Only on this instance' : 'Empty = the object type default' }, k), inp,
         def === undefined ? iconButton('close', 'Remove', () => edit(() => { setProp(k, undefined); renderInspector(); }), { class: 'icon-btn tiny' }) : h('span', {})));
     }
@@ -1029,6 +1205,8 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
             renderInspector();
           } }, icon('plus', 12), 'Property')),
         h('div', {}, h('div', { class: 'muted small' }, 'Components (empty = value of the object type)'), instanceComponents(inst, obj, edit, () => renderInspector())),
+        lightEditor({ before: snapshot, changed, get: () => inst.light, set: (v) => { if (v) inst.light = v; else delete inst.light; },
+          inherited: { light: obj?.light, from: `from ${inst.object}` }, allowOff: true }),
         h('div', { class: 'actions' },
           obj ? h('a', { class: 'small', href: `#/objects/${encodeURIComponent(inst.object)}` }, `edit ${inst.object} →`) : h('span', { class: 'danger-text small' }, 'unknown type'),
           h('span', { class: 'spacer' }),
@@ -1060,11 +1238,11 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     };
     colsIn.addEventListener('change', apply);
     rowsIn.addEventListener('change', apply);
-    const bg = h('input', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(scene.background) ? scene.background : (/^#[0-9a-f]{6}$/i.test(state.game!.background) ? state.game!.background : '#181425'), oninput: () => { scene.background = bg.value; changed(); } });
+    const bg = colorInput(scene.background, (v) => { scene.background = v; changed(); }, { fallback: state.game!.background || '#181425', placeholder: `${state.game!.background} (game)`, allowEmpty: true });
     const vars = h('div', { class: 'props' });
-    const parse = (s: string): Value => (s === 'true' ? true : s === 'false' ? false : s.trim() !== '' && Number.isFinite(Number(s)) ? Number(s) : s);
+    const parse = parseValue;
     for (const [k, v] of Object.entries(scene.variables)) {
-      const inp = h('input', { type: 'text', value: String(v), oninput: () => { scene.variables[k] = parse(inp.value); changed(); } });
+      const inp = h('input', { type: 'text', title: VALUE_HINT, value: formatValue(v), oninput: () => { scene.variables[k] = parse(inp.value); changed(); } });
       vars.append(h('div', { class: 'prop-row' }, h('code', {}, `scene.${k}`), inp, iconButton('close', 'Remove', () => { snapshot(); delete scene.variables[k]; changed(); renderSettings(); }, { class: 'icon-btn tiny' })));
     }
     settingsBox.append(
@@ -1072,7 +1250,8 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       h('div', { class: 'form' },
         h('div', { class: 'row2' }, h('label', {}, 'Width (tiles)', colsIn), h('label', {}, 'Height (tiles)', rowsIn)),
         h('p', { class: 'muted small' }, `${scene.cols * ts()}×${scene.rows * ts()} px · tiles ${ts()} px · screen ${state.game!.width}×${state.game!.height}`),
-        h('label', {}, 'Background', bg),
+        h('label', { title: 'Empty = the game background color' }, 'Background', bg),
+        backgroundsCard(),
         h('label', { title: 'Music when this scene starts (crossfades from the previous one; the same track keeps playing). Import audio in the Game tab.' }, 'Music', h('select', { onchange: (e: Event) => { snapshot(); const v = (e.target as HTMLSelectElement).value; if (v) scene.music = v; else delete scene.music; changed(); } },
           h('option', { value: '', selected: !scene.music }, '— keep what is playing —'),
           h('option', { value: '-', selected: scene.music === '-' }, '— silence —'),
@@ -1084,6 +1263,8 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('label', { class: 'inline', title: 'Coming back to this scene (e.g. after a battle) keeps positions, opened chests, defeated enemies and instance properties. Restart Scene forgets.' },
           h('input', { type: 'checkbox', checked: !!scene.persistent, onchange: (e: Event) => { snapshot(); if ((e.target as HTMLInputElement).checked) scene.persistent = true; else delete scene.persistent; changed(); } }),
           'Remember instances when leaving'),
+        atmosphereEditor({ before: snapshot, changed, get: () => scene.atmosphere, set: (v) => { if (v) scene.atmosphere = v; else delete scene.atmosphere; },
+          sprites: () => state.sprites.filter((sp) => !sp.grid).map((sp) => sp.name), rerender: () => void loadAssets() }),
         vars,
         componentListCard('Scene components', 'Managers and level logic: a script component here runs for the whole scene (this.self is null), e.g. a battle, a wave spawner, the level HUD.', () => scene.components, (list) => { snapshot(); if (list?.length) scene.components = list; else delete scene.components; }, () => sheetContext(null, []), () => changed()),
         h('div', { class: 'actions' },
@@ -1099,6 +1280,42 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         ),
       ),
     );
+  }
+
+  /** Parallax background images, back to front (same fields as update_scene backgrounds). */
+  function backgroundsCard(): HTMLElement {
+    const box = h('div', { class: 'bg-list' });
+    const list = scene.backgrounds;
+    list.forEach((b, i) => {
+      const spriteSel = h('select', { onchange: () => { snapshot(); b.sprite = spriteSel.value; changed(); void loadAssets(); } },
+        ...state.sprites.map((sp) => h('option', { value: sp.name, selected: sp.name === b.sprite }, sp.name)));
+      if (!state.sprite(b.sprite)) spriteSel.prepend(h('option', { value: b.sprite, selected: true }, `${b.sprite} (missing)`));
+      const numIn = (label: string, title: string, get: () => number, set: (v: number) => void, step: string) => {
+        const inp = h('input', { type: 'number', class: 'num', step, value: String(get()), onchange: () => { snapshot(); set(Number(inp.value) || 0); changed(); } });
+        return h('label', { title }, label, inp);
+      };
+      box.append(h('div', { class: 'bg-item' },
+        h('div', { class: 'bg-item-head' }, spriteSel,
+          iconButton('up', 'Move back (drawn earlier)', () => { if (i > 0) { snapshot(); list.splice(i - 1, 0, ...list.splice(i, 1)); changed(); renderSettings(); } }, { class: 'icon-btn tiny' }),
+          iconButton('close', 'Remove', () => { snapshot(); list.splice(i, 1); changed(); renderSettings(); }, { class: 'icon-btn tiny' })),
+        h('div', { class: 'row3 atm-row3' },
+          numIn('Parallax', '0 = fixed sky, 1 = moves with the world, 0.2-0.6 = far hills', () => b.parallax, (v) => (b.parallax = v), '0.05'),
+          numIn('y', 'Vertical offset in px', () => b.y, (v) => (b.y = v), '1'),
+          h('label', { class: 'inline', title: 'Repeat horizontally' }, h('input', { type: 'checkbox', checked: b.repeatX, onchange: (e: Event) => { snapshot(); b.repeatX = (e.target as HTMLInputElement).checked; changed(); } }), 'Repeat x'),
+        ),
+      ));
+    });
+    const add = h('select', { onchange: () => {
+      if (!add.value) return;
+      snapshot();
+      list.push({ sprite: add.value, parallax: 0.5, repeatX: true, y: 0 });
+      changed();
+      void loadAssets();
+      renderSettings();
+    } }, h('option', { value: '' }, '+ Background image…'), ...state.sprites.filter((sp) => !sp.grid).map((sp) => h('option', { value: sp.name }, sp.name)));
+    return h('div', { class: 'bg-section' },
+      h('div', { class: 'muted small', title: 'Images drawn behind everything, back to front, scrolling slower than the world' }, 'Parallax backgrounds'),
+      box, add);
   }
 
   async function openEvents(): Promise<void> {
@@ -1134,6 +1351,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       unregister();
       unsub();
       ro.disconnect();
+      cancelAnimationFrame(raf);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKey);
     },

@@ -416,6 +416,14 @@ export interface UiApi {
   measure(text: string, size?: number): { width: number; height: number };
   /** Converts world coordinates (instance x/y) to screen coordinates. */
   toScreen(x: number, y: number): { x: number; y: number };
+  /** Screen shake right now, in screen pixels: add it to what you draw so hand-drawn scenes shake with the camera. */
+  shake: { x: number; y: number };
+  /**
+   * Draws the visual effects playing now at this point of your drawing, for screens drawn entirely here (battle
+   * screens, minigames) that would otherwise cover them. Call it once per layer: 'behind' after your background,
+   * 'front' (default) after your characters, 'screen' (flashes) last. The game then stops drawing them on its own.
+   */
+  effects(layer?: 'behind' | 'front' | 'screen'): void;
   // Widgets (input since the last draw: no double presses).
   /** Key pressed since the last draw; consume = true hides it from the widgets drawn after. */
   pressed(key: string, consume?: boolean): boolean;
@@ -491,6 +499,8 @@ export class ScriptHost {
   readonly sceneHooks: { scene: string | null; fn: Fn }[] = [];
   readonly updateHooks: Fn[] = [];
   readonly drawHooks: Fn[] = [];
+  /** ui.effects() was called in the last draw: the UI code places the effects, the renderer leaves them alone. */
+  effectsInUi = false;
   readonly messageHooks = new Map<string, Fn[]>();
   readonly errors: string[] = [];
   dialog: DialogState | null = null;
@@ -1273,6 +1283,7 @@ export class ScriptHost {
     const drawers = this.all().filter((c) => this.has(c, 'onDraw'));
     const latch = this.uiInput;
     this.uiInput = { pressed: new Set(), clicks: [], pointer: latch.pointer };
+    this.effectsInUi = false;
     if (!this.drawHooks.length && !drawers.length) return;
     const w = this.world;
     const inside = (px: number, py: number, x: number, y: number, ww: number, hh: number) => px >= x && px < x + ww && py >= y && py < y + hh;
@@ -1281,6 +1292,12 @@ export class ScriptHost {
     const ui: UiApi = {
       width: w.game.width,
       height: w.game.height,
+      shake: { x: Math.round((w.camera.x - camX) * zoom), y: Math.round((w.camera.y - camY) * zoom) },
+      effects: (layer = 'front') => {
+        this.effectsInUi = true;
+        if (layer === 'screen') w.vfx.drawScreen(r, w.game.width, w.game.height);
+        else w.vfx.draw(r, camX, camY, zoom, layer === 'behind');
+      },
       text: (text, x, y, o = {}) => {
         const s = Math.max(1, Math.round(o.size ?? 1));
         const t = String(text);

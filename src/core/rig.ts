@@ -8,7 +8,7 @@
  */
 import { base64ToBytes, bytesToBase64 } from './base64.js';
 import { getPixel, setPixel } from './draw.js';
-import { type RGBA, parseColor } from './color.js';
+import { type RGBA, parseColor, toHex } from './color.js';
 import {
   type Bitmap,
   type Facing,
@@ -16,6 +16,7 @@ import {
   type PartView,
   type Pose,
   type Rig,
+  type RigFinish,
   type RigPart,
   type Sprite,
   FACINGS,
@@ -182,7 +183,7 @@ function upscaled(b: Bitmap): Bitmap {
  * Draws `src` onto `dst` so that its pivot pixel lands on (wx, wy), rotated `deg` degrees clockwise.
  * Multiples of 90° are exact; other angles use RotSprite.
  */
-export function drawRotated(dst: Bitmap, src: Bitmap, pivot: [number, number], wx: number, wy: number, deg: number, sx = 1, sy = 1): void {
+export function drawRotated(dst: Bitmap, src: Bitmap, pivot: [number, number], wx: number, wy: number, deg: number, sx = 1, sy = 1, onPut?: (x: number, y: number) => void): void {
   const a = ((((deg % 360) + 360) % 360) * Math.PI) / 180;
   const scaled = sx !== 1 || sy !== 1;
   const right = Math.abs(Math.round(deg / 90) * 90 - deg) < 0.5 && !scaled;
@@ -213,6 +214,7 @@ export function drawRotated(dst: Bitmap, src: Bitmap, pivot: [number, number], w
       else c = getPixel(src, Math.floor(lx), Math.floor(ly));
       if (c[3] === 0) continue;
       setPixel(dst, tx, ty, c);
+      onPut?.(tx, ty);
     }
   }
 }
@@ -226,6 +228,9 @@ export interface PlacedPart {
   /** World position of the pivot (float, screen pixels). */
   x: number;
   y: number;
+  /** Pixel the pivot is drawn on. */
+  px: number;
+  py: number;
   rot: number;
   sx: number;
   sy: number;
@@ -242,29 +247,46 @@ export function layoutPose(s: Sprite, pose: Pose): PlacedPart[] {
     const pp: PartPose = pose.parts[part.name] ?? {};
     const view = resolveView(s, part, pose.facing, pp.variant);
     const at = view?.at ?? [0, 0];
+    const dx = pp.dx ?? 0;
+    const dy = pp.dy ?? 0;
     let x: number;
     let y: number;
+    let px: number;
+    let py: number;
     let rot = pp.rot ?? 0;
     if (part.parent) {
       const parent = placed.get(part.parent)!;
       const a = (parent.rot * Math.PI) / 180;
-      x = parent.x + at[0] * Math.cos(a) - at[1] * Math.sin(a);
-      y = parent.y + at[0] * Math.sin(a) + at[1] * Math.cos(a);
+      const ox = at[0] * Math.cos(a) - at[1] * Math.sin(a) + dx;
+      const oy = at[0] * Math.sin(a) + at[1] * Math.cos(a) + dy;
+      x = parent.x + ox;
+      y = parent.y + oy;
+      // Snapped from the parent's pixel, not from world space: a joint keeps its distance instead of jittering by 1px.
+      px = parent.px + Math.round(ox);
+      py = parent.py + Math.round(oy);
       rot += parent.rot;
     } else {
-      x = at[0];
-      y = at[1];
+      x = at[0] + dx;
+      y = at[1] + dy;
+      px = Math.round(x);
+      py = Math.round(y);
     }
-    x += pp.dx ?? 0;
-    y += pp.dy ?? 0;
-    placed.set(part.name, { part, view, x, y, rot, sx: pp.sx ?? 1, sy: pp.sy ?? 1, z: pp.z ?? view?.z ?? 0, hidden: !!pp.hide });
+    placed.set(part.name, { part, view, x, y, px, py, rot, sx: pp.sx ?? 1, sy: pp.sy ?? 1, z: pp.z ?? view?.z ?? 0, hidden: !!pp.hide });
   }
   return rig.parts.map((p) => placed.get(p.name)!);
 }
 
-function silhouette(b: Bitmap, c: RGBA): Bitmap {
+/** The outer part of a drawing in a flat color: smears trail the tip of a blade, not its grip. */
+function smearShape(b: Bitmap, pivot: [number, number], c: RGBA): Bitmap {
   const out: Bitmap = { width: b.width, height: b.height, data: new Uint8ClampedArray(b.data.length) };
-  for (let i = 0; i < b.data.length; i += 4) if (b.data[i + 3]) out.data.set(c, i);
+  let reach = 0;
+  for (let y = 0; y < b.height; y++) for (let x = 0; x < b.width; x++) if (b.data[(y * b.width + x) * 4 + 3]) reach = Math.max(reach, Math.hypot(x - pivot[0], y - pivot[1]));
+  for (let y = 0; y < b.height; y++) {
+    for (let x = 0; x < b.width; x++) {
+      const i = (y * b.width + x) * 4;
+      if (b.data[i + 3] && Math.hypot(x - pivot[0], y - pivot[1]) >= reach * 0.45) out.data.set(c, i);
+    }
+  }
   return out;
 }
 
@@ -274,18 +296,113 @@ function descendants(rig: Rig, name: string): string[] {
   return out;
 }
 
+const SEGMENT = /^(forearm|shin|foot|hand)_/;
+
+const sameRgb = (a: RGBA, b: RGBA) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+const N4: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+function isEdge(b: Bitmap, x: number, y: number): boolean {
+  return getPixel(b, x, y)[3] > 0 && N4.some(([dx, dy]) => getPixel(b, x + dx, y + dy)[3] === 0);
+}
+
+/** The color most often found on the edge of the part drawings: the character's outline. */
+export function detectOutlineColor(s: Sprite): RGBA | null {
+  const counts = new Map<string, number>();
+  for (const part of s.rig?.parts ?? []) {
+    if (part.name === 'shadow') continue;
+    for (const v of Object.values(part.views)) {
+      const b = viewBitmap(v);
+      for (let y = 0; y < b.height; y++) {
+        for (let x = 0; x < b.width; x++) {
+          if (!isEdge(b, x, y)) continue;
+          const c = toHex(getPixel(b, x, y));
+          counts.set(c, (counts.get(c) ?? 0) + 1);
+        }
+      }
+    }
+  }
+  const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  return best ? parseColor(best[0]) : null;
+}
+
+/** True when most of a drawing's edge is the outline color. */
+function isOutlined(b: Bitmap, outline: RGBA): boolean {
+  let edge = 0;
+  let line = 0;
+  for (let y = 0; y < b.height; y++) {
+    for (let x = 0; x < b.width; x++) {
+      if (!isEdge(b, x, y)) continue;
+      edge++;
+      if (sameRgb(getPixel(b, x, y), outline)) line++;
+    }
+  }
+  return edge > 0 && line / edge >= 0.5;
+}
+
+function applyFinish(s: Sprite, out: Bitmap, owner: Int16Array, layout: PlacedPart[], finish: RigFinish): void {
+  const outline = finish.outline ? parseColor(finish.outline) : detectOutlineColor(s);
+  if (!outline) return;
+  const W = out.width;
+  const H = out.height;
+  const at = (x: number, y: number) => (x < 0 || y < 0 || x >= W || y >= H ? -1 : owner[y * W + x]);
+  const isShadow = (i: number) => i >= 0 && layout[i].part.name === 'shadow';
+  const empty = (x: number, y: number) => {
+    const o = at(x, y);
+    return (o === -1 && getPixel(out, x, y)[3] === 0) || isShadow(o);
+  };
+
+  if (finish.seams) {
+    const before: Bitmap = { width: W, height: H, data: new Uint8ClampedArray(out.data) };
+    layout.forEach((child, ci) => {
+      if (!SEGMENT.test(child.part.name) || !child.view || child.hidden || !child.part.parent) return;
+      const pi = layout.findIndex((p) => p.part.name === child.part.parent);
+      const rad = Math.ceil(child.view.bmp.width / 2) + 1;
+      const pair = (o: number) => o === ci || o === pi;
+      for (let y = child.py - rad; y <= child.py + rad; y++) {
+        for (let x = child.px - rad; x <= child.px + rad; x++) {
+          if (!pair(at(x, y)) || !sameRgb(getPixel(before, x, y), outline)) continue;
+          if (N4.some(([dx, dy]) => !pair(at(x + dx, y + dy)))) continue;
+          const near = new Map<string, number>();
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const c = getPixel(before, x + dx, y + dy);
+              if (c[3] && !sameRgb(c, outline) && pair(at(x + dx, y + dy))) near.set(toHex(c), (near.get(toHex(c)) ?? 0) + 1);
+            }
+          }
+          const fill = [...near.entries()].sort((a, b) => b[1] - a[1])[0];
+          if (fill) setPixel(out, x, y, parseColor(fill[0]));
+        }
+      }
+    });
+  }
+
+  if (finish.closeOutline) {
+    const outlined = layout.map((p) => !!p.view && p.part.name !== 'shadow' && isOutlined(p.view.bmp, outline));
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const o = at(x, y);
+        if (o < 0 || !outlined[o]) continue;
+        if (N4.some(([dx, dy]) => empty(x + dx, y + dy))) setPixel(out, x, y, outline);
+      }
+    }
+  }
+}
+
 /** Renders a pose into a new canvas-sized bitmap. */
 export function renderPose(s: Sprite, pose: Pose): Bitmap {
   const out: Bitmap = { width: s.width, height: s.height, data: new Uint8ClampedArray(s.width * s.height * 4) };
   const layout = layoutPose(s, pose);
+  const finish = s.rig?.finish;
+  const owner = finish && (finish.seams || finish.closeOutline) ? new Int16Array(s.width * s.height).fill(-1) : undefined;
+  const put = (i: number) => (owner ? (x: number, y: number) => { owner[y * s.width + x] = i; } : undefined);
   const draws: { z: number; i: number; draw: () => void }[] = [];
   layout.forEach((p, i) => {
-    if (p.view && !p.hidden) draws.push({ z: p.z, i, draw: () => drawRotated(out, p.view!.bmp, p.view!.pivot, Math.round(p.x), Math.round(p.y), p.rot, p.sx, p.sy) });
+    if (p.view && !p.hidden) draws.push({ z: p.z, i, draw: () => drawRotated(out, p.view!.bmp, p.view!.pivot, p.px, p.py, p.rot, p.sx, p.sy, put(i)) });
   });
   // Smears: re-lay the pose at intermediate rotations and draw the trailing parts as solid arcs, just under them.
   for (const [name, pp] of Object.entries(pose.parts)) {
     if (!pp.smear || !s.rig) continue;
-    const trail = descendants(s.rig, name);
+    const trail = descendants(s.rig, name).filter((n) => !SEGMENT.test(n));
     const targets = trail.length ? trail : [name];
     const color = parseColor(pp.smearColor ?? '#f2f6ff');
     const steps = Math.max(2, Math.ceil(Math.abs(pp.smear) / 7));
@@ -294,14 +411,15 @@ export function renderPose(s: Sprite, pose: Pose): Bitmap {
       const ghost = layoutPose(s, { ...pose, parts: { ...pose.parts, [name]: { ...pp, rot } } });
       for (const g of ghost) {
         if (!targets.includes(g.part.name) || !g.view || g.hidden) continue;
-        const real = layout.find((p) => p.part.name === g.part.name)!;
-        const sil = silhouette(g.view.bmp, color);
-        draws.push({ z: real.z - 0.001, i: -1, draw: () => drawRotated(out, sil, g.view!.pivot, Math.round(g.x), Math.round(g.y), g.rot, g.sx, g.sy) });
+        // Under the part's usual layer, even when the pose brings the weapon in front: an arc over the face hides it.
+        const sil = smearShape(g.view.bmp, g.view.pivot, color);
+        draws.push({ z: g.view.z - 0.001, i: -1, draw: () => drawRotated(out, sil, g.view!.pivot, g.px, g.py, g.rot, g.sx, g.sy, put(-1)) });
       }
     }
   }
   draws.sort((a, b) => a.z - b.z || a.i - b.i);
   for (const d of draws) d.draw();
+  if (owner && finish) applyFinish(s, out, owner, layout, finish);
   return out;
 }
 
@@ -319,6 +437,60 @@ export function bakeRig(s: Sprite, frames?: number[]): number {
     n++;
   }
   return n;
+}
+
+/** The two bones of a limb for one facing, and the part that sits at its tip (a foot or a hand), if any. */
+export interface LimbChain {
+  upper: string;
+  lower: string;
+  tip?: string;
+  /** Rest vector from the upper pivot to the lower pivot. */
+  u: [number, number];
+  /** Rest vector from the lower pivot to the tip of the limb. */
+  v: [number, number];
+}
+
+const LOWER_OF: Record<string, string> = { arm: 'forearm', leg: 'shin' };
+const TIP_OF: Record<string, string> = { arm: 'hand', leg: 'foot' };
+
+/** Name of the segment a limb part is split into: arm_l → forearm_l, leg_r → shin_r. Null for other parts. */
+export function lowerSegmentName(upper: string): string | null {
+  const m = /^(arm|leg)_(.+)$/.exec(upper);
+  return m ? `${LOWER_OF[m[1]]}_${m[2]}` : null;
+}
+
+/** Name of the part at the end of a limb: leg_r → foot_r, arm_l → hand_l. Null for other parts. */
+export function tipSegmentName(upper: string): string | null {
+  const m = /^(arm|leg)_(.+)$/.exec(upper);
+  return m ? `${TIP_OF[m[1]]}_${m[2]}` : null;
+}
+
+/** Lowest row with opaque pixels. */
+export function bottomRow(b: Bitmap): number {
+  for (let y = b.height - 1; y >= 0; y--) for (let x = 0; x < b.width; x++) if (getPixel(b, x, y)[3]) return y;
+  return b.height - 1;
+}
+
+/** Finds the two-bone chain below `upper`, or null if the limb has a single segment in this facing. */
+export function limbChain(s: Sprite, facing: Facing, upper: string): LimbChain | null {
+  const rig = s.rig;
+  const up = rig?.parts.find((p) => p.name === upper);
+  if (!rig || !up) return null;
+  const lowerName = lowerSegmentName(upper) ?? rig.parts.find((p) => p.parent === upper)?.name;
+  const low = rig.parts.find((p) => p.name === lowerName && p.parent === upper);
+  if (!low) return null;
+  const lv = resolveView(s, low, facing);
+  if (!lv || !resolveView(s, up, facing)) return null;
+  const tipName = tipSegmentName(upper);
+  const tip = tipName ? rig.parts.find((p) => p.name === tipName && p.parent === low.name) : undefined;
+  const tv = tip ? resolveView(s, tip, facing) : null;
+  return {
+    upper,
+    lower: low.name,
+    tip: tv ? tip!.name : undefined,
+    u: [lv.at[0], lv.at[1]],
+    v: tv ? [tv.at[0], tv.at[1]] : [0, bottomRow(lv.bmp) - lv.pivot[1]],
+  };
 }
 
 export function restPose(facing: Facing): Pose {

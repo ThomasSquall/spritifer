@@ -37,9 +37,11 @@ import {
   renderPose,
   restPose,
   viewKey,
+  lowerSegmentName,
 } from '../core/rig.js';
-import { type AnimName, type Keyframe } from '../core/animate.js';
-import { animateRig, facingsOf, keyframeRig, poseFrames, removeRigPart, setRigPart } from '../core/rigEdit.js';
+import { checkAnimation, formatAnimReport, renderMotionMap } from '../core/animCheck.js';
+import { type AnimName, type AnimStyle, type IKTarget, type Keyframe } from '../core/animate.js';
+import { animateRig, facingsOf, keyframeRig, poseFrames, removeRigPart, setRigFinish, setRigPart, splitLimb } from '../core/rigEdit.js';
 import { attachReference, describeGuide, editGuide, preparePicture, setRamp } from '../core/reference.js';
 import { kmeansPalette, pixelize, pixelizeAuto } from '../core/pixelize.js';
 import {
@@ -137,9 +139,10 @@ Known pitfalls:
 Game characters (top-down, 4 facings) — use the cut-out rig, not frame-by-frame redrawing:
 1. create_character (32x32 to 64x64; 48x48 is a good default).
 2. rig_part for each body part (body, head, arm_l, arm_r, leg_l, leg_r, plus weapon, cape, hair, shadow): draw "down" first, check with rig_preview, then "right" and "up"; "left" mirrors "right". rig_part can also cut parts out of existing art (from), e.g. a pixelized or hand-drawn character on separate layers. Add variants like head "blink" / "hurt".
-3. rig_animate idle, walk, run, attack, hurt: frames, tags (<anim>_<facing>), timing and secondary motion for every facing. rig_keyframes for custom animations (jump, combos) from a few key poses with easing; sx/sy for squash & stretch.
-4. preview with tags=[...] and onion/diff to check motion; tweak frames with rig_pose; fix a part once with rig_part and every frame updates.
-5. export_spritesheet layout "tags".
+3. rig_split_limbs: cut arms and legs into segments (forearm_*, shin_*, foot_*) so they bend at elbows and knees and the feet stay planted. Do this before animating. Then rig_finish to keep outlines closed on rotated limbs.
+4. rig_animate idle, walk, run, attack, hurt, jump, fall, land: key-pose motion, IK-planted feet, tags (<anim>_<facing>), timing and secondary motion for every facing; style normal / heavy / light sets how it carries its weight. Parts named leg_fl/fr/bl/br animate as a quadruped; a rig without limbs animates as a blob by squash and stretch. rig_keyframes for custom animations (combos, special moves) from a few key poses with easing; ik places feet and hands directly; sx/sy for squash & stretch.
+5. anim_check every animation you generate: follow its errors and warnings, read the motion map (paths of feet, hands, weapon, head; bunched dots = slow, spread dots = fast). preview with tags=[...] and onion/diff to look at the drawing itself: the numbers cannot tell if a pose looks good. Tweak frames with rig_pose; fix a part once with rig_part and every frame updates.
+6. export_spritesheet layout "tags".
 The rig layer is re-rendered from the rig: put hand-drawn effects on another layer. Weapon smears come from the rig (smear in rig_pose; rig_animate attack adds them).
 
 Static frame-by-frame animation: add_frames with copy_from, edit only what moves (transform shift, redraw limbs), set_tag, set_frame_duration, preview with tag + onion, export_spritesheet.
@@ -479,6 +482,10 @@ export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string 
   // ------------------------------------------------------------------ character rig
 
   const facingEnum = z.enum(['down', 'left', 'right', 'up']);
+  const ikSchema = z
+    .record(z.string(), z.object({ x: z.number(), y: z.number(), bend: z.union([z.literal(1), z.literal(-1)]).optional().describe('Side the knee or elbow bends to (default: knees forward, elbows back)') }))
+    .describe('Canvas position for the tip of a split limb (the ankle for legs), by upper limb part, e.g. {"leg_l":{"x":20,"y":44}}');
+
   const partPoseSchema = z.object({
     dx: z.number().optional().describe('Screen pixels right (negative = left)'),
     dy: z.number().optional().describe('Screen pixels down (negative = up)'),
@@ -498,7 +505,7 @@ export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string 
       const pose: Pose = { facing, parts };
       const bmp = renderPose(s, pose);
       if (showPivots) {
-        for (const p of layoutPose(s, pose)) if (p.view && !p.hidden) setPixel(bmp, Math.round(p.x), Math.round(p.y), [255, 0, 255, 255]);
+        for (const p of layoutPose(s, pose)) if (p.view && !p.hidden) setPixel(bmp, p.px, p.py, [255, 0, 255, 255]);
       }
       return bmp;
     });
@@ -623,7 +630,7 @@ Tips: give limbs a 1px overlap with the body so joints never open when rotating;
   tool(
     'rig_pose',
     `Set the rig pose of frames (merged into the existing pose unless replace is true), or append a new posed frame. The rig layer is re-rendered.
-Use it for hand-made keyframes or to tweak what rig_animate generated (e.g. {"head":{"dy":1}} on one frame, or a "blink" variant).`,
+Use it for hand-made keyframes or to tweak what rig_animate generated (e.g. {"head":{"dy":1}} on one frame, or a "blink" variant). With ik, a split limb reaches a canvas position by itself and a foot stays level.`,
     {
       sprite: P.sprite,
       frames: z.array(z.number().int().min(0)).optional().describe('Frames to pose (omit with new: true)'),
@@ -631,12 +638,13 @@ Use it for hand-made keyframes or to tweak what rig_animate generated (e.g. {"he
       facing: facingEnum.optional().describe('Required for new frames; otherwise keeps the current facing'),
       parts: z.record(z.string(), partPoseSchema).optional(),
       replace: z.boolean().optional().describe('Replace the whole pose instead of merging'),
+      ik: ikSchema.optional(),
       duration: z.number().int().min(1).optional(),
       preview: P.preview,
     },
     (a) => {
       const { sprite, result } = mutate(a.sprite, (s) =>
-        poseFrames(s, { frames: a.frames, new: a.new, facing: a.facing as Facing | undefined, parts: a.parts as Record<string, PartPose> | undefined, replace: a.replace, duration: a.duration }),
+        poseFrames(s, { frames: a.frames, new: a.new, facing: a.facing as Facing | undefined, parts: a.parts as Record<string, PartPose> | undefined, replace: a.replace, duration: a.duration, ik: a.ik as Record<string, IKTarget> | undefined }),
       );
       return withPreview(text(`Posed frame(s) ${result.join(', ')}.`), sprite, result[0], a.preview);
     },
@@ -644,13 +652,15 @@ Use it for hand-made keyframes or to tweak what rig_animate generated (e.g. {"he
 
   tool(
     'rig_animate',
-    `Generate an animation for the rig in one or more facings: idle (breathing), walk, run, attack (overhead slash with anticipation and follow-through) or hurt (knockback).
-Creates frames + a tag "<animation>_<facing>" per facing (regenerating replaces the old frames of that tag), with tuned timings and secondary motion (cape/hair trail, arms settle a frame late). Optional part variants are used when present: head "blink" in idle, head/body "hurt" in hurt.
-Afterwards check with preview tags=[...] and adjust single frames with rig_pose.`,
+    `Generate an animation for the rig in one or more facings: idle (breathing), walk, run, attack (overhead slash with anticipation and follow-through), hurt (knockback), jump (crouch and launch), fall (airborne loop) or land (impact squash).
+Creates frames + a tag "<animation>_<facing>" per facing (regenerating replaces the old frames of that tag), built from key poses with held contacts, follow-through and secondary motion. Split limbs (rig_split_limbs) get bent knees and elbows and feet planted on the ground. The body plan is detected from the part names: leg_fl/fr/bl/br = quadruped, no limbs = blob (squash and stretch). Optional part variants are used when present: head "blink" in idle, head/body "hurt" in hurt.
+Afterwards run anim_check, look at preview tags=[...] and adjust single frames with rig_pose.`,
     {
       sprite: P.sprite,
-      animation: z.enum(['idle', 'walk', 'run', 'attack', 'hurt']),
+      animation: z.enum(['idle', 'walk', 'run', 'attack', 'hurt', 'jump', 'fall', 'land']),
       facings: z.array(facingEnum).optional().describe('Default: every facing with art'),
+      style: z.enum(['normal', 'heavy', 'light']).optional().describe('How the character carries its weight (default normal)'),
+      tag: z.string().optional().describe('Tag name instead of "<animation>_<facing>" (single facing only), e.g. "run" for platformer characters'),
       frames: z.number().int().min(2).max(24).optional().describe('Frame count for idle/walk/run (defaults 4/8/6)'),
       strength: z.number().min(0.25).max(3).optional().describe('Motion amplitude multiplier (default 1)'),
       duration: z.number().int().min(1).optional().describe('Override every frame duration (ms)'),
@@ -658,12 +668,81 @@ Afterwards check with preview tags=[...] and adjust single frames with rig_pose.
     },
     (a) => {
       const { sprite, result } = mutate(a.sprite, (s) =>
-        animateRig(s, a.animation as AnimName, a.facings as Facing[] | undefined, { frames: a.frames, strength: a.strength, duration: a.duration }),
+        animateRig(s, a.animation as AnimName, a.facings as Facing[] | undefined, { frames: a.frames, strength: a.strength, duration: a.duration, style: a.style as AnimStyle | undefined, tag: a.tag }),
       );
       const out = text(`Generated ${result.join(', ')}.\n${describe(sprite)}`);
       if (a.preview === false) return out;
       return [...out, image(previewPng(sprite, { tags: result, pixelGrid: false }))];
     },
+  );
+
+  tool(
+    'rig_split_limbs',
+    `Cut one-piece arms and legs into segments that bend: arm_* gets forearm_* (elbow), leg_* gets shin_* (knee) and foot_* (ankle, for legs of at least 6 rows). The rest pose does not change, one row is shared at each cut so joints never open, and a weapon held at the end of an arm moves to the forearm.
+Limbs must hang straight down from their pivot in the drawing. Run it once before rig_animate, then regenerate the animations. A limb you want to draw by hand can be built directly from parts with these names instead.`,
+    {
+      sprite: P.sprite,
+      limbs: z.array(z.string()).optional().describe('Default: every part named arm_* or leg_* not split yet'),
+      ratio: z.number().min(0.2).max(0.8).optional().describe('Where the elbow or knee falls along the limb (default 0.5)'),
+      foot: z.boolean().optional().describe('Also cut feet from the legs (default true)'),
+      preview: z.boolean().optional().describe('Return the turnaround with pivots marked (default true)'),
+    },
+    (a) => {
+      const { sprite, result } = mutate(a.sprite, (s) => {
+        if (!s.rig) throw new Error('This sprite has no rig. Use create_character / rig_part.');
+        const parts = s.rig.parts;
+        const targets = a.limbs ?? parts.filter((p) => /^(arm|leg)_/.test(p.name) && !parts.some((q) => q.parent === p.name && q.name === lowerSegmentName(p.name))).map((p) => p.name);
+        if (!targets.length) throw new Error('No limb to split: name them arm_* / leg_* or pass limbs.');
+        return targets.map((name) => ({ name, ...splitLimb(s, name, { ratio: a.ratio, foot: a.foot }) }));
+      });
+      const lines = result.map((r) => `${r.name} → ${r.lower}${r.tip ? ` + ${r.tip}` : ''} (${r.facings.join(', ')})${r.skipped.length ? `; not split: ${r.skipped.join(', ')}` : ''}`);
+      const out = text(`${lines.join('\n')}\nRegenerate the animations with rig_animate to use the new joints.\n${describeRig(sprite)}`);
+      if (a.preview === false) return out;
+      return [...out, rigTurnaround(sprite, facingsOf(sprite), {}, true)];
+    },
+  );
+
+  tool(
+    'rig_finish',
+    `Clean-up applied to every rendered pose, so a rig stops looking like cut-out pieces. seams removes outline pixels left inside the figure at elbows, knees and ankles; close_outline repaints exposed edges of outlined parts with the outline color, so rotated limbs keep a closed line. Parts without an outline are left alone. Omit a field to turn it off. Every posed frame is re-rendered.`,
+    {
+      sprite: P.sprite,
+      seams: z.boolean().optional(),
+      close_outline: z.boolean().optional(),
+      outline: z.string().optional().describe('Outline color (default: detected from the drawings)'),
+    },
+    (a) => {
+      const { sprite } = mutate(a.sprite, (s) => {
+        if (!s.rig) throw new Error('This sprite has no rig.');
+        setRigFinish(s, { seams: a.seams, closeOutline: a.close_outline, outline: a.outline ? toHex(color(s, a.outline)) : undefined });
+      });
+      return text(`Rig finish: ${JSON.stringify(sprite.rig?.finish ?? {})}`);
+    },
+  );
+
+  tool(
+    'anim_check',
+    `Measure how an animation moves instead of judging single frames. Returns a score and problems with frame numbers: parts that detach, duplicated or popping frames, a jump at the loop point, feet that skate or float, no weight (the figure does not rise and fall), even timing, strikes without snap or moved only by the arm, pixel crawl on rotating parts.
+The image is a motion map: all frames overlaid, with the paths of the center, feet, hands, weapon and head. A dot marks each frame (the first has a white ring): bunched dots mean slow motion, spread dots fast. Good paths are smooth arcs; zigzags and kinks are errors.
+The numbers find defects, they do not prove an animation is beautiful: also look at it with preview tags=[...].`,
+    {
+      sprite: P.sprite,
+      tags: z.array(z.string()).optional().describe('Default: every tag of the sprite'),
+      loop: z.boolean().optional().describe('Whether the tag loops (default: true for idle, walk, run, fall and pingpong tags)'),
+      map: z.boolean().optional().describe('Return motion maps, at most 4 (default true)'),
+      scale: z.number().int().min(1).max(16).optional().describe('Motion map zoom (default 6)'),
+    },
+    (a) => {
+      const s = ws.load(a.sprite);
+      const names = a.tags ?? s.tags.map((t) => t.name);
+      if (!names.length) throw new Error('This sprite has no animation tags.');
+      const reports = names.map((name) => checkAnimation(s, name, { loop: a.loop }));
+      const avg = Math.round(reports.reduce((sum, r) => sum + r.score, 0) / reports.length);
+      const out: Content = text(`${reports.map(formatAnimReport).join('\n')}\n\nAverage score: ${avg}/100 over ${reports.length} animation(s). Colors of the paths: ${[...new Set(reports.flatMap((r) => r.trails.map((t) => `${t.name} rgb(${t.color.join(',')})`)))].join(', ')}.`);
+      if (a.map === false) return out;
+      return [...out, ...reports.slice(0, 4).map((r) => image(encodePng(renderMotionMap(s, r, a.scale ?? 6))))];
+    },
+    { readOnlyHint: true },
   );
 
   // ------------------------------------------------------------------ forms, materials & checks
@@ -1058,14 +1137,14 @@ Crop the source to the pose you care about, and give the height in canvas pixels
   tool(
     'rig_keyframes',
     `Author a custom rig animation from a few key poses; the frames in between are interpolated (dx, dy, rot, sx, sy) with easing. Variants, hide, z and smear hold until the next key.
-Use it for anything the templates don't cover (jump: anticipation crouch → launch stretch → apex → fall → land squash; combo attacks; special moves) and to fine-tune timing: put keys on the extreme poses and choose ease "out" after fast moves, "in" before impacts.
+Use it for anything the templates don't cover (combo attacks, special moves, deaths) and to fine-tune timing: put keys on the extreme poses and choose ease "out" after fast moves, "in" before impacts. A key's ik places the tip of split limbs and is interpolated in screen space, so feet and hands travel in straight lines.
 Creates/replaces tag <name> (frames are rendered from the rig). Check with preview tags=[name] onion=true.`,
     {
       sprite: P.sprite,
       name: z.string().describe('Tag name, e.g. "jump_right"'),
       facing: facingEnum,
       frames: z.number().int().min(1).max(64),
-      keys: z.array(z.object({ frame: z.number().int().min(0), parts: z.record(z.string(), partPoseSchema), ease: z.enum(['linear', 'in', 'out', 'inout', 'step']).optional() })).min(1),
+      keys: z.array(z.object({ frame: z.number().int().min(0), parts: z.record(z.string(), partPoseSchema), ik: ikSchema.optional(), ease: z.enum(['linear', 'in', 'out', 'inout', 'step']).optional() })).min(1),
       loop: z.boolean().optional().describe('Interpolate from the last key back to the first (default false)'),
       duration: z.number().int().min(1).optional().describe('ms per frame (default 100)'),
       durations: z.array(z.number().int().min(1)).optional().describe('ms per frame, one value per frame'),

@@ -237,6 +237,45 @@ describe('vfx in the game', () => {
   });
 });
 
+describe('vfx in screens drawn by scripts', () => {
+  const bundle = (draw: string, start = ''): GameBundle => ({
+    game: createGame('t'),
+    scenes: { main: createScene('main', 20, 12) },
+    sprites: {},
+    scripts: { hud: `onStart(() => { ${start} vfx('boom', { x: 40, y: 40 }) })\nonDraw((ui) => { ${draw} })` },
+    vfx: { boom: graph([{ id: 'f', type: 'flash', params: { duration: 5, color: '#00ff00' } }], [{ from: 'start', to: 'f' }]) },
+  });
+
+  it('ui.effects draws them where the script asks, once', async () => {
+    const { world } = await runPlaytest(bundle("ui.rect(0, 0, ui.width, ui.height, '#123456'); ui.effects('screen')"), { seconds: 0.2, evaluator: nodeEvaluator });
+    renderWorld(world, NULL_RENDERER); // The first draw tells the game that the script places the effects.
+    const order: string[] = [];
+    renderWorld(world, { ...NULL_RENDERER, rect: (_x, _y, _w, _h, color) => order.push(color) });
+    expect(order.filter((c) => c === '#00ff00')).toHaveLength(1);
+    expect(order.indexOf('#00ff00')).toBeGreaterThan(order.indexOf('#123456'));
+  });
+
+  it('without ui.effects the game draws them itself', async () => {
+    const { world } = await runPlaytest(bundle("ui.rect(0, 0, 4, 4, '#123456')"), { seconds: 0.2, evaluator: nodeEvaluator });
+    renderWorld(world, NULL_RENDERER);
+    const order: string[] = [];
+    renderWorld(world, { ...NULL_RENDERER, rect: (_x, _y, _w, _h, color) => order.push(color) });
+    expect(order.filter((c) => c === '#00ff00')).toHaveLength(1);
+    expect(order.indexOf('#00ff00')).toBeLessThan(order.indexOf('#123456'));
+  });
+
+  it('ui.shake reports the camera shake, and nothing without one', async () => {
+    const seen = async (start: string) => {
+      const { world } = await runPlaytest(bundle('vars.sx = Math.max(Number(vars.sx) || 0, Math.abs(ui.shake.x), Math.abs(ui.shake.y))', start), { seconds: 0.1, evaluator: nodeEvaluator });
+      for (let i = 0; i < 20; i++) renderWorld(world, NULL_RENDERER);
+      expect(world.scripts.errors).toEqual([]);
+      return Number(world.snapshot().globals.sx);
+    };
+    expect(await seen('')).toBe(0);
+    expect(await seen('shake(6, 30);')).toBeGreaterThan(0);
+  });
+});
+
 describe('vfx through MCP', () => {
   let dir: string;
   let ws: Workspace;

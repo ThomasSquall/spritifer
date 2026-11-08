@@ -1,7 +1,8 @@
-import { ANIMS, ANIM_DEFAULTS, type AnimName, type Ease, type Keyframe } from '../core/animate.js';
+import { checkAnimation, formatAnimReport, renderMotionMap } from '../core/animCheck.js';
+import { ANIMS, ANIM_DEFAULTS, ANIM_STYLES, type AnimName, type AnimStyle, type Ease, type Keyframe } from '../core/animate.js';
 import { extractRegion } from '../core/draw.js';
-import { type PlacedPart, ensureRig, layoutPose, partDepth, renderPose, resolveView, restPose, rigFacings, topoParts, viewBitmap, viewKey } from '../core/rig.js';
-import { animateRig, keyframeRig, movePivot, poseFrames, removeRigPart, renameRigPart, reparentPart, setPartPose, setRigPart } from '../core/rigEdit.js';
+import { type PlacedPart, ensureRig, layoutPose, limbChain, lowerSegmentName, partDepth, renderPose, resolveView, restPose, rigFacings, topoParts, viewBitmap, viewKey } from '../core/rig.js';
+import { animateRig, keyframeRig, movePivot, poseFrames, removeRigPart, renameRigPart, reparentPart, setPartPose, setRigFinish, setRigPart, splitLimb } from '../core/rigEdit.js';
 import { type Bitmap, type Facing, type PartPose, type Pose, type RigPart, FACINGS, celBitmap, compositeFrame } from '../core/sprite.js';
 import type { CanvasInteraction, CanvasMetrics, CanvasView, FPoint } from './canvas.js';
 import type { Editor } from './editor.js';
@@ -11,7 +12,7 @@ import './spriteTools.css';
 
 const OPPOSITE: Partial<Record<Facing, Facing>> = { left: 'right', right: 'left' };
 const EASES: Ease[] = ['inout', 'linear', 'in', 'out', 'step'];
-const PART_NAMES = ['body', 'head', 'arm_r', 'arm_l', 'leg_r', 'leg_l', 'weapon', 'shield', 'cape', 'hair', 'tail', 'shadow'];
+const PART_NAMES = ['body', 'head', 'arm_r', 'arm_l', 'forearm_r', 'forearm_l', 'leg_r', 'leg_l', 'shin_r', 'shin_l', 'foot_r', 'foot_l', 'weapon', 'shield', 'cape', 'hair', 'tail', 'shadow'];
 
 type Rect = { x: number; y: number; width: number; height: number };
 
@@ -30,7 +31,8 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
   let cutRect: Rect | null = null;
   let cutTarget: { name?: string; variant?: string } = {};
   let hoverPx: [number, number] | null = null;
-  const gen = { anim: 'walk' as AnimName, facings: new Set<Facing>(), frames: '', strength: '1', duration: '' };
+  const gen = { anim: 'walk' as AnimName, facings: new Set<Facing>(), frames: '', strength: '1', duration: '', style: 'normal' as AnimStyle, tag: '' };
+  let checkTag = '';
   const kf = { name: '', facing: '' as Facing | '', frames: '', loop: false, duration: '100', keys: [] as { src: number; at: number; ease: Ease }[], gap: '2' };
 
   const body = h('div', { class: 'dock-body' });
@@ -54,8 +56,8 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
     const right = Math.abs(Math.round(q.rot / 90) * 90 - q.rot) < 0.5 && q.sx === 1 && q.sy === 1;
     const cos = right ? Math.round(Math.cos(a)) : Math.cos(a);
     const sin = right ? Math.round(Math.sin(a)) : Math.sin(a);
-    const ox = cx - Math.round(q.x);
-    const oy = cy - Math.round(q.y);
+    const ox = cx - q.px;
+    const oy = cy - q.py;
     const pv = q.view!.pivot;
     return [Math.floor((ox * cos + oy * sin) / q.sx + pv[0] + 0.5), Math.floor((-ox * sin + oy * cos) / q.sy + pv[1] + 0.5)];
   };
@@ -78,8 +80,8 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
     const a = (q.rot * Math.PI) / 180;
     const pv = q.view!.pivot;
     const b = q.view!.bmp;
-    const wx = Math.round(q.x) + 0.5;
-    const wy = Math.round(q.y) + 0.5;
+    const wx = q.px + 0.5;
+    const wy = q.py + 0.5;
     return [[0, 0], [b.width, 0], [b.width, b.height], [0, b.height]].map(([x, y]) => {
       const lx = (x - pv[0] - 0.5) * q.sx;
       const ly = (y - pv[1] - 0.5) * q.sy;
@@ -103,7 +105,7 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
       if (!q) return true;
       selected = q.part.name;
       ed.checkpoint();
-      poseDrag = { name: q.part.name, start: p, pp: { ...(f.pose.parts[q.part.name] ?? {}) }, cx: Math.round(q.x) + 0.5, cy: Math.round(q.y) + 0.5, rotate: rotateMode || e.shiftKey, moved: false };
+      poseDrag = { name: q.part.name, start: p, pp: { ...(f.pose.parts[q.part.name] ?? {}) }, cx: q.px + 0.5, cy: q.py + 0.5, rotate: rotateMode || e.shiftKey, moved: false };
       render();
       return true;
     },
@@ -227,8 +229,8 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
           ctx.stroke();
           ctx.setLineDash([]);
         }
-        const px = X(Math.round(q.x) + 0.5);
-        const py = Y(Math.round(q.y) + 0.5);
+        const px = X(q.px + 0.5);
+        const py = Y(q.py + 0.5);
         const r = sel ? Math.max(3.5, z * 0.3) : Math.max(2, z * 0.18);
         ctx.beginPath();
         ctx.arc(px, py, r + 1.2, 0, Math.PI * 2);
@@ -539,6 +541,13 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
       ),
       h('div', { class: 'row2' }, h('label', {}, 'Facing', facingSel), h('label', {}, 'Drawing', variantSel)),
       h('label', {}, 'Parent', parentSel),
+      /^(arm|leg)_/.test(pt.name) && !sp.rig!.parts.some((q) => q.name === lowerSegmentName(pt.name))
+        ? h('button', { class: 'small', title: 'Cut this limb so it bends at the elbow or knee (and ankle). The rest pose does not change; regenerate the animations afterwards.', onclick: () => {
+            const err = ed.tryEdit((sx) => { splitLimb(sx, pt.name); });
+            if (err) toast(err.message, 'error');
+            else toast(`Split ${pt.name}. Regenerate the animations to use the new joints.`);
+          } }, 'Split into segments')
+        : null,
     );
 
     if (v) {
@@ -686,8 +695,21 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
     };
     for (const i of [dx, dy, rot, sx, sy, zIn, smear, smearColor, variantSel, hideChk]) i.addEventListener('change', apply);
     const [ra, rb] = ed.range ?? [ed.frame, ed.frame];
+    const ikChain = limbChain(sp, p.facing, pt.name);
+    const ikX = h('input', { type: 'number', step: '1', placeholder: 'x', 'data-k': 'ik-x', class: 'num' });
+    const ikY = h('input', { type: 'number', step: '1', placeholder: 'y', 'data-k': 'ik-y', class: 'num' });
+    const ikRow = ikChain
+      ? h('div', { class: 'row-inline wrap' },
+          h('span', { class: 'muted small', title: `Canvas position for the end of this limb (${ikChain.tip ?? ikChain.lower}). The segments rotate to reach it.` }, 'Reach'), ikX, ikY,
+          h('button', { class: 'small', onclick: () => {
+            if (ikX.value.trim() === '' || ikY.value.trim() === '') return toast('Enter the x and y to reach', 'error');
+            const err = ed.tryEdit((s2) => { poseFrames(s2, { frames: [ed.frame], ik: { [pt.name]: { x: Number(ikX.value), y: Number(ikY.value) } } }); });
+            if (err) toast(err.message, 'error');
+          } }, 'Solve'))
+      : null;
     section.append(
       h('div', { class: 'sub-title' }, `Part “${pt.name}”`),
+      ...(ikRow ? [ikRow] : []),
       h('div', { class: 'pose-grid' },
         h('label', {}, 'dx', dx), h('label', {}, 'dy', dy), h('label', {}, 'rot°', rot),
         h('label', {}, 'scale x', sx), h('label', {}, 'scale y', sy), h('label', {}, 'z', zIn),
@@ -716,6 +738,8 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
     const framesIn = h('input', { type: 'number', min: '2', max: '24', value: gen.frames, placeholder: String(ANIM_DEFAULTS[gen.anim].frames), disabled: !loop, 'data-k': 'gen-frames', class: 'num', oninput: () => { gen.frames = framesIn.value; } });
     const strengthIn = h('input', { type: 'number', min: '0.25', max: '3', step: '0.25', value: gen.strength, 'data-k': 'gen-strength', class: 'num', oninput: () => { gen.strength = strengthIn.value; } });
     const durIn = h('input', { type: 'number', min: '1', value: gen.duration, placeholder: 'auto', 'data-k': 'gen-dur', class: 'num', oninput: () => { gen.duration = durIn.value; } });
+    const styleSel = h('select', { 'data-k': 'gen-style', title: 'How the character carries its weight', onchange: () => { gen.style = styleSel.value as AnimStyle; } }, ...ANIM_STYLES.map((a) => h('option', { value: a, selected: a === gen.style }, a)));
+    const tagIn = h('input', { type: 'text', value: gen.tag, placeholder: '<animation>_<facing>', spellcheck: false, 'data-k': 'gen-tag', title: 'Custom tag name, for a single facing (platformer characters use "run", "jump"...)', oninput: () => { gen.tag = tagIn.value; } });
     const facingChecks = FACINGS.map((f) => h('label', { class: 'inline small', title: available.includes(f) ? '' : 'No art for this facing' },
       h('input', { type: 'checkbox', checked: gen.facings.has(f), onchange: (e: Event) => { if ((e.target as HTMLInputElement).checked) gen.facings.add(f); else gen.facings.delete(f); } }), f));
     const generate = async () => {
@@ -727,6 +751,8 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
           frames: loop && gen.frames ? Math.max(2, Math.min(24, Number(gen.frames))) : undefined,
           strength: gen.strength ? Math.max(0.25, Math.min(3, Number(gen.strength))) : undefined,
           duration: gen.duration ? Math.max(1, Number(gen.duration)) : undefined,
+          style: gen.style,
+          tag: gen.tag.trim() || undefined,
         });
         const t = s2.tags.find((x) => x.name === tags[0]);
         if (t) { ed.frame = t.from; ed.range = [t.from, t.to]; ed.playTag = t.name; }
@@ -785,10 +811,13 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
         h('summary', {}, 'Generate animation'),
         h('div', { class: 'row-inline wrap' }, h('label', { class: 'inline small' }, 'Animation', animSel), h('label', { class: 'inline small' }, 'frames', framesIn)),
         h('div', { class: 'row-inline wrap' }, ...facingChecks),
+        h('div', { class: 'row-inline wrap' }, h('label', { class: 'inline small' }, 'style', styleSel), h('label', { class: 'inline small' }, 'tag', tagIn)),
         h('div', { class: 'row-inline wrap' }, h('label', { class: 'inline small' }, 'strength', strengthIn), h('label', { class: 'inline small' }, 'ms', durIn),
           h('div', { class: 'spacer' }), h('button', { class: 'small primary', onclick: generate }, 'Generate')),
-        h('p', { class: 'muted small' }, 'Creates (or replaces) tags "<animation>_<facing>" with tuned timing and secondary motion. Uses part names body, head, arm_l/r, leg_l/r, weapon, cape…'),
+        h('p', { class: 'muted small' }, 'Creates (or replaces) tags "<animation>_<facing>" from key poses, with planted feet when the legs are split. Uses part names body, head, arm_l/r, forearm_l/r, leg_l/r, shin_l/r, foot_l/r, weapon, cape…'),
       ),
+      buildFinish(),
+      buildMotionCheck(),
       h('details', { class: 'card anim-card', open: kf.keys.length > 0 },
         h('summary', {}, 'Keyframes → inbetweens'),
         h('p', { class: 'muted small' }, 'Pose a few frames as keys, select them in the timeline, then interpolate dx, dy, rot and scale between them.'),
@@ -802,6 +831,58 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
         h('div', { class: 'row-inline wrap' }, h('label', { class: 'inline small' }, 'frames', kFrames), h('label', { class: 'inline small' }, 'ms', kDur), h('label', { class: 'inline small' }, kLoop, 'loop'),
           h('div', { class: 'spacer' }), h('button', { class: 'small primary', onclick: buildKeys, disabled: !kf.keys.length }, 'Build tag')),
       ),
+    );
+  }
+
+  function buildFinish() {
+    const sp = s();
+    const cur = sp.rig?.finish ?? {};
+    const seams = h('input', { type: 'checkbox', checked: !!cur.seams, 'data-k': 'finish-seams' });
+    const close = h('input', { type: 'checkbox', checked: !!cur.closeOutline, 'data-k': 'finish-close' });
+    const useColor = h('input', { type: 'checkbox', checked: !!cur.outline, 'data-k': 'finish-use-color', title: 'Off: detected from the drawings' });
+    const color = h('input', { type: 'color', value: cur.outline ? cur.outline.slice(0, 7) : '#1a1c2c', 'data-k': 'finish-color', title: 'Outline color' });
+    const apply = () => {
+      const err = ed.tryEdit((sx) => setRigFinish(sx, { seams: seams.checked, closeOutline: close.checked, outline: useColor.checked ? color.value : undefined }));
+      if (err) toast(err.message, 'error');
+    };
+    for (const i of [seams, close, useColor, color]) i.addEventListener('change', apply);
+    return h('details', { class: 'card anim-card', open: !!sp.rig?.finish },
+      h('summary', {}, 'Finish'),
+      h('p', { class: 'muted small' }, 'Cleans every rendered pose, so the character stops looking like cut-out pieces.'),
+      h('div', { class: 'row-inline wrap' },
+        h('label', { class: 'inline small', title: 'Removes outline pixels left inside the figure at elbows, knees and ankles' }, seams, 'Clean joints'),
+        h('label', { class: 'inline small', title: 'Repaints exposed edges of outlined parts, so rotated limbs keep a closed line' }, close, 'Close outline'),
+      ),
+      h('div', { class: 'row-inline wrap' }, h('label', { class: 'inline small' }, useColor, 'Outline color'), color),
+    );
+  }
+
+  function buildMotionCheck() {
+    const sp = s();
+    const here = sp.tags.find((t) => ed.frame >= t.from && ed.frame <= t.to)?.name;
+    if (!sp.tags.some((t) => t.name === checkTag)) checkTag = here ?? sp.tags[0]?.name ?? '';
+    const tagSel = h('select', { 'data-k': 'check-tag', onchange: () => { checkTag = tagSel.value; } }, ...sp.tags.map((t) => h('option', { value: t.name, selected: t.name === checkTag }, t.name)));
+    const run = () => {
+      let report;
+      try {
+        report = checkAnimation(sp, checkTag);
+      } catch (e) {
+        return toast((e as Error).message, 'error');
+      }
+      const map = renderMotionMap(sp, report, 6);
+      const canvas = h('canvas', { width: map.width, height: map.height, style: 'max-width:100%;image-rendering:pixelated' });
+      canvas.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(map.data), map.width, map.height), 0, 0);
+      const legend = h('div', { class: 'row-inline wrap' }, ...report.trails.map((tr) => h('span', { class: 'small', style: `color:rgb(${tr.color.join(',')})` }, `● ${tr.name}`)));
+      void modal(`Motion check · ${report.tag}`, () => h('div', { class: 'form' },
+        h('pre', { class: 'small', style: 'white-space:pre-wrap;margin:0' }, formatAnimReport(report)),
+        canvas,
+        legend,
+        h('p', { class: 'muted small' }, 'Every frame overlaid, with the path of each joint. A dot marks each frame: bunched dots are slow, spread dots fast. The numbers find defects; only your eye can say it looks good.'),
+      ), { wide: true });
+    };
+    return h('details', { class: 'card anim-card', open: sp.tags.length > 0 },
+      h('summary', {}, 'Motion check'),
+      h('div', { class: 'row-inline wrap' }, h('label', { class: 'inline small' }, 'Tag', tagSel), h('div', { class: 'spacer' }), h('button', { class: 'small', onclick: run, disabled: !sp.tags.length }, 'Check')),
     );
   }
 
@@ -836,7 +917,7 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
       g.imageSmoothingEnabled = false;
       g.drawImage(tmp, 0, 0, c.width, c.height);
       g.fillStyle = '#ff3df5';
-      for (const q of layoutPose(sp, ps)) if (q.view && !q.hidden) g.fillRect(Math.round(q.x) * k, Math.round(q.y) * k, k, k);
+      for (const q of layoutPose(sp, ps)) if (q.view && !q.hidden) g.fillRect(q.px * k, q.py * k, k, k);
       row.append(h('button', { class: `turn-cell${f === viewFacing ? ' active' : ''}`, title: `Rest pose facing ${f} — click to edit this facing`, onclick: () => { viewFacing = f; viewVariant = ''; render(); } }, c, h('span', { class: 'small muted' }, f)));
     }
     body.append(h('div', { class: 'sub-title' }, 'Turnaround (rest pose)'), row);

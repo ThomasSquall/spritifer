@@ -2482,7 +2482,7 @@ export function renderWorld(w: World, r: Renderer): void {
   // Contact shadows: above the ground layers, below everything standing on them.
   if (atm) items.push({ z: -1.5, order: 0, draw: () => drawShadows(w, r, atm, camX, camY, zoom) });
   // Particles: behind the instances (above tiles), and in front of them.
-  items.push({ z: -1, order: 1e9, draw: () => { w.particles.draw(r, camX, camY, zoom, true); w.vfx.draw(r, camX, camY, zoom, true); } });
+  items.push({ z: -1, order: 1e9, draw: () => { w.particles.draw(r, camX, camY, zoom, true); if (!w.scripts.effectsInUi) w.vfx.draw(r, camX, camY, zoom, true); } });
   items.push({ z: 50, order: 1e9, draw: () => w.particles.draw(r, camX, camY, zoom, false) });
   const hud: Actor[] = [];
   w.actors.forEach((a, i) => {
@@ -2502,8 +2502,10 @@ export function renderWorld(w: World, r: Renderer): void {
     postProcess(w, r, atm, camX, camY, zoom);
   }
   // After the lighting: a fireball in a dark cave glows instead of being darkened with the scene.
-  w.vfx.draw(r, camX, camY, zoom, false);
-  w.vfx.drawScreen(r, vw, vh);
+  if (!w.scripts.effectsInUi) {
+    w.vfx.draw(r, camX, camY, zoom, false);
+    w.vfx.drawScreen(r, vw, vh);
+  }
   hud.sort((p, q) => p.z - q.z);
   for (const a of hud) drawActor(w, r, a, 0, 0);
   w.scripts.draw(r, camX, camY, zoom);

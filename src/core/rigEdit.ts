@@ -2,9 +2,11 @@
  * Rig editing operations shared by the MCP tools (rig_part, rig_remove_part, rig_pose, rig_animate, rig_keyframes)
  * and the web editor's rig panel. Pure and browser-safe.
  */
-import { type AnimName, type AnimOptions, type Keyframe, generateAnimation, interpolateKeyframes } from './animate.js';
-import { bakeRig, bitmapToView, ensureRig, findPart, layoutPose, restPose, rigFacings, topoParts, viewKey } from './rig.js';
-import { type Bitmap, type Facing, type PartPose, type Pose, type Sprite, FACINGS, addFrame, removeFrame, resolveFrame, setTag } from './sprite.js';
+import { type AnimName, type AnimOptions, type IKTarget, type Keyframe, generateAnimation, interpolateIK, interpolateKeyframes } from './animate.js';
+import { getPixel } from './draw.js';
+import { solveTwoBone } from './ik.js';
+import { bakeRig, bitmapToView, bottomRow, ensureRig, findPart, layoutPose, limbChain, lowerSegmentName, restPose, rigFacings, tipSegmentName, topoParts, viewBitmap, viewKey } from './rig.js';
+import { type Bitmap, type Facing, type PartPose, type Pose, type RigFinish, type Sprite, FACINGS, addFrame, removeFrame, resolveFrame, setTag } from './sprite.js';
 
 export interface RigPartInput {
   name: string;
@@ -93,6 +95,8 @@ export interface PoseInput {
   /** Replace the whole pose instead of merging. */
   replace?: boolean;
   duration?: number;
+  /** Limb tips to reach, by upper limb part ("leg_l", "arm_r"), in canvas pixels. Sets the rotations of the limb's segments. */
+  ik?: Record<string, IKTarget>;
 }
 
 /** Sets (merges) the rig pose of frames, or appends a posed frame, and re-bakes them. Returns the posed frame indices. */
@@ -114,6 +118,7 @@ export function poseFrames(s: Sprite, a: PoseInput): number[] {
     const parts: Record<string, PartPose> = { ...base };
     for (const [name, v] of Object.entries(a.parts ?? {})) parts[name] = a.replace ? { ...v } : { ...base[name], ...v };
     f.pose = { facing, parts };
+    for (const [limb, target] of Object.entries(a.ik ?? {})) solveLimbIK(s, f.pose, limb, target);
     if (a.duration) f.duration = a.duration;
   }
   bakeRig(s, idx);
@@ -176,13 +181,17 @@ export function facingsOf(s: Sprite, wanted?: Facing[]): Facing[] {
   return wanted?.length ? wanted : available.length ? available : ['down'];
 }
 
-/** rig_animate: generates an animation per facing as tag "<animation>_<facing>". Returns the tag names. */
-export function animateRig(s: Sprite, animation: AnimName, facings?: Facing[], opts: AnimOptions = {}): string[] {
+/**
+ * rig_animate: generates an animation per facing as tag "<animation>_<facing>" (or `tag`, for a single facing). Returns the tag names.
+ */
+export function animateRig(s: Sprite, animation: AnimName, facings?: Facing[], opts: AnimOptions & { tag?: string } = {}): string[] {
   if (!s.rig?.parts.length) throw new Error('The rig has no parts yet. Draw them with rig_part.');
+  const targets = facingsOf(s, facings);
+  if (opts.tag && targets.length !== 1) throw new Error(`A custom tag name needs a single facing (got ${targets.join(', ')}): pass facings: ["right"]`);
   const tags: string[] = [];
-  for (const facing of facingsOf(s, facings)) {
+  for (const facing of targets) {
     const gen = generateAnimation(s, animation, facing, opts);
-    const tagName = `${animation}_${facing}`;
+    const tagName = opts.tag ?? `${animation}_${facing}`;
     writeTagFrames(s, tagName, gen.poses, gen.durations);
     tags.push(tagName);
   }
@@ -205,10 +214,139 @@ export function keyframeRig(s: Sprite, a: KeyframeAnimInput): void {
   const rig = ensureRig(s);
   if (!a.name.trim()) throw new Error('Tag name is required');
   for (const k of a.keys) for (const name of Object.keys(k.parts)) findPart(rig, name);
-  const poses = interpolateKeyframes(a.keys, a.frames, !!a.loop).map((parts) => ({ facing: a.facing, parts }));
+  const targets = interpolateIK(a.keys, a.frames, !!a.loop);
+  const poses: Pose[] = interpolateKeyframes(a.keys, a.frames, !!a.loop).map((parts) => ({ facing: a.facing, parts }));
+  poses.forEach((pose, i) => {
+    for (const [limb, target] of Object.entries(targets[i])) solveLimbIK(s, pose, limb, target);
+  });
   if (a.durations && a.durations.length !== a.frames) throw new Error(`durations needs ${a.frames} values`);
   writeTagFrames(s, a.name, poses, a.durations ?? Array(a.frames).fill(a.duration ?? 100));
   bakeRig(s);
+}
+
+const tenth = (v: number) => (Math.sign(v) * Math.round(Math.abs(v) * 10)) / 10 || 0;
+
+/** Rotates the segments of a limb so its tip reaches a canvas position. Returns false if the target was out of reach. */
+export function solveLimbIK(s: Sprite, pose: Pose, limb: string, target: IKTarget): boolean {
+  const rig = ensureRig(s);
+  findPart(rig, limb);
+  const chain = limbChain(s, pose.facing, limb);
+  if (!chain) throw new Error(`"${limb}" has a single segment in facing "${pose.facing}": split it first (rig_split_limbs).`);
+  const placed = layoutPose(s, pose);
+  const root = placed.find((p) => p.part.name === limb)!;
+  const parentRot = root.part.parent ? placed.find((p) => p.part.name === root.part.parent)!.rot : 0;
+  const forward = pose.facing === 'left' ? 1 : -1;
+  const bend = target.bend ?? (limb.startsWith('arm') ? ((-forward) as 1 | -1) : (forward as 1 | -1));
+  const sol = solveTwoBone(chain.u, chain.v, [target.x - root.x, target.y - root.y], bend);
+  pose.parts[limb] = { ...pose.parts[limb], rot: tenth(sol.upper - parentRot) };
+  pose.parts[chain.lower] = { ...pose.parts[chain.lower], rot: tenth(sol.lower) };
+  if (chain.tip && limb.startsWith('leg')) pose.parts[chain.tip] = { ...pose.parts[chain.tip], rot: tenth(-(sol.upper + sol.lower)) };
+  return sol.reached;
+}
+
+/** Sets the clean-up applied to every rendered pose, and re-renders. */
+export function setRigFinish(s: Sprite, finish: RigFinish): void {
+  const rig = ensureRig(s);
+  const clean: RigFinish = {};
+  if (finish.seams) clean.seams = true;
+  if (finish.closeOutline) clean.closeOutline = true;
+  if (finish.outline) clean.outline = finish.outline;
+  if (Object.keys(clean).length) rig.finish = clean;
+  else delete rig.finish;
+  bakeRig(s);
+}
+
+export interface SplitLimbResult {
+  lower: string;
+  tip?: string;
+  /** Facings that were split. */
+  facings: string[];
+  /** Facings too short to split, and variants that keep the whole limb. */
+  skipped: string[];
+}
+
+function cropRows(b: Bitmap, from: number, to: number): Bitmap {
+  const height = to - from + 1;
+  const out: Bitmap = { width: b.width, height, data: new Uint8ClampedArray(b.width * height * 4) };
+  out.data.set(b.data.subarray(from * b.width * 4, (to + 1) * b.width * 4));
+  return out;
+}
+
+function rowCenter(b: Bitmap, y: number, fallback: number): number {
+  let sum = 0;
+  let n = 0;
+  for (let x = 0; x < b.width; x++) {
+    if (getPixel(b, x, y)[3]) {
+      sum += x;
+      n++;
+    }
+  }
+  return n ? Math.round(sum / n) : fallback;
+}
+
+/**
+ * Cuts a one-piece limb hanging from its pivot into segments that bend: arm_l → arm_l + forearm_l, leg_r → leg_r + shin_r + foot_r.
+ * One row is shared at each cut so joints never open, the rest pose does not change, and parts held at the end of the limb (a weapon) move to the lower segment.
+ */
+export function splitLimb(s: Sprite, name: string, opts: { ratio?: number; foot?: boolean } = {}): SplitLimbResult {
+  const rig = ensureRig(s);
+  const part = findPart(rig, name);
+  const lowerName = lowerSegmentName(name) ?? `${name}_lower`;
+  if (rig.parts.some((p) => p.name === lowerName)) throw new Error(`"${name}" is already split: "${lowerName}" exists.`);
+  const tipName = name.startsWith('leg_') && opts.foot !== false ? tipSegmentName(name) : null;
+  const ratio = Math.max(0.2, Math.min(0.8, opts.ratio ?? 0.5));
+  const lower = { name: lowerName, parent: name, views: {} as typeof part.views };
+  const tip = tipName ? { name: tipName, parent: lowerName, views: {} as typeof part.views } : null;
+  const result: SplitLimbResult = { lower: lowerName, facings: [], skipped: [] };
+  const offsets: Record<string, [number, number]> = {};
+  for (const key of Object.keys(part.views)) {
+    if (key.includes(':')) {
+      result.skipped.push(key);
+      continue;
+    }
+    const v = part.views[key];
+    const b = viewBitmap(v);
+    const top = v.pivot[1];
+    const bottom = bottomRow(b);
+    const length = bottom - top + 1;
+    if (length < 3) {
+      result.skipped.push(key);
+      continue;
+    }
+    const withFoot = !!tip && length >= 6;
+    const ankle = withFoot ? bottom - Math.max(1, Math.round(length * 0.28)) : bottom;
+    const joint = Math.max(top + 1, Math.min(ankle - 1, top + Math.round((ankle - top) * ratio)));
+    const kneeX = rowCenter(b, joint, v.pivot[0]);
+    const z = v.z ?? 0;
+    const at: [number, number] = [kneeX - v.pivot[0], joint - top];
+    lower.views[key] = bitmapToView(cropRows(b, joint, ankle), [kneeX, 0], at, z + 0.01);
+    offsets[key] = at;
+    if (withFoot) {
+      const footX = rowCenter(b, ankle, kneeX);
+      tip!.views[key] = bitmapToView(cropRows(b, ankle, bottom), [footX, 0], [footX - kneeX, ankle - joint], z + 0.02);
+    }
+    part.views[key] = bitmapToView(cropRows(b, 0, joint), v.pivot, v.at, v.z);
+    result.facings.push(key);
+  }
+  if (!result.facings.length) throw new Error(`"${name}" is too short to split in every facing (it needs at least 3 rows below its pivot).`);
+  rig.parts.splice(rig.parts.indexOf(part) + 1, 0, lower);
+  if (tip && Object.keys(tip.views).length) {
+    rig.parts.splice(rig.parts.indexOf(lower) + 1, 0, tip);
+    result.tip = tip.name;
+  }
+  // Things held at the end of the limb follow the lower segment.
+  for (const child of rig.parts) {
+    if (child.parent !== name || child === lower) continue;
+    const below = Object.keys(offsets).filter((k) => (child.views[k]?.at?.[1] ?? 0) >= offsets[k][1]);
+    if (below.length * 2 < Object.keys(offsets).length) continue;
+    child.parent = lowerName;
+    for (const [k, o] of Object.entries(offsets)) {
+      const cv = child.views[k];
+      if (cv) cv.at = [(cv.at?.[0] ?? 0) - o[0], (cv.at?.[1] ?? 0) - o[1]];
+    }
+  }
+  bakeRig(s);
+  return result;
 }
 
 /**

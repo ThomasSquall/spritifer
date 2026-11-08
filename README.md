@@ -312,7 +312,7 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Sprite | `list_sprites`, `create_sprite`, `get_sprite`, `duplicate_sprite`, `delete_sprite`, `set_palette`, `resize_canvas` |
 | Livelli | `add_layer`, `update_layer`, `delete_layer`, `merge_layer_down` |
 | Animazione | `add_frames` (con `copy_from`), `delete_frames`, `move_frame`, `set_frame_duration`, `set_tag`, `delete_tag` |
-| Personaggi (rig) | `create_character`, `rig_part`, `rig_remove_part`, `rig_preview`, `rig_pose`, `rig_animate`, `rig_keyframes` (pose chiave + easing) |
+| Personaggi (rig) | `create_character`, `rig_part`, `rig_remove_part`, `rig_preview`, `rig_pose`, `rig_split_limbs` (gomiti, ginocchia, caviglie), `rig_finish` (giunti e contorni puliti), `rig_animate`, `rig_keyframes` (pose chiave + easing + IK), `anim_check` (misura il movimento) |
 | Forme e materiali | `draw_shapes` (capsule, ellissi, poligoni, spline, linee pixel-perfect, archi per le scie), `set_ramp` (rampe hue-shifted in OKLCH, colori `nome.N`), `shade`, `selout`, `cleanup` |
 | Da concept a pixel art | `pixelize` (converte un'immagine ad alta risoluzione in pixel art pulita su un livello) |
 | Riferimento e posa | `set_reference` (ritaglio, scala, rimozione dello sfondo, palette estratta, copia su un livello), `pose_guide` (scheletro di posa), `silhouette_check` (confronto delle sagome con il riferimento) |
@@ -349,7 +349,7 @@ I personaggi per i giochi si costruiscono con un **rig a parti** invece di ridis
 
 1. `create_character` (consigliato 48×48) crea lo sprite, il livello `rig` e un frame di riposo.
 2. `rig_part` disegna ogni parte su una piccola griglia (`body`, `head`, `arm_l`, `arm_r`, `leg_l`, `leg_r`, più `weapon`, `scarf`/`cape`/`hair`, `shadow`) per le viste `down`, `right` e `up`. La vista `left` è specchiata da `right`. Ogni parte ha un `pivot` (l'articolazione), una posizione `at` e un ordine `z` per vista. Le varianti (`blink`, `hurt`) sostituiscono il disegno in certi frame.
-3. `rig_animate` genera `idle`, `walk`, `run`, `attack` e `hurt` per tutte le direzioni: frame, tag `<animazione>_<direzione>`, tempi, saltello del corpo, braccia opposte alle gambe, sciarpa/mantello che seguono in ritardo, scia della spada.
+3. `rig_split_limbs` taglia braccia e gambe in segmenti che si piegano; poi `rig_animate` genera `idle`, `walk`, `run`, `attack`, `hurt`, `jump`, `fall` e `land` per tutte le direzioni: frame, tag `<animazione>_<direzione>`, pose chiave con tempi non uniformi, piedi piantati a terra con l'IK, stile `normal`/`heavy`/`light`, sciarpa/mantello che seguono in ritardo, scia della spada. Le parti `leg_fl/fr/bl/br` si animano da quadrupede, un rig senza arti da blob (squash & stretch). `anim_check` trova i difetti di movimento e disegna la mappa delle traiettorie.
 4. `rig_pose` ritocca singoli frame; correggere una parte con `rig_part` aggiorna tutti i frame.
 5. `export_spritesheet` con `layout: "tags"` produce una riga per animazione.
 

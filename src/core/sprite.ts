@@ -57,6 +57,18 @@ export interface Rig {
   /** Layer the poses are baked into. */
   layer: string;
   parts: RigPart[];
+  /** Clean-up applied to every rendered pose. */
+  finish?: RigFinish;
+}
+
+/** Fixes what rotating separate pieces leaves behind. */
+export interface RigFinish {
+  /** Removes outline pixels left inside the figure where limb segments overlap (elbow, knee, ankle). */
+  seams?: boolean;
+  /** Repaints exposed edges of outlined parts with the outline color, so rotated limbs keep a closed line. */
+  closeOutline?: boolean;
+  /** Outline color. Default: detected from the part drawings. */
+  outline?: string;
 }
 
 /** Per-part offset from the rest pose. dx/dy are screen pixels, rot is degrees clockwise around the pivot. */

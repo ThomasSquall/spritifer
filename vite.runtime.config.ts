@@ -4,7 +4,8 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   build: {
     outDir: 'dist/runtime',
-    emptyOutDir: true,
+    // In npm run dev the server keeps reading this file while it is rebuilt.
+    emptyOutDir: !process.env.SPRITIFER_DEV,
     target: 'es2019',
     lib: {
       entry: 'src/runtime/standalone.ts',

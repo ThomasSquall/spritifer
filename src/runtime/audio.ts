@@ -48,9 +48,24 @@ export class SoundBoard {
   private sfxGain: GainNode | null = null;
   private musicGain: GainNode | null = null;
   private volumes = { music: 1, sfx: 1 };
+  /** Music switched off: the track keeps running silently, so switching back resumes it. */
+  private musicOff = false;
   private track: { name: string; src: AudioBufferSourceNode | null; gain: GainNode | null; volume: number } | null = null;
   /** Music asked for before audio was unlocked (first key or click): starts then. */
   private pendingMusic: MusicCmd | null = null;
+
+  get musicMuted(): boolean {
+    return this.musicOff;
+  }
+
+  set musicMuted(off: boolean) {
+    this.musicOff = off;
+    if (this.musicGain && this.ctx) this.musicGain.gain.setTargetAtTime(this.musicLevel(), this.ctx.currentTime, 0.05);
+  }
+
+  private musicLevel(): number {
+    return this.musicOff ? 0 : this.volumes.music;
+  }
 
   setFiles(files: Record<string, string> | undefined): void {
     this.files = files ?? {};
@@ -79,7 +94,7 @@ export class SoundBoard {
       this.sfxGain.gain.value = this.volumes.sfx;
       this.sfxGain.connect(ctx.destination);
       this.musicGain = ctx.createGain();
-      this.musicGain.gain.value = this.volumes.music;
+      this.musicGain.gain.value = this.musicLevel();
       this.musicGain.connect(ctx.destination);
     }
     return channel === 'music' ? this.musicGain! : this.sfxGain;
@@ -91,7 +106,7 @@ export class SoundBoard {
       const v = Math.max(0, Math.min(1, cmd.value ?? 1));
       this.volumes[cmd.channel === 'music' ? 'music' : 'sfx'] = v;
       const g = cmd.channel === 'music' ? this.musicGain : this.sfxGain;
-      if (g && this.ctx) g.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05);
+      if (g && this.ctx) g.gain.setTargetAtTime(cmd.channel === 'music' ? this.musicLevel() : v, this.ctx.currentTime, 0.05);
       return;
     }
     const ctx = this.ctx;

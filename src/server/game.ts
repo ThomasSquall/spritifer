@@ -10,8 +10,9 @@ import { scaleBitmap } from '../core/draw.js';
 import { rasterText } from '../core/game/font.js';
 import { type Renderer, World, renderWorld } from '../core/game/engine.js';
 import type { ScreenLight } from '../core/game/atmosphere.js';
+import { type ResolvedRelief, buildNormalSheet, frameMask, normalSheetFor, reliefKind, resolveRelief, shadeRelief } from '../core/game/relief.js';
 import { type Problem, validateGame } from '../core/game/catalog.js';
-import type { GameBundle, GameProject, Scene, SpriteAsset, Value } from '../core/game/types.js';
+import { type GameBundle, type GameProject, type Scene, type SpriteAsset, type Value, interfaceSize } from '../core/game/types.js';
 import { encodePng } from './png.js';
 import { inspectScripts } from './scripts.js';
 import type { ScriptInfo } from '../core/game/script.js';
@@ -57,6 +58,7 @@ export function buildAsset(sprite: Sprite, withImage: boolean): BuiltAsset {
         }),
         tags: sprite.tags.map((t) => ({ name: t.name, from: t.from, to: t.to, direction: t.direction })),
         grid: sprite.grid,
+        ...(sprite.relief ? { relief: sprite.relief } : {}),
       },
     };
     if (assetCache.size > 200) assetCache.clear();
@@ -89,6 +91,8 @@ export function loadGameBundle(ws: Workspace, opts: { images?: boolean } = {}): 
   for (const src of [...Object.values(scriptSources), ...Object.values(dialogueSources)]) {
     for (const m of src.matchAll(/["'`]([A-Za-z0-9][A-Za-z0-9_-]{0,63})["'`]/g)) if (available.has(m[1])) used.add(m[1]);
   }
+  // Dialogue faces are found by name at run time ("Aren [deciso]" -> portrait_aren_deciso), so no text names them.
+  for (const name of available) if (name.startsWith('portrait_')) used.add(name);
   // ...and sprites named in data tables (monsters.sprite, residents.sprite...).
   const data = ws.loadTables();
   for (const t of Object.values(data)) {
@@ -177,10 +181,85 @@ export function exportGame(ws: Workspace, opts: { outDir?: string } = {}): Expor
 // ---------------------------------------------------------------------------
 // Bitmap rendering (previews, playtest snapshots)
 
+const normalSheets = new WeakMap<Bitmap, Uint8ClampedArray>();
+
 export class BitmapRenderer implements Renderer {
   readonly out: Bitmap;
+  private relief: { assets: Record<string, SpriteAsset | undefined>; view: { width: number; height: number }; normals: Uint8ClampedArray; on: boolean; tiles: boolean } | null = null;
   constructor(width: number, height: number, private sheets: Map<string, Bitmap>) {
     this.out = { width, height, data: new Uint8ClampedArray(width * height * 4) };
+  }
+
+  /** Enables per-pixel lighting. `view` is the game's screen: sprites as big as it are backdrops and stay flat. */
+  useRelief(assets: Record<string, SpriteAsset | undefined>, view: { width: number; height: number }): this {
+    this.relief = { assets, view, normals: new Uint8ClampedArray(this.out.data.length), on: false, tiles: true };
+    return this;
+  }
+
+  beginRelief(on: boolean, tiles = true): void {
+    if (!this.relief) return;
+    this.relief.on = on;
+    this.relief.tiles = tiles;
+    if (on) this.relief.normals.fill(0);
+  }
+
+  endRelief(): void {
+    if (this.relief) this.relief.on = false;
+  }
+
+  reliefLighting(relief: ResolvedRelief, ambient: string, lights: ScreenLight[], glow: number): void {
+    if (this.relief) shadeRelief(this.out, this.relief.normals, relief, ambient, lights, glow);
+    else this.lighting(ambient, lights, glow);
+  }
+
+  spriteMask(sprite: string, x: number, y: number, w: number, h: number): Uint8Array | null {
+    const src = this.sheets.get(sprite);
+    const asset = this.relief?.assets[sprite];
+    if (!this.relief || !src || !asset || reliefKind(asset, this.relief.view) !== 'shape') return null;
+    return frameMask(src.data, src.width, x, y, w, h);
+  }
+
+  private normalsOf(sprite: string, src: Bitmap): Uint8ClampedArray | null {
+    const rel = this.relief!;
+    const asset = rel.assets[sprite];
+    if (!asset) return null;
+    const kind = reliefKind(asset, rel.view);
+    if (!kind || (kind === 'surface' && !rel.tiles)) return null;
+    let sheet = normalSheets.get(src);
+    if (!sheet) {
+      sheet = normalSheetFor(src.data, src.width, src.height, asset, rel.view) ?? undefined;
+      if (sheet) normalSheets.set(src, sheet);
+    }
+    return sheet ?? null;
+  }
+
+  /** Records the normals of a drawn sprite; a sprite without them erases what it covers (a roof over a character). */
+  private captureNormals(sprite: string, src: Bitmap, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; angle?: number; scale?: number; flat?: boolean }): void {
+    const rel = this.relief;
+    if (!rel?.on || o.opacity < 1 || o.angle) return;
+    const sheet = o.flat ? null : this.normalsOf(sprite, src);
+    const k = Math.max(1, o.scale ?? 1);
+    const { width: W, height: H } = this.out;
+    const n = rel.normals;
+    for (let y = 0; y < sh * k; y++) {
+      for (let x = 0; x < sw * k; x++) {
+        const px = sx + Math.floor((o.flipX ? sw * k - 1 - x : x) / k);
+        const py = sy + Math.floor(y / k);
+        if (px < 0 || py < 0 || px >= src.width || py >= src.height) continue;
+        const si = (py * src.width + px) * 4;
+        if (src.data[si + 3] < 128) continue;
+        const tx = dx + x;
+        const ty = dy + y;
+        if (tx < 0 || ty < 0 || tx >= W || ty >= H) continue;
+        const t = (ty * W + tx) * 4;
+        if (sheet) {
+          n[t] = o.flipX ? 255 - sheet[si] : sheet[si];
+          n[t + 1] = sheet[si + 1];
+          n[t + 2] = sheet[si + 2];
+          n[t + 3] = 255;
+        } else n[t + 3] = 0;
+      }
+    }
   }
 
   private blend(x: number, y: number, r: number, g: number, b: number, a: number): void {
@@ -209,9 +288,10 @@ export class BitmapRenderer implements Renderer {
     for (let i = 0; i < d.length; i += 4) d.set(c, i);
   }
 
-  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; angle?: number; scale?: number }): void {
+  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; angle?: number; scale?: number; flat?: boolean }): void {
     const src = this.sheets.get(sprite);
     if (!src) return;
+    this.captureNormals(sprite, src, sx, sy, sw, sh, dx, dy, o);
     if (o.angle) return this.rotated(src, sx, sy, sw, sh, dx, dy, { ...o, angle: o.angle });
     const k = Math.max(1, o.scale ?? 1);
     if (k > 1) {
@@ -445,8 +525,50 @@ export function renderVfxStrip(loaded: Pick<LoadedGame, 'bundle' | 'sheets'>, gr
   return { png: encodePng(scale > 1 ? scaleBitmap(sheet.out, scale) : sheet.out), timeline, times };
 }
 
+/**
+ * One frame of a sprite as per-pixel light sees it: its art, its normal map, then lit from the left, the right, above
+ * and below, on a dark background. `dark` lights it with a point light; otherwise with the sun.
+ */
+export function renderReliefPreview(built: { sheet: Bitmap; asset: SpriteAsset }, opts: { frame?: number; scale?: number; settings?: SpriteAsset['relief'] } = {}): Buffer {
+  const { sheet, asset } = built;
+  const f = asset.frames[Math.max(0, Math.min(asset.frames.length - 1, opts.frame ?? 0))];
+  if (!f) throw new Error(`Sprite "${asset.name}" has no frames`);
+  const normals = buildNormalSheet(sheet.data, sheet.width, sheet.height, asset.frames, opts.settings ?? asset.relief);
+  const pad = 8;
+  const cw = f.w + pad * 2;
+  const ch = f.h + pad * 2;
+  const crop = (src: Uint8ClampedArray, into: Uint8ClampedArray) => {
+    for (let y = 0; y < f.h; y++) into.set(src.subarray(((f.y + y) * sheet.width + f.x) * 4, ((f.y + y) * sheet.width + f.x + f.w) * 4), ((y + pad) * cw + pad) * 4);
+  };
+  const scale = Math.max(1, Math.min(12, opts.scale ?? 4));
+  const positions: ({ x: number; y: number } | null)[] = [null, null, { x: -0.3, y: 0.45 }, { x: 1.3, y: 0.45 }, { x: 0.5, y: -0.3 }, { x: 0.5, y: 1.3 }];
+  const out: Bitmap = { width: cw * positions.length, height: ch, data: new Uint8ClampedArray(cw * positions.length * ch * 4) };
+  positions.forEach((pos, i) => {
+    const color = new Uint8ClampedArray(cw * ch * 4);
+    crop(sheet.data, color);
+    const norm = new Uint8ClampedArray(cw * ch * 4);
+    crop(normals, norm);
+    const cell = { width: cw, height: ch, data: new Uint8ClampedArray(cw * ch * 4) };
+    for (let p = 0; p < cell.data.length; p += 4) {
+      const a = color[p + 3] / 255;
+      const bg = 30;
+      const showNormals = i === 1;
+      cell.data[p] = showNormals && norm[p + 3] ? norm[p] : color[p] * a + bg * (1 - a);
+      cell.data[p + 1] = showNormals && norm[p + 3] ? norm[p + 1] : color[p + 1] * a + bg * (1 - a);
+      cell.data[p + 2] = showNormals && norm[p + 3] ? 255 : color[p + 2] * a + bg * (1 - a);
+      cell.data[p + 3] = 255;
+    }
+    if (pos) {
+      const reach = Math.hypot(f.w, f.h) * 1.6;
+      shadeRelief(cell, norm, resolveRelief({}), '#54566e', [{ x: pad + f.w * pos.x, y: pad + f.h * pos.y, radius: reach, color: '#ffe0b0', intensity: 1 }], 0);
+    }
+    for (let y = 0; y < ch; y++) out.data.set(cell.data.subarray(y * cw * 4, (y + 1) * cw * 4), (y * out.width + i * cw) * 4);
+  });
+  return encodePng(scale > 1 ? scaleBitmap(out, scale) : out);
+}
+
 export function renderViewport(world: World, sheets: Map<string, Bitmap>, scale = 1): Buffer {
-  const r = new BitmapRenderer(world.game.width, world.game.height, sheets);
+  const r = new BitmapRenderer(world.game.width, world.game.height, sheets).useRelief(world.bundle.sprites, interfaceSize(world.game));
   renderWorld(world, r);
   return encodePng(scale > 1 ? scaleBitmap(r.out, scale) : r.out);
 }
@@ -467,7 +589,7 @@ export function renderScenePreview(loaded: LoadedGame, sceneName: string, opts: 
   const shown = new Set(world.actors.map((a) => a.sceneId));
   const hidden = scene.instances.filter((i) => i.activeIf && !shown.has(i.id)).map((i) => `${i.name ?? i.object} (${i.activeIf})`);
   world.updateTexts();
-  const r = new BitmapRenderer(W, H, loaded.sheets);
+  const r = new BitmapRenderer(W, H, loaded.sheets).useRelief(loaded.bundle.sprites, interfaceSize(loaded.bundle.game));
   renderWorld(world, r);
   if (opts.grid) {
     for (let x = 0; x < W; x += scene.tileSize) r.rect(x, 0, 1, H, '#ffffff', 0.12);

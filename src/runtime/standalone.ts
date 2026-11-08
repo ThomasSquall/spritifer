@@ -25,6 +25,11 @@ if (!bundle) {
   const playing = mountPlayer(el, bundle, {
     scene: params.get('scene') ?? undefined,
     debug: params.has('debug'),
+    music: params.has('nomusic') ? false : undefined,
+    musicButton: !inFrame,
+    onMusicChange: (on) => {
+      if (inFrame) window.parent.postMessage({ source: 'spritifer-game', type: 'music', on }, '*');
+    },
     onLog: (m) => {
       post('log', m);
       if (m.startsWith('ERROR')) console.warn('[game]', m);
@@ -43,6 +48,9 @@ if (!bundle) {
             if (!d.scripts) return;
             bundle.scripts = d.scripts;
             player.world.scripts.hotReload(d.scripts);
+            return;
+          case 'music':
+            player.music = !!d.on;
             return;
           case 'pause':
             player.paused = !!d.on;

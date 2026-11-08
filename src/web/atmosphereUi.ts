@@ -84,6 +84,8 @@ export const ATMOSPHERE_PRESETS: { name: string; atm: SceneAtmosphere }[] = [
   { name: 'Underwater', atm: { ambient: '#6aa0c8', glow: 0.7, vignette: 0.45, tint: '#2080c0', tintAmount: 0.2, motes: { preset: 'bubbles', count: 24 } } },
 ];
 
+const DEFAULT_SUN = { angle: -125, elevation: 48, color: '#ffe2b0', intensity: 1, shade: '#6470b8' };
+
 const MOTE_LABELS: Record<SceneMotes['preset'], string> = {
   fireflies: 'Fireflies', dust: 'Dust motes', snow: 'Snow', embers: 'Embers', leaves: 'Falling leaves', spores: 'Glowing spores', bubbles: 'Bubbles',
 };
@@ -142,6 +144,53 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
         slider('Glow', atm.glow ?? 0.6, 0, 2, 0.05, o, (v) => put('glow', v), 'Bloom the lights add on top. Only visible when the ambient is darker than white'),
       ),
       h('p', { class: 'muted small' }, 'Lights come from object types and instances (Light field). They show only when the ambient is darker than white.'),
+    );
+
+    // Per-pixel light.
+    const rf = atm.relief;
+    const reliefOn = h('input', { type: 'checkbox', checked: !!rf, onchange: () => {
+      o.before();
+      put('relief', reliefOn.checked ? {} : undefined);
+      o.changed();
+      render();
+    } });
+    const relOpt = <K extends 'strength' | 'bands' | 'rim' | 'lightHeight'>(k: K, v: number, dflt: number) => { if (!rf) return; if (v === dflt) delete rf[k]; else rf[k] = v; };
+    const tilesOn = rf ? h('input', { type: 'checkbox', checked: rf.tiles !== false, onchange: () => {
+      o.before();
+      if (tilesOn!.checked) delete rf.tiles;
+      else rf.tiles = false;
+      o.changed();
+    } }) : null;
+    const sun = rf?.sun;
+    const sunOn = rf ? h('input', { type: 'checkbox', checked: !!sun, onchange: () => {
+      o.before();
+      if (sunOn!.checked) rf.sun = { ...DEFAULT_SUN };
+      else delete rf.sun;
+      o.changed();
+      render();
+    } }) : null;
+    const sunOpt = <K extends 'angle' | 'elevation' | 'intensity'>(k: K, v: number) => { if (sun) sun[k] = v; };
+    const relief = h('div', { class: 'atm-group' },
+      h('div', { class: 'atm-group-title' }, h('label', { class: 'inline', title: 'Lights and the sun shape the volumes of the sprites instead of only tinting them. Each sprite\'s depth and glowing colors are set in the sprite editor (Relief, in the Rig & guide panel)' }, reliefOn, 'Relief lighting')),
+      rf ? h('div', { class: 'row2' },
+        slider('Strength', rf.strength ?? 1, 0, 2, 0.05, o, (v) => relOpt('strength', v, 1), 'How strongly light shapes the sprites'),
+        slider('Light steps', rf.bands ?? 4, 0, 16, 1, o, (v) => relOpt('bands', v, 4), 'Bands of light on the sprites: few = painted pixel art, 0 = smooth'),
+      ) : null,
+      rf ? h('div', { class: 'row2' },
+        slider('Rim', rf.rim ?? 0.9, 0, 2, 0.05, o, (v) => relOpt('rim', v, 0.9), 'Light caught on the edges facing it'),
+        slider('Light height', rf.lightHeight ?? 0.3, 0.05, 2, 0.05, o, (v) => relOpt('lightHeight', v, 0.3), 'Lower = lamps graze the sprites and shadows get more dramatic'),
+      ) : null,
+      rf ? h('label', { class: 'inline', title: 'Tiles on solid layers (walls, cliffs, treetops) catch the light too, from the forms painted in them. The ground stays clean' }, tilesOn, 'Walls and treetops') : null,
+      rf ? h('label', { class: 'inline', title: 'A directional light for the whole scene, with shadows cast on the ground. Use it as the moon too, with a blue color' }, sunOn, 'Sun') : null,
+      sun ? h('div', { class: 'row2' },
+        slider('Direction°', sun.angle ?? -135, -180, 180, 5, o, (v) => sunOpt('angle', v), '0 = from the right, 90 = from below, -90 = from above'),
+        slider('Elevation°', sun.elevation ?? 50, 5, 90, 1, o, (v) => sunOpt('elevation', v), 'Low sun = long shadows'),
+      ) : null,
+      sun ? h('div', { class: 'row3 atm-row3' },
+        colorField('Sun', sun.color, '#fff0d0', o, (v) => { sun.color = v; }),
+        colorField('Shade', sun.shade, '#6a70b0', o, (v) => { sun.shade = v; }, 'Color of the side away from the sun'),
+        slider('Intensity', sun.intensity ?? 1, 0, 3, 0.05, o, (v) => sunOpt('intensity', v)),
+      ) : null,
     );
 
     // Shadows.
@@ -220,7 +269,7 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
       m ? h('label', { title: 'Comma-separated hex colors (e.g. #a0f0ff, #ffffff); empty = the preset colors' }, 'Colors', colorsIn) : null,
     );
 
-    box.append(h('div', { class: 'form atm-form' }, h('label', {}, 'Preset', presetSel), lighting, shadows, clouds, grade, particles));
+    box.append(h('div', { class: 'form atm-form' }, h('label', {}, 'Preset', presetSel), lighting, relief, shadows, clouds, grade, particles));
   };
   render();
   return box;

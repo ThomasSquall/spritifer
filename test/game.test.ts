@@ -162,6 +162,43 @@ describe('engine', () => {
     expect(r.final.actors.find((a) => a.object === 'player')!.animation).toBe('walk_up');
   });
 
+  describe('top-down running', () => {
+    const walkRun = [
+      { name: 'idle_right', from: 0, to: 0, direction: 'forward' as const },
+      { name: 'walk_right', from: 0, to: 1, direction: 'forward' as const },
+      { name: 'run_right', from: 0, to: 1, direction: 'forward' as const },
+    ];
+    const player = (r: Awaited<ReturnType<typeof runPlaytest>>) => r.final.actors.find((a) => a.object === 'player')!;
+    const hold = (...keys: string[]) => keys.map((key) => ({ at: 0, key, duration: 2 }));
+    const play = async (behavior: Record<string, unknown>, tags: SpriteAsset['tags'], keys: string[]) => {
+      const b = platformBundle();
+      b.game.objects[0].behaviors = [{ type: 'topdown', ...behavior }];
+      b.sprites.hero.tags = tags;
+      return player(await runPlaytest(b, { seconds: 1, inputs: hold(...keys) }));
+    };
+
+    it('runs at runSpeed with the run animation while Shift is held', async () => {
+      const walked = await play({ speed: 40, runSpeed: 120 }, walkRun, ['right']);
+      const ran = await play({ speed: 40, runSpeed: 120 }, walkRun, ['right', 'shift']);
+      expect(walked.animation).toBe('walk_right');
+      expect(ran.animation).toBe('run_right');
+      expect(ran.x - 32).toBeCloseTo(120, -1);
+      expect(walked.x - 32).toBeCloseTo(40, -1);
+    });
+
+    it('keeps the walk animation at run speed on sprites without run animations', async () => {
+      const ran = await play({ speed: 40, runSpeed: 120 }, walkRun.filter((t) => t.name !== 'run_right'), ['right', 'shift']);
+      expect(ran.animation).toBe('walk_right');
+      expect(ran.x - 32).toBeCloseTo(120, -1);
+    });
+
+    it('ignores Shift without a run speed', async () => {
+      const ran = await play({ speed: 40 }, walkRun, ['right', 'shift']);
+      expect(ran.animation).toBe('walk_right');
+      expect(ran.x - 32).toBeCloseTo(40, -1);
+    });
+  });
+
   it('validates references and expressions', async () => {
     const b = platformBundle();
     b.game.objects[0].events.push({ trigger: { type: 'keyPressed', key: 'nope' }, conditions: [{ type: 'expr', expr: '1 +' }], actions: [{ type: 'gotoScene', scene: 'missing' }] });

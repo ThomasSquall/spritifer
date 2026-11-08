@@ -40,6 +40,13 @@ function parseArgs(argv: string[]) {
 
 async function main() {
   const { cmd, flags } = parseArgs(process.argv.slice(2));
+  if ((cmd === 'serve' || cmd === 'mcp') && typeof process.loadEnvFile === 'function') {
+    try {
+      process.loadEnvFile('.env.local');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
   const workspaceDir = String(flags.workspace ?? process.env.SPRITIFER_WORKSPACE ?? './sprites');
   const port = Number(flags.port ?? process.env.SPRITIFER_PORT ?? DEFAULT_PORT);
   const host = String(flags.host ?? '127.0.0.1');

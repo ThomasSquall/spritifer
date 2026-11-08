@@ -19,6 +19,22 @@ import { resolveImport, scriptBaseName, transformModule } from './modules.js';
 import { BEHAVIOUR_RESERVED, type ComponentParamType, LIFECYCLE_NAMES, PARAM_TYPES } from './scriptApi.js';
 import type { Value } from './types.js';
 
+/** Draws interface coordinates on a canvas k times larger. */
+/** Interface sprites keep whole device pixels: a fraction is allowed when the interface scale makes it whole (0.5 at uiScale 2). */
+export function spriteScale(scale: number, uiScale: number): number {
+  return scale > 0 && Number.isInteger(scale * uiScale) ? scale : Math.max(1, Math.round(scale));
+}
+
+export function scaledRenderer(r: Renderer, k: number): Renderer {
+  if (k === 1) return r;
+  return {
+    clear: (color) => r.clear(color),
+    image: (sprite, sx, sy, sw, sh, dx, dy, o) => r.image(sprite, sx, sy, sw, sh, dx * k, dy * k, { ...o, scale: (o.scale ?? 1) * k }),
+    rect: (x, y, w, h, color, alpha, blend) => r.rect(x * k, y * k, w * k, h * k, color, alpha, blend),
+    text: (text, x, y, color, scale) => r.text(text, x * k, y * k, color, scale * k),
+  };
+}
+
 type Fn = (...args: never[]) => unknown;
 
 /** Hooks of the legacy behavior(name, { ... }) registration (kept working; new code uses component classes). */
@@ -379,6 +395,7 @@ function jsdocBefore(src: string): string | undefined {
 }
 
 export interface DialogState {
+  mood?: string;
   speaker: string;
   text: string;
   shown: number;
@@ -412,7 +429,7 @@ export interface UiApi {
   rect(x: number, y: number, w: number, h: number, color: string, alpha?: number): void;
   panel(x: number, y: number, w: number, h: number, opts?: { color?: string; border?: string; alpha?: number }): void;
   bar(x: number, y: number, w: number, h: number, value: number, max: number, color?: string, back?: string): void;
-  sprite(name: string, x: number, y: number, opts?: { frame?: number; animation?: string; flipX?: boolean; opacity?: number; scale?: number }): void;
+  sprite(name: string, x: number, y: number, opts?: { frame?: number; animation?: string; elapsed?: number; flipX?: boolean; opacity?: number; scale?: number }): void;
   measure(text: string, size?: number): { width: number; height: number };
   /** Converts world coordinates (instance x/y) to screen coordinates. */
   toScreen(x: number, y: number): { x: number; y: number };
@@ -505,6 +522,7 @@ export class ScriptHost {
   readonly errors: string[] = [];
   dialog: DialogState | null = null;
   private dialogQueue: Omit<DialogState, 'openedAt'>[] = [];
+  private posed: Actor | null = null;
   private timers: Timer[] = [];
   private conditions: { test: () => boolean; resolve: () => void; persistent: boolean }[] = [];
   movers: Mover[] = [];
@@ -1142,13 +1160,49 @@ export class ScriptHost {
 
   // ------------------------------------------------------------------ dialogs
 
+  /** "Aren [deciso]" shows as "Aren" with the sprite portrait_aren_deciso, or portrait_aren when that mood has no face. */
+  private speakerFace(speaker: string): { speaker: string; mood?: string; portrait: string | null } {
+    const m = /^(.*?)\s*\[([^\]]+)\]$/.exec(speaker);
+    const name = m ? m[1] : speaker;
+    const slug = (t: string) => t.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    const base = `portrait_${slug(name)}`;
+    const mood = m ? `${base}_${slug(m[2])}` : '';
+    const sprites = this.world.bundle.sprites;
+    return { speaker: name, mood: m ? slug(m[2]) : '', portrait: mood && sprites[mood] ? mood : sprites[base] ? base : null };
+  }
+
   openDialog(text: string, opts: { speaker?: string; choices?: string[]; portrait?: string } = {}): Promise<number> {
     return new Promise<number>((resolve) => {
-      const d = { speaker: opts.speaker ?? '', text, shown: 0, choices: opts.choices?.length ? opts.choices.map(String) : null, selected: 0, portrait: opts.portrait ?? null, resolve };
+      const who = this.speakerFace(opts.speaker ?? '');
+      const d = { speaker: who.speaker, text, shown: 0, choices: opts.choices?.length ? opts.choices.map(String) : null, selected: 0, mood: who.mood, portrait: opts.portrait ?? who.portrait, resolve };
       if (this.dialog) this.dialogQueue.push(d);
-      else this.dialog = { ...d, openedAt: this.world.clock };
+      else {
+        this.dialog = { ...d, openedAt: this.world.clock };
+        this.syncSpeakerPose();
+      }
       this.world.log(`dialog: ${d.speaker ? d.speaker + ': ' : ''}${text}${d.choices ? ` [${d.choices.join(' / ')}]` : ''}`);
     });
+  }
+
+  /** The speaker holds pose_<mood>_<facing> (pose_talk_<facing> without a mood) for as long as the line is shown, if its sprite has one. */
+  private syncSpeakerPose(): void {
+    const w = this.world;
+    const line = this.dialog;
+    const actor = line?.speaker ? w.actors.find((a) => !a.destroyed && w.displayName(a) === line.speaker) : undefined;
+    const pose = actor ? `pose_${line?.mood || 'talk'}_${actor.facing}` : '';
+    const next = actor?.hasTag(pose) ? actor : null;
+    if (this.posed && (this.posed !== next || this.posed.anim !== pose)) {
+      const previous = this.posed;
+      previous.holdLast = false;
+      previous.animLock = 0;
+      w.setAnim(previous, previous.hasTag(`idle_${previous.facing}`) ? `idle_${previous.facing}` : previous.type.animation ?? '');
+    }
+    this.posed = next;
+    if (next && next.anim !== pose) {
+      w.setAnim(next, pose);
+      next.holdLast = true;
+      next.animLock = Infinity;
+    }
   }
 
   /** Advances the dialog with the player's input. Returns true while a dialog is open. */
@@ -1172,6 +1226,7 @@ export class ScriptHost {
         if (d.choices) this.world.log(`choice: ${d.choices[d.selected]}`);
         const next = this.dialogQueue.shift();
         this.dialog = next ? { ...next, openedAt: this.world.clock } : null;
+        this.syncSpeakerPose();
         d.resolve(d.selected);
       }
     }
@@ -1279,24 +1334,28 @@ export class ScriptHost {
     if (input.pointer) this.uiInput.pointer = input.pointer;
   }
 
-  draw(r: Renderer, camX: number, camY: number, zoom = 1): void {
+  draw(canvas: Renderer, camX: number, camY: number, zoom = 1): void {
     const drawers = this.all().filter((c) => this.has(c, 'onDraw'));
-    const latch = this.uiInput;
-    this.uiInput = { pressed: new Set(), clicks: [], pointer: latch.pointer };
+    const raw = this.uiInput;
+    this.uiInput = { pressed: new Set(), clicks: [], pointer: raw.pointer };
     this.effectsInUi = false;
     if (!this.drawHooks.length && !drawers.length) return;
     const w = this.world;
+    const k = w.uiScale;
+    const r = scaledRenderer(canvas, k);
+    const toUi = ([x, y]: [number, number]): [number, number] => [x / k, y / k];
+    const latch = { ...raw, clicks: raw.clicks.map(toUi), pointer: raw.pointer ? toUi(raw.pointer) : raw.pointer };
     const inside = (px: number, py: number, x: number, y: number, ww: number, hh: number) => px >= x && px < x + ww && py >= y && py < y + hh;
     const clickIn = (x: number, y: number, ww: number, hh: number) => latch.clicks.some(([cx, cy]) => inside(cx, cy, x, y, ww, hh));
     const hover = (x: number, y: number, ww: number, hh: number) => !!latch.pointer && inside(latch.pointer[0], latch.pointer[1], x, y, ww, hh);
     const ui: UiApi = {
-      width: w.game.width,
-      height: w.game.height,
-      shake: { x: Math.round((w.camera.x - camX) * zoom), y: Math.round((w.camera.y - camY) * zoom) },
+      width: w.screenWidth,
+      height: w.screenHeight,
+      shake: { x: Math.round(((w.camera.x - camX) * zoom) / k), y: Math.round(((w.camera.y - camY) * zoom) / k) },
       effects: (layer = 'front') => {
         this.effectsInUi = true;
-        if (layer === 'screen') w.vfx.drawScreen(r, w.game.width, w.game.height);
-        else w.vfx.draw(r, camX, camY, zoom, layer === 'behind');
+        if (layer === 'screen') w.vfx.drawScreen(canvas, w.game.width, w.game.height);
+        else w.vfx.draw(canvas, camX, camY, zoom, layer === 'behind');
       },
       text: (text, x, y, o = {}) => {
         const s = Math.max(1, Math.round(o.size ?? 1));
@@ -1330,17 +1389,18 @@ export class ScriptHost {
           if (tag) {
             const len = tag.to - tag.from + 1;
             const dur = asset.frames[tag.from]?.duration ?? 100;
-            fi = tag.from + (Math.floor((w.clock * 1000) / dur) % len);
+            // With elapsed the clip plays once from its start and stays on the last frame.
+            fi = tag.from + (o.elapsed !== undefined ? Math.min(len - 1, Math.floor((Math.max(0, o.elapsed) * 1000) / dur)) : Math.floor((w.clock * 1000) / dur) % len);
           }
         }
         const f = asset.frames[fi] ?? asset.frames[0];
-        r.image(name, f.x, f.y, f.w, f.h, Math.round(x), Math.round(y), { flipX: !!o.flipX, opacity: o.opacity ?? 1, angle: 0, scale: Math.max(1, Math.round(o.scale ?? 1)) });
+        r.image(name, f.x, f.y, f.w, f.h, Math.round(x), Math.round(y), { flipX: !!o.flipX, opacity: o.opacity ?? 1, angle: 0, scale: spriteScale(o.scale ?? 1, k) });
       },
       measure: (text, size = 1) => {
         const m = measureText(String(text));
         return { width: m.width * size, height: m.height * size };
       },
-      toScreen: (x, y) => ({ x: Math.round((x - camX) * zoom), y: Math.round((y - camY) * zoom) }),
+      toScreen: (x, y) => ({ x: Math.round(((x - camX) * zoom) / k), y: Math.round(((y - camY) * zoom) / k) }),
       pressed: (key, consume = false) => {
         const k = String(key);
         const hit = latch.pressed.has(k);
@@ -1519,8 +1579,8 @@ export class ScriptHost {
       },
       game: {
         get title() { return w.game.title; },
-        get width() { return w.game.width; },
-        get height() { return w.game.height; },
+        get width() { return w.screenWidth; },
+        get height() { return w.screenHeight; },
         get time() { return w.time; },
         get clock() { return w.clock; },
         get dialogOpen() { return !!host.dialog; },

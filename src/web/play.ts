@@ -72,11 +72,15 @@ export async function openPlay(scene?: string): Promise<void> {
     logs.scrollTop = logs.scrollHeight;
   };
   const onMsg = (e: MessageEvent) => {
-    const d = e.data as { source?: string; type?: string; message?: string; data?: unknown };
+    const d = e.data as { source?: string; type?: string; message?: string; data?: unknown; on?: boolean };
     if (e.source === frame.contentWindow && d?.source === 'spritifer-game' && d.type === 'inspect' && d.data) inspector.update(d.data as Parameters<typeof inspector.update>[0]);
     if (e.source !== frame.contentWindow || d?.source !== 'spritifer-game') return;
     if (d.type === 'log' && d.message) addLog(d.message);
     if (d.type === 'ready') frame.focus();
+    if (d.type === 'music') {
+      musicOn = !!d.on;
+      musicBtn.classList.toggle('on', musicOn);
+    }
   };
   window.addEventListener('message', onMsg);
   const reload = () => {
@@ -102,6 +106,8 @@ export async function openPlay(scene?: string): Promise<void> {
   document.addEventListener('keydown', onKey, true);
   const hotBtn = h('button', { class: `small${hotReload ? ' on' : ''}`, title: 'Apply script changes to the running game without restarting (components keep their state)', onclick: () => { hotReload = !hotReload; hotBtn.classList.toggle('on', hotReload); } }, 'Hot reload');
   const hitBtn = h('button', { class: 'small', title: 'Show collision boxes (F2 in game)', onclick: () => { debug = !debug; hitBtn.classList.toggle('on', debug); reload(); } }, 'Hitboxes');
+  let musicOn = true;
+  const musicBtn = h('button', { class: 'small on', title: 'Music on or off while the game runs (F3 in game); remembered for the next Play', onclick: () => { sendToGame({ type: 'music', on: !musicOn }); frame.focus(); } }, 'Music');
   const overlay = h('div', { class: 'play-overlay' },
     h('header', { class: 'play-head' },
       h('span', { class: 'play-title' }, icon('play', 14), ` ${state.game?.title ?? 'Game'}`, scene ? h('span', { class: 'muted' }, ` · ${scene}`) : null),
@@ -109,6 +115,7 @@ export async function openPlay(scene?: string): Promise<void> {
       h('span', { class: 'spacer' }),
       errCount,
       hotBtn,
+      musicBtn,
       hitBtn,
       h('button', { class: 'small', onclick: reload }, 'Restart'),
       h('button', { class: 'small', onclick: () => window.open(gameApi.playUrl(scene), '_blank') }, 'New tab'),

@@ -2,7 +2,7 @@
 
 import { TileResolver, type TilesetRules, tilesetFrame } from '../core/game/tilerules.js';
 import { type AtmosphereActor, type AtmosphereWorld, MoteField, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
-import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
+import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
 import { CanvasRenderer } from '../runtime/canvasRenderer.js';
 import { atmosphereEditor, lightEditor } from './atmosphereUi.js';
 import { openTileRules } from './tileRulesUi.js';
@@ -142,6 +142,8 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       }),
     );
     atmRenderer = null;
+    reliefRenderer = null;
+    reliefCache.clear();
     draw();
     renderPalette();
     renderRight();
@@ -261,6 +263,9 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const clock0 = performance.now();
   let raf = 0;
   let atmRenderer: { r: CanvasRenderer; key: string } | null = null;
+  // Relief lighting works on game pixels: an offscreen copy of the visible area, whatever the editor's zoom.
+  let reliefRenderer: { r: CanvasRenderer; canvas: HTMLCanvasElement; g: CanvasRenderingContext2D; key: string } | null = null;
+  const reliefCache = new Map<string, unknown>();
   let resolverCache: { cfg: TilesetRules | undefined; r: TileResolver } | null = null;
   const resolverFor = () => {
     const cfg = tileset ? state.game!.tilesets?.[tileset.name] : undefined;
@@ -282,13 +287,13 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const previewActors = (): AtmosphereActor[] => scene.instances.map((inst, k) => {
     const obj = state.effective(inst.object);
     const fr = instanceFrame(inst);
-    const asset = fr ? { width: fr.a.width, height: fr.a.height } : undefined;
+    const asset = fr ? { width: fr.a.width, height: fr.a.height, name: fr.a.name, frames: [fr.f] } : undefined;
     const hb = obj?.hitbox;
     const b = hb
       ? { x: inst.x + (inst.flipX && asset ? asset.width - hb.x - hb.w : hb.x), y: inst.y + hb.y, w: hb.w, h: hb.h }
       : instanceBox(inst);
     return {
-      id: k + 1, x: inst.x, y: inst.y, z: obj?.z ?? 0, opacity: 1, visible: true, destroyed: false,
+      id: k + 1, x: inst.x, y: inst.y, z: obj?.z ?? 0, opacity: 1, visible: true, destroyed: false, flipX: !!inst.flipX,
       light: inst.light ? (inst.light.radius > 0 ? inst.light : undefined) : obj?.light,
       asset, type: obj ?? {}, box: () => b,
     };
@@ -307,6 +312,20 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   };
 
   lookBtn.classList.toggle('active', showGameLook);
+
+  function reliefFor(w: number, hh: number): NonNullable<typeof reliefRenderer> {
+    const key = `${w}x${hh}`;
+    if (!reliefRenderer || reliefRenderer.key !== key) {
+      const c2 = document.createElement('canvas');
+      c2.width = w;
+      c2.height = hh;
+      const g = c2.getContext('2d', { willReadFrequently: true })!;
+      const images = new Map<string, CanvasImageSource>();
+      for (const [n, a] of assets) images.set(n, a.img);
+      reliefRenderer = { r: new CanvasRenderer(g, images, w, hh).useRelief(Object.fromEntries(assets), interfaceSize(state.game!), reliefCache), canvas: c2, g, key };
+    }
+    return reliefRenderer;
+  }
 
   function draw(): void {
     const dpr = window.devicePixelRatio || 1;
@@ -348,6 +367,9 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       ctx.restore();
     }
 
+    const relief = atm?.relief && view.w > 0 && view.h > 0 ? reliefFor(view.w, view.h) : null;
+    relief?.r.beginRelief(true, atm?.relief?.tiles !== false);
+
     // Tile layers and instances in z order (layers default below objects).
     type Item = { z: number; o: number; d: () => void };
     const items: Item[] = [];
@@ -370,6 +392,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
             for (const t of resolver.resolve(l, scene.cols, scene.rows, tx, ty, list, look ? clock : 0)) {
               const s = tileSrc(t, tileFrame);
               if (s) ctx.drawImage(tileset.img, s[0], s[1], s[2], s[3], tx * ts(), ty * ts(), ts(), ts());
+              if (s && relief) relief.r.captureNormals(tileset.name, s[0], s[1], s[2], s[3], tx * ts() - view.x, ty * ts() - view.y, { flipX: false, opacity: 1, scale: ts() / s[2], flat: !l.solid });
             }
           }
         }
@@ -384,7 +407,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       if (!atmRenderer || atmRenderer.key !== key) {
         const images = new Map<string, CanvasImageSource>();
         for (const [n, a] of assets) images.set(n, a.img);
-        atmRenderer = { r: new CanvasRenderer(ctx, images, Math.max(1, w), Math.max(1, hh)), key };
+        atmRenderer = { r: new CanvasRenderer(ctx, images, Math.max(1, w), Math.max(1, hh)).useRelief(Object.fromEntries(assets), interfaceSize(state.game!), reliefCache), key };
       }
       return atmRenderer.r;
     };
@@ -402,13 +425,16 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         const fr = instanceFrame(inst);
         ctx.globalAlpha = dimOthers ? 0.5 : 1;
         if (fr) {
+          const drawX = inst.x + (obj?.spriteOffset?.x ?? 0);
+          const drawY = inst.y + (obj?.spriteOffset?.y ?? 0);
+          relief?.r.captureNormals(fr.a.name, fr.f.x, fr.f.y, fr.f.w, fr.f.h, drawX - view.x, drawY - view.y, { flipX: !!inst.flipX, opacity: 1 });
           if (inst.flipX) {
             ctx.save();
-            ctx.translate(inst.x + fr.f.w, inst.y);
+            ctx.translate(drawX + fr.f.w, drawY);
             ctx.scale(-1, 1);
             ctx.drawImage(fr.a.img, fr.f.x, fr.f.y, fr.f.w, fr.f.h, 0, 0, fr.f.w, fr.f.h);
             ctx.restore();
-          } else ctx.drawImage(fr.a.img, fr.f.x, fr.f.y, fr.f.w, fr.f.h, inst.x, inst.y, fr.f.w, fr.f.h);
+          } else ctx.drawImage(fr.a.img, fr.f.x, fr.f.y, fr.f.w, fr.f.h, drawX, drawY, fr.f.w, fr.f.h);
         } else if (obj?.text !== undefined) {
           const r = previewText(obj.text, obj, scene.variables);
           if (r.error) {
@@ -428,6 +454,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     });
     items.sort((a, b) => a.z - b.z || a.o - b.o);
     for (const it of items) it.d();
+    relief?.r.endRelief();
 
     if (atm && view.w > 0 && view.h > 0) {
       // Viewport passes: the visible area is the screen (camera at its top-left, zoom 1).
@@ -452,7 +479,18 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       ctx.clip();
       drawClouds(world, r, atm, view.x, view.y, 1);
       motes.draw(r, view.x, view.y, 1);
-      postProcess(world, r, atm, view.x, view.y, 1);
+      if (relief) {
+        // The picture so far, at game resolution; lit there and painted back at the editor's zoom.
+        relief.g.imageSmoothingEnabled = false;
+        relief.g.globalCompositeOperation = 'copy';
+        relief.g.drawImage(canvas, (panX + view.x * zoom) * dpr, (panY + view.y * zoom) * dpr, view.w * zoom * dpr, view.h * zoom * dpr, 0, 0, view.w, view.h);
+        relief.g.globalCompositeOperation = 'source-over';
+        postProcess(world, relief.r, atm, view.x, view.y, 1);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(relief.canvas, 0, 0, view.w, view.h);
+      } else postProcess(world, r, atm, view.x, view.y, 1);
       ctx.restore();
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';

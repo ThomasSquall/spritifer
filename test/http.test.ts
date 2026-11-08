@@ -62,9 +62,29 @@ describe('editor HTTP API', () => {
 
   it('imports a spritesheet PNG sliced into frames', async () => {
     const img = { width: 8, height: 4, data: new Uint8ClampedArray(8 * 4 * 4).fill(200) };
-    const res = await api('/api/import', json({ name: 'strip', png: encodePng(img).toString('base64'), frameWidth: 4, frameHeight: 4 }));
+    const res = await api('/api/import', json({ name: 'strip', png: encodePng(img).toString('base64'), frameWidth: 4, frameHeight: 4, category: 'effects' }));
     expect(res.status).toBe(201);
     expect(ws.load('strip').frames).toHaveLength(2);
+    expect(ws.load('strip').category).toBe('effects');
+  });
+
+  it('keeps the gallery category independent of animation tags and stale drawing saves', async () => {
+    const route = '/api/sprites/categorized';
+    expect((await api('/api/sprites', json({ name: 'categorized', width: 16, height: 16, category: 'characters' }))).status).toBe(201);
+    const stale = ws.readRaw('categorized');
+    stale.tags.push({ name: 'idle', from: 0, to: 0, direction: 'forward', color: '#ffffff' });
+
+    expect((await api(route + '/category', json({ category: 'unknown' }, 'PUT'))).status).toBe(400);
+    expect((await api(route + '/category', json({ category: 'props' }, 'PUT'))).status).toBe(200);
+    expect((await api(route, json(stale, 'PUT'))).status).toBe(200);
+    expect(await (await api('/api/sprites')).json()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'categorized', category: 'props', tags: ['idle'] }),
+    ]));
+    expect((await api(route + '/duplicate', json({ to: 'categorized_copy' }))).status).toBe(201);
+    expect(ws.load('categorized_copy').category).toBe('props');
+
+    expect((await api(route + '/category', json({ category: null }, 'PUT'))).status).toBe(200);
+    expect(ws.readRaw('categorized').category).toBeNull();
   });
 
   it('notifies websocket clients when a sprite file changes on disk', async () => {

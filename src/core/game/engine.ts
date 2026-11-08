@@ -8,13 +8,14 @@ import { ACTION_MAP, BEHAVIOR_MAP, CONDITION_MAP, TRIGGER_MAP, withDefaults } fr
 import { type ExprContext, MATH_FUNCTIONS, compile, fmt, parseTarget, toNum, truthy } from './expr.js';
 import { measureText } from './font.js';
 import { type Behavior, type ComponentOverrides, type DataRow, type DataTable, type EventStep, type GameBundle, type GameEvent, type GameProject, type Hitbox, type Instance, type LightDef, type ObjectType, type Scene, type SpriteAsset, type Value, cellValue } from './types.js';
-import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, fieldsOf, wrapText } from './script.js';
+import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, fieldsOf, scaledRenderer, wrapText } from './script.js';
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
 import { resolveObjectTypes } from './variants.js';
 import { ParticleSystem } from './particles.js';
 import { type VfxAnchor, type VfxPoint, VfxSystem } from './vfx.js';
 import { TileResolver, tilesetFrame } from './tilerules.js';
 import { MoteField, type ScreenLight, drawClouds, drawShadows, postProcess } from './atmosphere.js';
+import type { ResolvedRelief } from './relief.js';
 
 export const STEP = 1 / 60;
 
@@ -98,6 +99,8 @@ export class Actor {
   frameTime = 0;
   /** Behaviors don't change the animation until this time (Infinity = until it ends). */
   animLock = 0;
+  /** Stops on the last frame of the animation instead of looping (dialogue poses). */
+  holdLast = false;
   flipX = false;
   visible = true;
   opacity = 1;
@@ -497,7 +500,7 @@ export class World {
     this.sceneTimers.clear();
     this.message = null;
     this.shake = { until: 0, intensity: 0, duration: 0 };
-    this.camera = { x: 0, y: 0, zoom: 1 };
+    this.camera = { x: 0, y: 0, zoom: this.uiScale };
     this.paused = false;
     this.particles?.clear();
     this.vfx?.clear();
@@ -1163,7 +1166,7 @@ export class World {
     const players = this.actors.filter((a) => !a.destroyed && a.behaviors.some((b) => (b.type === 'topdown' || b.type === 'platformer') && b.controls !== false));
     for (const p of players) {
       const b = p.box();
-      const reach = 8;
+      const reach = this.scene.tileSize / 2;
       const dir = p.behavior('topdown') ? p.facing : p.flipX ? 'left' : 'right';
       const probe = {
         x: b.x - (dir === 'left' ? reach : 1),
@@ -1623,7 +1626,8 @@ export class World {
           break;
         }
         case 'topdown': {
-          const speed = toNum(b.speed);
+          const running = b.controls !== false && toNum(b.runSpeed) > 0 && this.key('shift');
+          const speed = running ? toNum(b.runSpeed) : toNum(b.speed);
           if (b.controls !== false) {
             let dx = (this.key('right') ? 1 : 0) - (this.key('left') ? 1 : 0);
             let dy = (this.key('down') ? 1 : 0) - (this.key('up') ? 1 : 0);
@@ -1641,7 +1645,9 @@ export class World {
           const f = a.facing;
           const hasDirTags = a.hasTag(`walk_${f}`) || a.hasTag(`idle_${f}`);
           if (!hasDirTags && (f === 'left' || f === 'right')) a.flipX = f === 'left';
-          this.pickAnim(a, moving ? [`walk_${f}`, `run_${f}`, 'walk', 'run', `idle_${f}`, 'idle'] : [`idle_${f}`, 'idle']);
+          // Sprites without run animations (yet) keep walking at the run speed.
+          const gait = running ? [`run_${f}`, `walk_${f}`, 'run', 'walk'] : [`walk_${f}`, `run_${f}`, 'walk', 'run'];
+          this.pickAnim(a, moving ? [...gait, `idle_${f}`, 'idle'] : [`idle_${f}`, 'idle']);
           break;
         }
         case 'bullet': {
@@ -1784,12 +1790,28 @@ export class World {
       if (a.frameTime < dur) break;
       a.frameTime -= dur;
       a.seqIdx++;
+      if (a.seqIdx >= seq.length && a.holdLast) {
+        a.seqIdx = seq.length - 1;
+        break;
+      }
       if (a.seqIdx >= seq.length) {
         a.seqIdx = 0;
         a.flags.animEnd = a.anim;
         if (a.animLock === Infinity) a.animLock = 0;
       }
     }
+  }
+
+  /** Canvas pixels per interface pixel. */
+  get uiScale(): number {
+    return this.game.uiScale ?? 1;
+  }
+  /** The screen in interface pixels: what scripts and dialogs lay out against. */
+  get screenWidth(): number {
+    return this.game.width / this.uiScale;
+  }
+  get screenHeight(): number {
+    return this.game.height / this.uiScale;
   }
 
   /** Visible world size (the screen divided by the zoom). */
@@ -1807,7 +1829,7 @@ export class World {
   private updateCamera(snap: boolean): void {
     const auto = this.actors.find((a) => !a.destroyed && a.behavior('camera'));
     if (snap && auto) {
-      const z = toNum(auto.behavior('camera')!.zoom ?? 1);
+      const z = toNum(auto.behavior('camera')!.zoom ?? this.uiScale);
       if (z > 0) this.camera.zoom = z;
     }
     const vw = this.viewWidth;
@@ -1871,8 +1893,8 @@ export class World {
 
   private clickHits(a: Actor): boolean {
     for (const [cx, cy] of this.input.clicks) {
-      const wx = a.type.hud ? cx : cx / this.zoom + this.camera.x;
-      const wy = a.type.hud ? cy : cy / this.zoom + this.camera.y;
+      const wx = a.type.hud ? cx / this.uiScale : cx / this.zoom + this.camera.x;
+      const wy = a.type.hud ? cy / this.uiScale : cy / this.zoom + this.camera.y;
       const b = a.box();
       if (wx >= b.x && wx < b.x + b.w && wy >= b.y && wy < b.y + b.h) return true;
     }
@@ -2247,8 +2269,8 @@ export class World {
         case 'time': return this.time;
         case 'dt': return STEP;
         case 'frame': return this.frame;
-        case 'width': return this.game.width;
-        case 'height': return this.game.height;
+        case 'width': return this.screenWidth;
+        case 'height': return this.screenHeight;
         case 'mouseX': return this.input.pointer ? this.input.pointer[0] / this.zoom + this.camera.x : 0;
         case 'mouseY': return this.input.pointer ? this.input.pointer[1] / this.zoom + this.camera.y : 0;
         default: return undefined;
@@ -2387,12 +2409,20 @@ export class World {
 export interface Renderer {
   clear(color: string): void;
   /** Draws part of a sprite's spritesheet. */
-  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, opts: { flipX: boolean; opacity: number; angle: number; scale?: number }): void;
+  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, opts: { flipX: boolean; opacity: number; angle: number; scale?: number; flat?: boolean }): void;
   /** blend "add" adds light instead of painting over (glows). */
   rect(x: number, y: number, w: number, h: number, color: string, alpha?: number, blend?: 'add'): void;
   text(text: string, x: number, y: number, color: string, scale: number): void;
   /** Multiplies the frame by the ambient color plus the lights, then adds their glow (scene atmosphere). */
   lighting?(ambient: string, lights: ScreenLight[], glow: number): void;
+  /** Starts (or skips) recording sprite normals for this frame's reliefLighting. */
+  beginRelief?(on: boolean, tiles?: boolean): void;
+  /** Stops recording: what is drawn from now on doesn't change the normals (clouds, particles). */
+  endRelief?(): void;
+  /** Like lighting, but per pixel: lights and the sun shape the sprites with their normal maps. */
+  reliefLighting?(relief: ResolvedRelief, ambient: string, lights: ScreenLight[], glow: number): void;
+  /** Which pixels of a sprite frame are solid (1 per pixel, row by row), or null when it stays flat. */
+  spriteMask?(sprite: string, x: number, y: number, w: number, h: number): Uint8Array | null;
   /** Soft-light color grade over the frame. */
   grade?(tint: string, amount: number): void;
   /** Darkens the screen edges. */
@@ -2408,6 +2438,7 @@ export function renderWorld(w: World, r: Renderer): void {
   const vw = w.game.width;
   const vh = w.game.height;
   r.clear(scene.background || w.game.background);
+  r.beginRelief?.(!!scene.atmosphere?.relief, scene.atmosphere?.relief?.tiles !== false);
   const zoom = w.zoom;
   // Screen position of a world coordinate (round after zooming so zoomed pixels stay aligned).
   const zx = (v: number) => Math.round(v * zoom);
@@ -2460,7 +2491,8 @@ export function renderWorld(w: World, r: Renderer): void {
         const x1 = Math.min(scene.cols - 1, Math.floor((lx + vw / zoom) / ts));
         const y1 = Math.min(scene.rows - 1, Math.floor((ly + vh / zoom) / ts));
         const resolver = w.tileResolver(tileset.name);
-        const opts = img((ts / grid.width) || 1);
+        // The ground stays clean: only walls and other solid layers take the light as relief.
+        const opts = { ...img((ts / grid.width) || 1), flat: !layer.solid };
         const draw: number[] = [];
         for (let ty = y0; ty <= y1; ty++) {
           for (let tx = x0; tx <= x1; tx++) {
@@ -2496,6 +2528,7 @@ export function renderWorld(w: World, r: Renderer): void {
   });
   items.sort((p, q) => p.z - q.z || p.order - q.order);
   for (const it of items) it.draw();
+  r.endRelief?.();
   if (atm) {
     drawClouds(w, r, atm, camX, camY, zoom);
     w.motes.draw(r, camX, camY, zoom);
@@ -2507,32 +2540,35 @@ export function renderWorld(w: World, r: Renderer): void {
     w.vfx.drawScreen(r, vw, vh);
   }
   hud.sort((p, q) => p.z - q.z);
-  for (const a of hud) drawActor(w, r, a, 0, 0);
+  const screen = scaledRenderer(r, w.uiScale);
+  const sw = w.screenWidth;
+  const sh = w.screenHeight;
+  for (const a of hud) drawActor(w, screen, a, 0, 0);
   w.scripts.draw(r, camX, camY, zoom);
 
   if (w.message && w.clock < w.message.until) {
     const m = measureText(w.message.text);
-    const s = m.width * 2 + 16 <= vw ? 2 : 1;
+    const s = m.width * 2 + 16 <= sw ? 2 : 1;
     const bw = m.width * s + 12;
     const bh = m.height * s + 12;
-    const bx = Math.round((vw - bw) / 2);
-    const by = Math.round(vh - bh - 8);
-    r.rect(bx, by, bw, bh, '#000000', 0.75);
-    r.rect(bx, by, bw, 1, '#ffffff', 0.5);
-    r.rect(bx, by + bh - 1, bw, 1, '#ffffff', 0.5);
-    r.text(w.message.text, bx + 6, by + 6, '#ffffff', s);
+    const bx = Math.round((sw - bw) / 2);
+    const by = Math.round(sh - bh - 8);
+    screen.rect(bx, by, bw, bh, '#000000', 0.75);
+    screen.rect(bx, by, bw, 1, '#ffffff', 0.5);
+    screen.rect(bx, by + bh - 1, bw, 1, '#ffffff', 0.5);
+    screen.text(w.message.text, bx + 6, by + 6, '#ffffff', s);
   }
   const fa = w.fadeAlpha;
   if (fa > 0) r.rect(0, 0, vw, vh, w.fade.color, fa);
-  drawDialog(w, r);
+  drawDialog(w, screen);
 }
 
 /** RPG-style dialog box with typewriter text, speaker name, portrait and choices. */
 function drawDialog(w: World, r: Renderer): void {
   const d = w.scripts.dialog;
   if (!d) return;
-  const vw = w.game.width;
-  const vh = w.game.height;
+  const vw = w.screenWidth;
+  const vh = w.screenHeight;
   const portrait = d.portrait ? w.bundle.sprites[d.portrait] : undefined;
   const pad = 6;
   const pw = portrait ? Math.min(portrait.width, 48) + pad : 0;
@@ -2587,8 +2623,9 @@ function drawDialog(w: World, r: Renderer): void {
 function drawActor(w: World, r: Renderer, a: Actor, camX: number, camY: number, zoom = 1): void {
   if (!a.visible || a.destroyed) return;
   if (a.flashUntil > w.clock && Math.floor(w.clock * 12) % 2 === 0) return;
-  const x = Math.round((a.x - camX) * zoom);
-  const y = Math.round((a.y - camY) * zoom);
+  const offset = a.asset ? a.type.spriteOffset : undefined;
+  const x = Math.round((a.x + (offset?.x ?? 0) - camX) * zoom);
+  const y = Math.round((a.y + (offset?.y ?? 0) - camY) * zoom);
   if (a.asset && a.asset.frames.length) {
     const f = a.asset.frames[a.frameIndex()] ?? a.asset.frames[0];
     if (x + f.w * zoom < -8 || y + f.h * zoom < -8 || x > w.game.width + 8 || y > w.game.height + 8) return;

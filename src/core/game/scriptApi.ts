@@ -129,7 +129,7 @@ export const UI_MEMBERS: ApiEntry[] = [
   method('rect', 'rect(x: number, y: number, w: number, h: number, color: string, alpha?: number): void', 'Filled rectangle.'),
   method('panel', 'panel(x: number, y: number, w: number, h: number, opts?: { color?: string; border?: string; alpha?: number }): void', 'Box with a border (menus, HUD backgrounds).'),
   method('bar', 'bar(x: number, y: number, w: number, h: number, value: number, max: number, color?: string, back?: string): void', 'Progress / health bar.'),
-  method('sprite', 'sprite(name: string, x: number, y: number, opts?: { frame?: number; animation?: string; flipX?: boolean; opacity?: number; scale?: number }): void', 'Draws a sprite (icons, portraits).', "sprite('$0')"),
+  method('sprite', 'sprite(name: string, x: number, y: number, opts?: { frame?: number; animation?: string; elapsed?: number; flipX?: boolean; opacity?: number; scale?: number }): void', 'Draws a sprite (icons, portraits).', "sprite('$0')"),
   method('measure', 'measure(text: string, size?: number): { width: number; height: number }', 'Size of a text in pixels.'),
   method('toScreen', 'toScreen(x: number, y: number): { x: number; y: number }', 'World position → screen position (draw over an instance).'),
   prop('shake', 'readonly shake: { x: number; y: number }', 'Screen shake right now in pixels: add it to what you draw so hand-drawn scenes shake too.'),

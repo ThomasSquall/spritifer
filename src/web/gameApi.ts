@@ -112,7 +112,7 @@ export const gameApi = {
   createProject: (name: string, template: string) => req<ProjectInfo>('POST', '/api/projects', { name, template }),
   openProject: (dir: string) => req<ProjectInfo>('POST', '/api/projects/open', { dir }),
   forgetProject: (id: string) => req<{ ok: true }>('DELETE', `/api/projects/${enc(id)}`),
-  playUrl: (scene?: string, debug = false) => `${apiBase()}/game/play.html?${scene ? `scene=${enc(scene)}&` : ''}${debug ? 'debug=1&' : ''}t=${Date.now()}`,
+  playUrl: (scene?: string, debug = false) => `${apiBase()}/game/play.html?${scene ? `scene=${enc(scene)}&` : ''}${debug ? 'debug=1&' : ''}${new URLSearchParams(location.search).has('nomusic') ? 'nomusic=1&' : ''}t=${Date.now()}`,
   downloadUrl: () => `${apiBase()}/game/export.html?download=1`,
 };
 
@@ -124,6 +124,7 @@ export interface LoadedAsset extends SpriteAsset {
 interface SheetJson {
   frames: { frame: { x: number; y: number; w: number; h: number }; duration: number }[];
   meta: { frameTags: { name: string; from: number; to: number; direction: string }[] };
+  relief?: SpriteAsset['relief'];
 }
 
 const cache = new Map<string, Promise<LoadedAsset>>();
@@ -153,6 +154,7 @@ export function loadAsset(name: string, rev: string, info: { width: number; heig
         grid: info.grid ?? null,
         frames: meta.frames.map((f) => ({ ...f.frame, duration: f.duration })),
         tags: meta.meta.frameTags.map((t) => ({ name: t.name, from: t.from, to: t.to, direction: t.direction as 'forward' })),
+        ...(meta.relief ? { relief: meta.relief } : {}),
       };
     })();
     cache.set(key, p);

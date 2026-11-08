@@ -1,4 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { type Bitmap, type PoseGuide, type Sprite, compositeFrame, compositeInto, createSprite, getCel, tagSequence } from '../core/sprite.js';
 import { parseColor } from '../core/color.js';
@@ -16,6 +18,22 @@ export interface ImportOptions {
 }
 
 /** Creates a sprite from a PNG; a spritesheet is sliced into frames when a frame size is given. */
+/** Reads a picture as a bitmap: PNG directly, other formats (WebP, JPEG) through the system converter on macOS. */
+export function readPicture(file: string): Bitmap {
+  const full = path.resolve(file);
+  const data = fs.readFileSync(full);
+  if (data.subarray(1, 4).toString('latin1') === 'PNG') return decodePng(data);
+  if (process.platform !== 'darwin') throw new Error(`${path.basename(full)} is not a PNG: convert it first`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spritifer-art-'));
+  try {
+    const out = path.join(dir, 'picture.png');
+    execFileSync('/usr/bin/sips', ['-s', 'format', 'png', full, '--out', out], { stdio: 'ignore' });
+    return decodePng(fs.readFileSync(out));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 export function spriteFromPng(name: string, png: Buffer, opts: ImportOptions = {}): Sprite {
   const img = decodePng(png);
   const fw = opts.frameWidth ?? img.width;

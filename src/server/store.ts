@@ -2,9 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   type Sprite,
+  type SpriteCategory,
   type SpriteFile,
   assertValidName,
   deserializeSprite,
+  isSpriteCategory,
   newId,
   serializeSprite,
 } from '../core/sprite.js';
@@ -28,6 +30,7 @@ export interface SpriteSummary {
   frames: number;
   layers: number;
   tags: string[];
+  category: SpriteCategory | null;
   grid: { width: number; height: number } | null;
   updatedAt: number;
   rev: string;
@@ -67,6 +70,8 @@ export class Workspace {
           frames: json.frames.length,
           layers: json.layers.length,
           tags: (json.tags ?? []).map((t) => t.name),
+          category: json.category === null || isSpriteCategory(json.category) ? json.category
+            : json.rig || json.pixelLabCharacterId ? 'characters' : json.grid ? 'tileset' : null,
           grid: json.grid ?? null,
           updatedAt: fs.statSync(full).mtimeMs,
           rev: json.rev,
@@ -92,17 +97,34 @@ export class Workspace {
   }
 
   /** Writes atomically and assigns a fresh revision. */
-  save(sprite: Sprite, updatedBy = 'unknown'): string {
+  save(sprite: Sprite, updatedBy = 'unknown', overwrite = true): string {
     sprite.rev = newId();
-    this.writeRaw(serializeSprite(sprite, updatedBy));
+    this.writeRaw(serializeSprite(sprite, updatedBy), overwrite);
     return sprite.rev;
   }
 
-  writeRaw(file: SpriteFile): void {
+  writeRaw(file: SpriteFile, overwrite = true): void {
     const target = this.file(file.name);
     const tmp = path.join(this.dir, `.${file.name}.${process.pid}.tmp`);
     fs.writeFileSync(tmp, JSON.stringify(file));
-    fs.renameSync(tmp, target);
+    if (overwrite) {
+      fs.renameSync(tmp, target);
+      return;
+    }
+    try {
+      fs.linkSync(tmp, target);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`Sprite "${file.name}" already exists`);
+      throw err;
+    } finally {
+      fs.unlinkSync(tmp);
+    }
+  }
+
+  setSpriteCategory(name: string, category: SpriteCategory | null): void {
+    const file = this.readRaw(name);
+    if (file.category === category) return;
+    this.writeRaw({ ...file, category, rev: newId(), updatedBy: 'editor' });
   }
 
   remove(name: string): void {

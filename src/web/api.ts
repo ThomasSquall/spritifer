@@ -1,4 +1,5 @@
-import type { SpriteFile } from '../core/sprite.js';
+import type { PixelLabCharacter } from '../core/pixellab.js';
+import type { CreateSpriteOptions, SpriteCategory, SpriteFile } from '../core/sprite.js';
 import type { SheetOptions } from '../core/sheet.js';
 
 export interface SpriteSummary {
@@ -8,6 +9,7 @@ export interface SpriteSummary {
   frames: number;
   layers: number;
   tags: string[];
+  category: SpriteCategory | null;
   grid: { width: number; height: number } | null;
   updatedAt: number;
   rev: string;
@@ -46,16 +48,36 @@ export function currentProjectId(): string | null {
 }
 
 export const api = {
+  pixelLab: {
+    config: (base: string) => req<{ configured: boolean }>('GET', `${base}/pixellab/config`),
+    create: (base: string, body: { name: string; description: string; size: number; view: string; reference?: { mode: string; png: string } }) =>
+      req<{ character_id: string; background_job_id: string }>('POST', `${base}/pixellab/create`, body),
+    character: (base: string, id: string) => req<PixelLabCharacter>('GET', `${base}/pixellab/character/${enc(id)}`),
+    job: (base: string, id: string) => req<{ status: string }>('GET', `${base}/pixellab/job/${enc(id)}`),
+    animate: (base: string, body: { id: string; action: string; description?: string }) =>
+      req<{ background_job_ids: string[]; animation_group_id?: string | null }>('POST', `${base}/pixellab/animate`, body),
+    preview: (base: string, body: { id: string; name: string; animations: { action: string; groupId: string }[] }) =>
+      req<SpriteFile>('POST', `${base}/pixellab/preview`, body),
+    import: (base: string, file: SpriteFile) => req<{ name: string; rev: string }>('POST', `${base}/pixellab/import`, file),
+    image: (base: string, body: Record<string, unknown>) => req<{ name: string; rev: string }>('POST', `${base}/pixellab/image`, body),
+    tileset: (base: string, body: Record<string, unknown>) =>
+      req<{ tileset_id: string; background_job_id: string; name: string }>('POST', `${base}/pixellab/tileset`, body),
+    importTileset: (base: string, body: { id: string; name: string }) =>
+      req<{ name: string; rev: string }>('POST', `${base}/pixellab/tileset-import`, body),
+  },
   workspace: () => req<{ dir: string; exportDir: string }>('GET', `${apiBase()}/workspace`),
   list: () => req<SpriteSummary[]>('GET', `${apiBase()}/sprites`),
   get: (name: string) => req<SpriteFile>('GET', `${apiBase()}/sprites/${enc(name)}`),
   save: (file: SpriteFile) => req<{ rev: string }>('PUT', `${apiBase()}/sprites/${enc(file.name)}`, file),
-  create: (body: { name: string; width: number; height: number; palette?: string; grid?: { width: number; height: number } | null }) =>
+  create: (body: CreateSpriteOptions) =>
     req<{ name: string; rev: string }>('POST', `${apiBase()}/sprites`, body),
+  setCategory: (name: string, category: SpriteCategory | null) =>
+    req<{ ok: true }>('PUT', `${apiBase()}/sprites/${enc(name)}/category`, { category }),
   remove: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/sprites/${enc(name)}`),
   rename: (name: string, to: string) => req<{ name: string; rev: string }>('POST', `${apiBase()}/sprites/${enc(name)}/rename`, { to }),
   duplicate: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/sprites/${enc(name)}/duplicate`, { to }),
-  importPng: (body: { name: string; png: string; frameWidth?: number; frameHeight?: number }) => req<{ name: string }>('POST', `${apiBase()}/import`, body),
+  importArt: (body: { sprites: { name: string; width: number; height: number; frames: string[]; tags: (string | null)[] }[]; overwrite?: boolean }) => req<{ names: string[] }>('POST', `${apiBase()}/art`, body),
+  importPng: (body: { name: string; png: string; frameWidth?: number; frameHeight?: number; category?: SpriteCategory }) => req<{ name: string }>('POST', `${apiBase()}/import`, body),
   export: (name: string, opts: SheetOptions & { byTag?: boolean }) =>
     req<{ files: { png: string; json: string; width: number; height: number; frames: number }[] }>('POST', `${apiBase()}/sprites/${enc(name)}/export`, opts),
   sheetUrl: (name: string, opts: SheetOptions, kind: 'png' | 'json', download = false) => {

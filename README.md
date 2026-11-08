@@ -50,7 +50,7 @@ node dist/server/cli.js serve --workspace examples/village
 
 ### Comportamenti
 
-`platformer` (corsa, salto con coyote time e salto variabile, animazioni `idle/run/jump/fall` automatiche), `topdown` (8 direzioni, animazioni `walk_<dir>`/`idle_<dir>` come quelle generate dal rig dei personaggi), `solid` (anche *jump-through*), `bullet`, `patrol` (gira ai muri e ai bordi), `chase`, `sine` (fluttua), `camera` (la telecamera segue), `bounded`, `wrap`, `lifetime`.
+`platformer` (corsa, salto con coyote time e salto variabile, animazioni `idle/run/jump/fall` automatiche), `topdown` (8 direzioni, corsa con Shift se `runSpeed` > 0, animazioni `walk_<dir>`/`run_<dir>`/`idle_<dir>` come quelle generate dal rig dei personaggi), `solid` (anche *jump-through*), `bullet`, `patrol` (gira ai muri e ai bordi), `chase`, `sine` (fluttua), `camera` (la telecamera segue), `bounded`, `wrap`, `lifetime`.
 
 ### Eventi
 
@@ -222,7 +222,7 @@ Il resto dell'API: `loadGame('slot1')`, `hasSave('slot1')` (per un pulsante "Con
 
 **Atmosfera e luci.** Ogni scena può avere un'**atmosfera** (MCP `update_scene` → `atmosphere`): luce ambiente moltiplicata sul mondo (`#ffffff` giorno, `#3a3c70` notte o grotta), bagliore delle luci (si attenua da solo di giorno), ombre morbide sotto le istanze, ombre di nuvole che scorrono (uno sprite ripetibile), color grading, vignettatura e particelle d'ambiente (`fireflies`, `dust`, `snow`, `embers`, `leaves`, `spores`, `bubbles`). Tipi di oggetto e istanze possono emettere luce (`light: { radius, color, intensity, flicker, pulse, x, y }`); `shadow` imposta la larghezza dell'ombra (0 = nessuna). L'interfaccia disegnata in `onDraw` resta fuori dall'illuminazione.
 
-**Regole del tileset.** In `game.json → tilesets.<tileset>` un tileset può trasformare i tile dipinti in terreno che non sembra una griglia: `grid` (una texture grande tagliata in pezzi k×k, scelti per posizione), `random` (varianti), `blob` (autotile a 47 forme dai vicini: boschi, scogliere, muri), `frames`/`fps` (tile animati: acqua, lava) e `edges` (sovrapposizioni dove un terreno tocca un altro: erba sui sentieri, schiuma sulle rive; `empty: true` conta le celle vuote come l'altro terreno). La scena salva solo il tile dipinto, quindi collisioni ed editor non cambiano; `paintable` limita la palette ai tile da dipingere. Gli sprite possono superare 2048 px su un lato (fino a 8192, entro 2048×2048 pixel totali) per i tileset generati.
+**Regole del tileset.** In `game.json → tilesets.<tileset>` un tileset può trasformare i tile dipinti in terreno che non sembra una griglia: `grid` (una texture grande tagliata in pezzi k×k, scelti per posizione), `random` (varianti), `blob` (autotile a 47 forme dai vicini: boschi, scogliere, muri), `corners` (autotile a 16 tile per due terreni, come i tileset PixelLab: la regola va sul terreno inferiore con `group` uguale ai tile dell'altro, le sue celle restano intere e la transizione si disegna su quelle vicine; `count` e `alt` alternano varianti sul terreno pieno), `frames`/`fps` (tile animati: acqua, lava) e `edges` (sovrapposizioni dove un terreno tocca un altro: erba sui sentieri, schiuma sulle rive; `empty: true` conta le celle vuote come l'altro terreno). La scena salva solo il tile dipinto, quindi collisioni ed editor non cambiano; `paintable` limita la palette ai tile da dipingere. Gli sprite possono superare 2048 px su un lato (fino a 8192, entro 2048×2048 pixel totali) per i tileset generati.
 
 **Inspector dal vivo.** Nel Play, la scheda **Inspector** accanto al Log permette di:
 
@@ -270,6 +270,7 @@ Con **Remember instances when leaving** la scena ricorda posizioni, proprietà e
 ### Play ed export per il web
 
 - **Play** apre il gioco in sovrimpressione (da tutta l'avventura o dalla scena corrente) con la console dei log ed errori, riavvio e visualizzazione delle hitbox (F2).
+- **Musica**: si toglie e si rimette a gioco avviato con il pulsante *Music* nella barra di Play, con F3 o con il pulsante ♪ che compare passando il mouse sul gioco; la scelta resta per le partite successive. Per avviare senza musica aggiungi `?nomusic` all'indirizzo del gioco (vale per quella partita; gli effetti sonori restano).
 - **Export** scrive `<workspace>/export/web/<titolo>/index.html`: **un solo file** con motore, scene e immagini incorporate. Funziona offline, su qualsiasi hosting statico e si carica su itch.io come gioco HTML5. Lo stesso file si scarica dal pulsante *Download HTML*.
 - Il runtime (~17 KB gzip) scala il gioco a pixel interi quando possibile, supporta tastiera (frecce/WASD, Spazio/Z/J, X/K, Invio), mouse, **controlli touch** su telefono e **gamepad**.
 
@@ -313,6 +314,7 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Livelli | `add_layer`, `update_layer`, `delete_layer`, `merge_layer_down` |
 | Animazione | `add_frames` (con `copy_from`), `delete_frames`, `move_frame`, `set_frame_duration`, `set_tag`, `delete_tag` |
 | Personaggi (rig) | `create_character`, `rig_part`, `rig_remove_part`, `rig_preview`, `rig_pose`, `rig_split_limbs` (gomiti, ginocchia, caviglie), `rig_finish` (giunti e contorni puliti), `rig_animate`, `rig_keyframes` (pose chiave + easing + IK), `anim_check` (misura il movimento) |
+| Luce per pixel | `update_scene` con `atmosphere.relief` (luci e sole modellano i volumi, ombre proiettate), `set_relief` (profondità e colori luminosi di uno sprite) |
 | Forme e materiali | `draw_shapes` (capsule, ellissi, poligoni, spline, linee pixel-perfect, archi per le scie), `set_ramp` (rampe hue-shifted in OKLCH, colori `nome.N`), `shade`, `selout`, `cleanup` |
 | Da concept a pixel art | `pixelize` (converte un'immagine ad alta risoluzione in pixel art pulita su un livello) |
 | Riferimento e posa | `set_reference` (ritaglio, scala, rimozione dello sfondo, palette estratta, copia su un livello), `pose_guide` (scheletro di posa), `silhouette_check` (confronto delle sagome con il riferimento) |
@@ -404,6 +406,81 @@ L'immagine diventa anche il riferimento dello sprite. Il flusso consigliato: `pi
 2. Disegna ogni tile con `draw_pixels` usando il parametro `tile: {col, row}`.
 3. Per i livelli giocabili usa una **scena** (`create_scene` + `paint_tiles`, vedi *Creare giochi*). Per un'illustrazione statica crea invece uno sprite più grande e componilo con `copy_region` (`source_sprite` = tileset, `source_tile`, più `targets`), con livelli separati per cielo, terreno e oggetti.
 
+## AI Generator (PixelLab)
+
+Copia il token API dalle impostazioni del tuo account [PixelLab](https://www.pixellab.ai/).
+Salvalo come `PIXELLAB_API_KEY` in `.env.local` nella cartella del repository.
+Con Node.js 20.12 o successivo, `npm start` e `spritifer mcp` caricano
+automaticamente il file se presente nella cartella da cui partono. Una
+variabile già impostata nell'ambiente ha la precedenza.
+
+```bash
+npm run build
+npm start -- --workspace /percorso/al/progetto
+```
+
+Apri l'editor locale all'indirizzo http://localhost:7420. Il token rimane nel
+processo server. Tienilo fuori da `.mcp.json`, dai file del progetto e dalle
+variabili `VITE_*`. Riavvia il processo dopo averla impostata.
+
+Per un'immagine singola (oggetto, tile, icona, sfondo) usa **Generate an image**:
+scegli dimensioni, modello e stile. Il risultato diventa un nuovo sprite e si
+apre nell'editor. Via MCP lo stesso comando è `pixellab_generate_image`, e
+`pixellab_balance` mostra i crediti rimasti. `style_sprite` (solo bitforge) e
+`palette_sprite` usano il primo frame di uno sprite del progetto per mantenere
+lo stile del gioco.
+
+Per il terreno usa **Generate a tileset**: descrivi il terreno base e quello
+sovrapposto, e PixelLab genera 16 tile con tutte le transizioni, senza giunzioni
+visibili. In modalità `pro` costa circa 15 generazioni e accetta 16, 32 o 64 px,
+la vista e una palette presa da uno sprite del progetto. Il risultato è uno
+sprite 4×4 con griglia: il numero del tile vale 8 se l'angolo NW è sul terreno
+sovrapposto, più 4 per NE, 2 per SW e 1 per SE. Via MCP usa
+`pixellab_create_tileset`, controlla `pixellab_job` e chiudi con
+`pixellab_import_tileset`, che recupera un tileset già generato anche per ID.
+Per usarlo nelle scene aggiungi la regola `corners` (`tile: 0`, `first: 0`,
+`group: [15]`) e dipingi con i tile 0 e 15.
+
+Per un personaggio animato:
+
+1. In **Sprites → AI Generator**, inserisci un nome per lo sprite,
+   la descrizione, la dimensione e l'angolazione. Puoi caricare un PNG di
+   concept art (anche una tavola, ridotta dal server a un massimo di 1024 px
+   per lato) oppure un singolo sprite trasparente rivolto verso sud (massimo
+   256 px per lato, alla risoluzione originale).
+2. **Generate character** crea otto viste e restituisce un ID PixelLab.
+   **Load / refresh** riapre lo stesso personaggio a partire dall'ID anche in
+   un'altra sessione. L'editor ricorda l'ultimo ID per progetto nel browser e
+   lo sprite importato conserva il campo `pixelLabCharacterId`.
+3. Usa **Generate action** per creare a scelta idle, walk, run, attack, hurt,
+   death o interact. Ogni richiesta genera quattro frame per direzione con
+   un'azione descritta in testo. La generazione delle viste e delle clip usa
+   crediti PixelLab. Puoi scegliere quali gruppi completi includere.
+4. **Preview selected clips** verifica i PNG, la presenza di pixel
+   trasparenti e visibili, le dimensioni e il numero di frame. L'import
+   allinea le viste sui piedi delle pose ferme, usa un canvas comune e
+   preserva lo spostamento dei frame dentro ogni clip. Guarda l'anteprima
+   per controllare la pulizia dello sfondo e la coerenza del personaggio.
+   **Import into Spritifer** salva esattamente i frame dell'anteprima in
+   un nuovo file `*.sprite.json` con livello e tag modificabili.
+
+Le pose ferme forniscono `idle_down`, `idle_up`, ecc. Se importi un idle
+animato, le pose ferme ricevono il prefisso `rest_`. I tag diagonali
+come `walk_up_right` sono utilizzabili nell'editor e da script. Il
+comportamento top-down del runtime seleziona automaticamente le quattro
+direzioni cardinali.
+
+Via MCP, usa `pixellab_create_character`, `pixellab_job`,
+`pixellab_character`, `pixellab_animate_character` e
+`pixellab_import_character`. Passa i gruppi scelti come
+`{ action, groupId }` e usa `previewOnly: true` per validare senza salvare.
+Via MCP puoi passare la reference come file (`reference_path`, con
+`reference_crop`) e dare lo stile con `style_sprite`. `action` può essere un nome
+tuo (`kneel`, `pose_pensieroso`) con una `description`; `directions` limita le
+direzioni pagate e `mode: "pixminimax"` con `frames` multiplo di 4 dà di solito
+il movimento migliore. In import, `directions` e `duration` valgono per clip.
+Vedi il [contratto API PixelLab v2](https://api.pixellab.ai/v2/docs).
+
 ## Editor
 
 - Strumenti: matita (B), gomma (E), riempimento (G), contagocce (I), linea (L), rettangolo (R), ellisse (O), sposta (M). Click sinistro/destro = colore primario/secondario, Alt+click = preleva colore.
@@ -448,6 +525,7 @@ Sono JSON leggibili e versionabili. L'editor e il server MCP leggono e scrivono 
 ```bash
 npm test            # test di core, motore di gioco, server MCP e API HTTP
 npm run typecheck
+npm run dev         # server su :7420 che si ricompila e riavvia da solo quando cambia il codice
 npm run dev:web     # Vite con hot reload (richiede `npm start` per l'API)
 ```
 

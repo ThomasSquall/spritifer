@@ -1,12 +1,14 @@
+import { PixelLabProvider } from './pixellab.js';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { type SpriteFile, createSprite, deserializeSprite, newId } from '../core/sprite.js';
+import { type CreateSpriteOptions, type SpriteCategory, type SpriteFile, createSprite, deserializeSprite, isSpriteCategory, newId, serializeSprite } from '../core/sprite.js';
 import { type SheetLayout, type SheetOptions, buildSpritesheet } from '../core/sheet.js';
 import { encodePng } from './png.js';
 import { exportSpritesheet, previewPng, spriteFromPng } from './ops.js';
+import { spriteFromArt } from '../core/artImport.js';
 import type { Workspace } from './store.js';
 import { ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
 import { assertIdentifier, createScene, normalizeGame, normalizeScene, normalizeTable } from '../core/game/types.js';
@@ -185,6 +187,52 @@ async function handleProjects(registry: ProjectRegistry, req: http.IncomingMessa
 
 async function handle(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[], url: URL, method: string): Promise<void> {
 
+  if (parts[1] === 'pixellab') {
+    // This local-only API can spend the account's credits. Reject remote hosts and browser cross-origin requests.
+    const loopback = /^(localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?$/i;
+    const peer = req.socket.remoteAddress;
+    const origin = req.headers.origin;
+    if ((peer !== '127.0.0.1' && peer !== '::1' && peer !== '::ffff:127.0.0.1') ||
+        !loopback.test(req.headers.host ?? '') ||
+        (origin && origin !== `http://${req.headers.host}`) ||
+        (req.headers['sec-fetch-site'] && !['none', 'same-origin'].includes(req.headers['sec-fetch-site']))) {
+      throw new HttpError(403, 'PixelLab is available only from the local Spritifer editor');
+    }
+    const provider = new PixelLabProvider();
+    const operation = parts[2];
+    if (method === 'GET') {
+      if (operation === 'config') return sendJson(res, 200, { configured: provider.configured });
+      if (operation === 'character') return sendJson(res, 200, await provider.describe(parts[3]));
+      if (operation === 'job') return sendJson(res, 200, await provider.job(parts[3]));
+    }
+    if (method === 'POST') {
+      if (req.headers['content-type']?.split(';')[0] !== 'application/json') throw new HttpError(415, 'Expected JSON');
+      const body = await readJson(req, operation === 'import' ? undefined : 17 * 1024 * 1024);
+      if (operation === 'create') return sendJson(res, 202, await provider.create(body));
+      if (operation === 'animate') return sendJson(res, 202, await provider.animate(body));
+      if (operation === 'preview') return sendJson(res, 200, serializeSprite(await provider.sprite(body)));
+      if (operation === 'image') {
+        const { sprite, usage } = await provider.generateImage(ws, body);
+        ws.save(sprite, 'pixellab', false);
+        return sendJson(res, 201, { name: sprite.name, rev: sprite.rev, usage });
+      }
+      if (operation === 'tileset') return sendJson(res, 202, await provider.createTileset(ws, body));
+      if (operation === 'tileset-import') {
+        const sprite = await provider.tilesetSprite(ws, body);
+        ws.save(sprite, 'pixellab', false);
+        return sendJson(res, 201, { name: sprite.name, rev: sprite.rev });
+      }
+      if (operation === 'import') {
+        const sprite = deserializeSprite(body as SpriteFile);
+        if (!sprite.pixelLabCharacterId) throw new HttpError(400, 'Expected a PixelLab preview');
+        if (ws.exists(sprite.name)) throw new HttpError(409, `Sprite "${sprite.name}" already exists`);
+        ws.save(sprite, 'pixellab', false);
+        return sendJson(res, 201, { name: sprite.name, rev: sprite.rev });
+      }
+    }
+    throw new HttpError(404, 'PixelLab operation not found');
+  }
+
   // /api/workspace
   if (parts[1] === 'workspace' && method === 'GET') {
     return sendJson(res, 200, { dir: ws.dir, exportDir: ws.exportDir });
@@ -192,11 +240,30 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
 
   // /api/import  { name, png (base64), frameWidth?, frameHeight?, overwrite? }
   if (parts[1] === 'import' && method === 'POST') {
-    const body = (await readJson(req)) as { name: string; png: string; frameWidth?: number; frameHeight?: number; overwrite?: boolean };
+    const body = (await readJson(req)) as { name: string; png: string; frameWidth?: number; frameHeight?: number; overwrite?: boolean; category?: SpriteCategory | null };
+    if (body.category != null && !isSpriteCategory(body.category)) throw new HttpError(400, 'Unknown sprite category');
     if (ws.exists(body.name) && !body.overwrite) throw new HttpError(409, `Sprite "${body.name}" already exists`);
     const sprite = spriteFromPng(body.name, Buffer.from(body.png, 'base64'), body);
+    sprite.category = body.category;
+    if (sprite.category === undefined && body.overwrite && ws.exists(body.name)) {
+      sprite.category = ws.readRaw(body.name).category;
+    }
     ws.save(sprite, 'editor');
     return sendJson(res, 201, { name: sprite.name, rev: sprite.rev });
+  }
+
+  // /api/art  { sprites: [{ name, width, height, frames: [base64 RGBA], tags }], overwrite? }: art cleaned in the browser.
+  if (parts[1] === 'art' && method === 'POST') {
+    const body = (await readJson(req)) as { sprites: { name: string; width: number; height: number; frames: string[]; tags: (string | null)[] }[]; overwrite?: boolean };
+    const taken = body.sprites.filter((s) => ws.exists(s.name)).map((s) => s.name);
+    if (taken.length && !body.overwrite) throw new HttpError(409, `Already exist: ${taken.join(', ')}`);
+    for (const s of body.sprites) {
+      const frames = s.frames.map((f) => ({ width: s.width, height: s.height, data: new Uint8ClampedArray(Buffer.from(f, 'base64')) }));
+      const sprite = spriteFromArt({ sprite: s.name, width: s.width, height: s.height, frames, tags: s.tags.map((t) => t ?? undefined), grids: [] });
+      if (taken.includes(s.name)) sprite.category = ws.readRaw(s.name).category;
+      ws.save(sprite, 'editor');
+    }
+    return sendJson(res, 201, { names: body.sprites.map((s) => s.name) });
   }
 
   if (parts[1] === 'game') return handleGame(ws, req, res, parts.slice(2), url);
@@ -213,7 +280,8 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
   if (!name) {
     if (method === 'GET') return sendJson(res, 200, ws.list());
     if (method === 'POST') {
-      const body = (await readJson(req)) as { name: string; width: number; height: number; palette?: string; grid?: { width: number; height: number } | null };
+      const body = (await readJson(req)) as CreateSpriteOptions;
+      if (body.category != null && !isSpriteCategory(body.category)) throw new HttpError(400, 'Unknown sprite category');
       if (ws.exists(body.name)) throw new HttpError(409, `Sprite "${body.name}" already exists`);
       const sprite = createSprite(body);
       ws.save(sprite, 'editor');
@@ -232,9 +300,12 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
       // An editor tab running an older build doesn't know newer fields (rig, ramps, reference...).
       // Keep whatever the client didn't send instead of silently dropping it.
       if (ws.exists(name)) {
-        const prev = ws.readRaw(name) as unknown as Record<string, unknown>;
+        const previous = ws.readRaw(name);
+        const prev = previous as unknown as Record<string, unknown>;
         const incoming = file as unknown as Record<string, unknown>;
         for (const [k, v] of Object.entries(prev)) if (!(k in incoming) && k !== 'updatedBy') incoming[k] = v;
+        // Gallery metadata can change while an editor tab has a drawing open.
+        file.category = previous.category;
       }
       file.rev = newId();
       file.updatedBy = 'editor';
@@ -246,6 +317,15 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
       return sendJson(res, 200, { ok: true });
     }
     throw new HttpError(405, 'Method not allowed');
+  }
+
+  if (sub === 'category' && method === 'PUT') {
+    const body = (await readJson(req)) as { category?: unknown } | null;
+    const category = body?.category;
+    if (category !== null && !isSpriteCategory(category)) throw new HttpError(400, 'Unknown sprite category');
+    if (!ws.exists(name)) throw new HttpError(404, `Sprite "${name}" not found`);
+    ws.setSpriteCategory(name, category);
+    return sendJson(res, 200, { ok: true });
   }
 
   if (sub === 'rename' && method === 'POST') {
@@ -278,8 +358,9 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
   }
   if (sub === 'sheet.json' && method === 'GET') {
     const opts = sheetOpts();
-    const { meta } = buildSpritesheet(ws.load(name), opts);
-    const body = Buffer.from(JSON.stringify(meta, null, 2));
+    const sprite = ws.load(name);
+    const { meta } = buildSpritesheet(sprite, opts);
+    const body = Buffer.from(JSON.stringify(sprite.relief ? { ...meta, relief: sprite.relief } : meta, null, 2));
     return sendBuffer(res, body, 'application/json', url.searchParams.has('download') ? `${name}.json` : undefined);
   }
   if (sub === 'preview.png' && method === 'GET') {
@@ -679,13 +760,13 @@ function sendBuffer(res: http.ServerResponse, buf: Buffer, type: string, downloa
   res.end(buf);
 }
 
-function readJson(req: http.IncomingMessage): Promise<unknown> {
+function readJson(req: http.IncomingMessage, limit = 64 * 1024 * 1024): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     req.on('data', (c: Buffer) => {
       size += c.length;
-      if (size > 64 * 1024 * 1024) {
+      if (size > limit) {
         reject(new HttpError(413, 'Body too large'));
         req.destroy();
         return;

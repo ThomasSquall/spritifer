@@ -5,3 +5,4 @@ sprites/
 .DS_Store
 .claude/settings.local.json
 examples/*/export/
+.env.local

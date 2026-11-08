@@ -5,7 +5,8 @@
  */
 
 import type { Renderer } from './engine.js';
-import type { Hitbox, LightDef, SceneAtmosphere, SceneMotes, SpriteAsset } from './types.js';
+import { resolveRelief } from './relief.js';
+import type { Hitbox, LightDef, SceneAtmosphere, SceneMotes, SceneSun, SpriteAsset } from './types.js';
 
 /** An instance as the atmosphere passes see it (the engine's Actor, or a placed instance in the scene editor). */
 export interface AtmosphereActor {
@@ -17,8 +18,11 @@ export interface AtmosphereActor {
   readonly visible: boolean;
   readonly destroyed: boolean;
   readonly light: LightDef | undefined;
-  readonly asset: { width: number; height: number } | undefined;
-  readonly type: { hud?: boolean; shadow?: number; hitbox?: Hitbox };
+  readonly asset: { width: number; height: number; name?: string; frames?: readonly { x: number; y: number; w: number; h: number }[] } | undefined;
+  readonly type: { hud?: boolean; shadow?: number; hitbox?: Hitbox; spriteOffset?: { x: number; y: number } };
+  /** Mirrored and on which frame: the shadow cast by the sun follows the drawing. */
+  readonly flipX?: boolean;
+  frameIndex?(): number;
   box(): { x: number; y: number; w: number; h: number };
 }
 
@@ -75,7 +79,8 @@ export function collectLights(w: AtmosphereWorld, camX: number, camY: number, zo
   for (const l of w.vfx?.lights() ?? []) push(l.x, l.y, l, 0);
   for (const a of w.actors) {
     if (!a.light || a.destroyed || !a.visible || a.type.hud) continue;
-    push(a.x + (a.asset?.width ?? 0) / 2 + (a.light.x ?? 0), a.y + (a.asset?.height ?? 0) / 2 + (a.light.y ?? 0), a.light, a.id);
+    const offset = a.type.spriteOffset;
+    push(a.x + (offset?.x ?? 0) + (a.asset?.width ?? 0) / 2 + (a.light.x ?? 0), a.y + (offset?.y ?? 0) + (a.asset?.height ?? 0) / 2 + (a.light.y ?? 0), a.light, a.id);
   }
   for (const m of w.motes.list) if (m.light) push(m.x, m.y, { radius: m.light, color: m.color, intensity: m.glow * m.alpha }, m.seed);
   return out;
@@ -88,11 +93,67 @@ function shadowWidth(a: AtmosphereActor): number {
   return a.type.hitbox.w + 2;
 }
 
-/** Soft elliptical contact shadows under the instances (drawn above the ground, below the instances). */
+/** The silhouette of an instance laid on the ground, away from the sun. Crisp, drawn once per pixel so it never doubles up. */
+function castShadow(r: Renderer, a: AtmosphereActor, sun: SceneSun, color: string, opacity: number, camX: number, camY: number, zoom: number): void {
+  const asset = a.asset;
+  if (!asset?.frames?.length || !asset.name || !r.spriteMask) return;
+  const f = asset.frames[a.frameIndex?.() ?? 0] ?? asset.frames[0];
+  const mask = r.spriteMask(asset.name, f.x, f.y, f.w, f.h);
+  if (!mask) return;
+  let bottom = -1;
+  for (let i = mask.length - 1; i >= 0 && bottom < 0; i--) if (mask[i]) bottom = Math.floor(i / f.w);
+  if (bottom < 0) return;
+  const angle = ((sun.angle ?? -135) * Math.PI) / 180;
+  const elevation = (Math.max(15, sun.elevation ?? 50) * Math.PI) / 180;
+  const length = Math.min(1.6, 1 / Math.tan(elevation));
+  // Away from the sun; the ground recedes, so distances along y are shorter on screen.
+  const dx = -Math.cos(angle) * length;
+  const dy = -Math.sin(angle) * length * 0.55;
+  const reachX = Math.ceil(Math.abs(dx) * (bottom + 1)) + 1;
+  const reachY = Math.ceil(Math.abs(dy) * (bottom + 1)) + 1;
+  const W = f.w + reachX * 2;
+  const H = reachY * 2 + 2;
+  const ground = new Uint8Array(W * H);
+  for (let y = bottom; y >= 0; y--) {
+    const rise = bottom - y;
+    // Half-pixel steps: a long shadow would otherwise show gaps between rows.
+    for (let step = 0; step < 2; step++) {
+      const h = rise + step * 0.5;
+      const ox = Math.round(h * dx);
+      const oy = Math.round(h * dy);
+      for (let x = 0; x < f.w; x++) {
+        if (!mask[y * f.w + (a.flipX ? f.w - 1 - x : x)]) continue;
+        const gx = x + ox + reachX;
+        const gy = oy + reachY;
+        if (gx >= 0 && gy >= 0 && gx < W && gy < H) ground[gy * W + gx] = 1;
+      }
+    }
+  }
+  const left = Math.round((a.x + (a.type.spriteOffset?.x ?? 0) - reachX - camX) * zoom);
+  const top = Math.round((a.y + (a.type.spriteOffset?.y ?? 0) + bottom - reachY - camY) * zoom);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (!ground[y * W + x]) continue;
+      let end = x;
+      while (end + 1 < W && ground[y * W + end + 1]) end++;
+      r.rect(left + x * zoom, top + y * zoom, (end - x + 1) * zoom, zoom, color, opacity);
+      x = end;
+    }
+  }
+}
+
+/** Soft elliptical contact shadows under the instances (drawn above the ground, below the instances), and the sun's cast shadows. */
 export function drawShadows(w: AtmosphereWorld, r: Renderer, atm: SceneAtmosphere, camX: number, camY: number, zoom: number): void {
   if (atm.shadows === false) return;
   const color = atm.shadowColor ?? '#1a1030';
   const op = atm.shadowOpacity ?? 0.38;
+  const sun = atm.relief?.sun;
+  if (sun) {
+    for (const a of w.actors) {
+      if (a.destroyed || !a.visible || a.type.hud || !a.asset || a.opacity <= 0 || a.type.shadow === 0 || a.z < 0) continue;
+      castShadow(r, a, sun, color, Math.min(0.8, op * 1.5 * (sun.intensity ?? 1)), camX, camY, zoom);
+    }
+  }
   for (const a of w.actors) {
     if (a.destroyed || !a.visible || a.type.hud || !a.asset || a.opacity <= 0) continue;
     const sw = shadowWidth(a);
@@ -147,7 +208,8 @@ export function postProcess(w: AtmosphereWorld, r: Renderer, atm: SceneAtmospher
   const dark = !WHITE.test(ambient);
   // Glow belongs to the dark: in daylight lamps don't bloom.
   const glow = (atm.glow ?? 0.6) * Math.min(1, Math.max(0, (1 - luminance(ambient)) * 1.8));
-  if ((dark || (lights.length && glow > 0)) && r.lighting) r.lighting(dark ? ambient : '#ffffff', lights, glow);
+  if (atm.relief && r.reliefLighting) r.reliefLighting(resolveRelief(atm.relief), dark ? ambient : '#ffffff', lights, glow);
+  else if ((dark || (lights.length && glow > 0)) && r.lighting) r.lighting(dark ? ambient : '#ffffff', lights, glow);
   else if (dark) r.rect(0, 0, w.game.width, w.game.height, ambient, 0.35);
   if (atm.tint && (atm.tintAmount ?? 0.3) > 0) {
     if (r.grade) r.grade(atm.tint, atm.tintAmount ?? 0.3);

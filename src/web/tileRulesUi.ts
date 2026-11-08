@@ -1,10 +1,10 @@
 /**
- * Tile rules editor (game.json → tilesets[name]): autotiling (blob), big seamless textures (grid), random
+ * Tile rules editor (game.json → tilesets[name]): autotiling (blob, corners), big seamless textures (grid), random
  * variants, animated tiles and edge overlays. Same data as the MCP tool set_tileset_rules, with a live
  * preview drawn by the same TileResolver the game uses.
  */
 
-import { type EdgeRule, type TileRule, type TilesetRules, TileResolver, normalizeTilesetRules } from '../core/game/tilerules.js';
+import { CORNER_TILES, type EdgeRule, type TileRule, type TilesetRules, TileResolver, normalizeTilesetRules } from '../core/game/tilerules.js';
 import type { TileLayer } from '../core/game/types.js';
 import type { LoadedAsset } from './gameApi.js';
 import { state } from './gameState.js';
@@ -14,11 +14,12 @@ const KIND_HELP: Record<TileRule['kind'], string> = {
   grid: 'A big seamless texture cut into size×size tiles: each cell shows the piece for its position, so the ground never repeats every tile.',
   random: 'One of "count" alternatives (tiles first, first+1, …) picked by position: flowers, stones, cracks.',
   blob: 'Autotile: the 47 edge / corner shapes chosen from the 8 neighbours (forest canopies, cliffs, water). With size > 1 each shape is a size×size block.',
+  corners: 'Autotile for two terrains from a 16-tile corner set. Put the rule on the lower terrain: cells of the other terrain stay whole, and the transition is drawn on this terrain next to them.',
 };
 
 /** Tiles per block of a rule (one shape / texture / alternative set). */
 const blockSize = (r: { kind?: TileRule['kind']; size?: number; count?: number }) =>
-  r.kind === 'random' ? (r.count ?? 1) : r.kind === 'blob' || r.kind === undefined ? 47 * (r.size ?? 1) ** 2 : (r.size ?? 1) ** 2;
+  r.kind === 'corners' ? CORNER_TILES : r.kind === 'random' ? (r.count ?? 1) : r.kind === 'blob' || r.kind === undefined ? 47 * (r.size ?? 1) ** 2 : (r.size ?? 1) ** 2;
 
 interface TilesetDraw {
   cols: number;
@@ -165,10 +166,12 @@ export async function openTileRules(asset: LoadedAsset): Promise<void> {
       const set = (fn: () => void, rerender = false) => { fn(); commit(); if (rerender) render(); };
       const kindSel = h('select', { onchange: () => set(() => {
         r.kind = kindSel.value as TileRule['kind'];
-        if (r.kind !== 'random') delete r.count; else r.count ??= 4;
-        if (r.kind === 'random') delete r.size;
-        if (r.kind !== 'blob') { delete r.group; delete r.border; }
-      }, true) }, ...(['grid', 'random', 'blob'] as const).map((k) => h('option', { value: k, selected: r.kind === k }, k)));
+        if (r.kind === 'random') r.count ??= 4; else delete r.count;
+        if (r.kind === 'random' || r.kind === 'corners') delete r.size;
+        if (r.kind !== 'blob') delete r.border;
+        if (r.kind === 'corners') r.group = [Math.min(td.count - 1, r.first + CORNER_TILES - 1)];
+        else { delete r.alt; delete r.invert; if (r.kind !== 'blob') delete r.group; }
+      }, true) }, ...(['grid', 'random', 'blob', 'corners'] as const).map((k) => h('option', { value: k, selected: r.kind === k }, k)));
       const numField = (label: string, get: () => number | undefined, put: (v: number | undefined) => void, attrs: Record<string, unknown> = {}) => {
         const inp = h('input', { type: 'number', class: 'num', value: get() === undefined ? '' : String(get()), ...attrs, onchange: () => set(() => put(inp.value.trim() === '' ? undefined : Number(inp.value)), true) });
         return h('label', {}, label, inp);
@@ -188,17 +191,26 @@ export async function openTileRules(asset: LoadedAsset): Promise<void> {
         h('p', { class: 'muted small' }, KIND_HELP[r.kind], ` Block: tiles ${r.first}–${r.first + block * (r.frames ?? 1) - 1}${block * (r.frames ?? 1) + r.first > td.count ? ' (past the end of the tileset!)' : ''}.`),
         h('div', { class: 'tr-body' },
           h('div', { class: 'tr-fields' },
-            r.kind === 'random'
+            r.kind === 'corners'
+              ? numField('Plain terrain alternatives', () => r.count, (v) => {
+                if (!v) { delete r.count; delete r.alt; } else { r.count = Math.max(1, Math.round(v)); r.alt ??= Math.min(td.count - 1, r.first + CORNER_TILES); }
+              }, { min: '0', placeholder: '0' })
+              : r.kind === 'random'
               ? numField('Alternatives', () => r.count, (v) => { r.count = Math.max(1, Math.round(v ?? 1)); }, { min: '1' })
               : numField('Pieces per side', () => r.size ?? 1, (v) => { if (!v || v <= 1) delete r.size; else r.size = Math.min(16, Math.round(v)); }, { min: '1', max: '16' }),
             numField('Animation frames', () => r.frames, (v) => { if (!v || v <= 1) delete r.frames; else r.frames = Math.min(64, Math.round(v)); }, { min: '1', max: '64', placeholder: '1' }),
             numField('Frames / s', () => r.fps, (v) => { if (!v || v <= 0) delete r.fps; else r.fps = Math.min(60, v); }, { min: '0.1', step: '0.5', placeholder: '4' }),
+            r.kind === 'corners' && r.count ? h('label', { title: 'First of the alternative tiles drawn where no corner touches the other terrain' }, 'First alternative', tileInput(td, r.alt ?? 0, (t) => set(() => (r.alt = t)))) : null,
+            r.kind === 'corners' ? h('label', { title: 'The painted tiles of the other terrain' }, 'Other terrain',
+              h('input', { type: 'text', spellcheck: false, value: listText(r.group), onchange: (e: Event) => set(() => { const l = parseList((e.target as HTMLInputElement).value); if (l.length) r.group = l; }, true) })) : null,
+            r.kind === 'corners' ? h('label', { class: 'inline', title: 'For solid terrain (water, walls): put the rule on it and list the walkable terrain above, so the border stays inside its cells' },
+              h('input', { type: 'checkbox', checked: !!r.invert, onchange: (e: Event) => set(() => { if ((e.target as HTMLInputElement).checked) r.invert = true; else delete r.invert; }, true) }), 'Border inside this terrain') : null,
             r.kind === 'blob' ? h('label', { title: 'Painted tiles counted as the same terrain (default: just the painted tile)' }, 'Same terrain as',
               h('input', { type: 'text', spellcheck: false, placeholder: String(r.tile), value: listText(r.group), onchange: (e: Event) => set(() => { const l = parseList((e.target as HTMLInputElement).value); if (l.length) r.group = l; else delete r.group; }, true) })) : null,
             r.kind === 'blob' ? h('label', { class: 'inline', title: 'Outside the map counts as the same terrain' },
               h('input', { type: 'checkbox', checked: r.border !== false, onchange: (e: Event) => set(() => { if ((e.target as HTMLInputElement).checked) delete r.border; else r.border = false; }) }), 'Map edge counts as same terrain') : null,
           ),
-          h('div', { class: 'tr-preview-box', title: 'Preview: an island of the painted tile on another terrain, drawn through all the rules' }, preview(() => sampleLayer(r.tile, around))),
+          h('div', { class: 'tr-preview-box', title: 'Preview: an island of the painted tile on another terrain, drawn through all the rules' }, preview(() => r.kind === 'corners' ? (r.invert ? sampleLayer(r.tile, r.group?.[0] ?? r.tile) : sampleLayer(r.group?.[0] ?? r.tile, r.tile)) : sampleLayer(r.tile, around))),
         ),
       ));
     });

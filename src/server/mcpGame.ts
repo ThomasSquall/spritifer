@@ -173,9 +173,23 @@ const atmosphereSchema = z.object({
   tint: z.string().optional().describe('Soft-light color grade, e.g. "#ffb070" golden hour, "#5080ff" cold'),
   tint_amount: z.number().min(0).max(1).optional(),
   motes: z.object({ preset: z.enum(MOTE_PRESETS), count: z.number().int().min(0).max(400).optional(), color: z.union([z.string(), z.array(z.string())]).optional() }).nullable().optional().describe('Ambient floating particles'),
+  relief: z.object({
+    strength: z.number().min(0).max(2).optional().describe('How strongly light shapes the sprites (default 1)'),
+    bands: z.number().int().min(0).max(16).optional().describe('Light steps on the sprites, 0 = smooth (default 4)'),
+    rim: z.number().min(0).max(2).optional().describe('Light caught on edges facing it (default 0.9)'),
+    light_height: z.number().min(0.05).max(2).optional().describe('Height of lamps as a fraction of their radius; lower = more dramatic (default 0.3)'),
+    tiles: z.boolean().optional().describe('Tiles on solid layers (walls, cliffs, treetops) catch the light too; the ground stays clean (default true)'),
+    sun: z.object({
+      angle: z.number().min(-360).max(360).optional().describe('Screen direction of the sun: 0 right, 90 down, -90 up (default -135)'),
+      elevation: z.number().min(5).max(90).optional().describe('Low = long cast shadows (default 50)'),
+      color: z.string().optional().describe('"#ffe2b0" warm sun, "#a8c4ff" moon'),
+      intensity: z.number().min(0).max(3).optional(),
+      shade: z.string().optional().describe('Color of the side away from the sun (default soft blue-violet)'),
+    }).optional().describe('Directional light for the whole scene, with shadows cast on the ground. Omit for none'),
+  }).nullable().optional().describe('Per-pixel lighting: lights and the sun shape the volumes of the sprites, from a normal map computed automatically. Pass {} to enable with defaults. See set_relief for a single sprite'),
 });
 const toAtmosphere = (a: z.infer<typeof atmosphereSchema>) =>
-  normalizeAtmosphere({ ambient: a.ambient, glow: a.glow, shadows: a.shadows, shadowColor: a.shadow_color, shadowOpacity: a.shadow_opacity, vignette: a.vignette, vignetteColor: a.vignette_color, clouds: a.clouds ? { sprite: a.clouds.sprite, opacity: a.clouds.opacity, speedX: a.clouds.speed_x, speedY: a.clouds.speed_y } : undefined, tint: a.tint, tintAmount: a.tint_amount, motes: a.motes ?? undefined });
+  normalizeAtmosphere({ ambient: a.ambient, glow: a.glow, shadows: a.shadows, shadowColor: a.shadow_color, shadowOpacity: a.shadow_opacity, vignette: a.vignette, vignetteColor: a.vignette_color, clouds: a.clouds ? { sprite: a.clouds.sprite, opacity: a.clouds.opacity, speedX: a.clouds.speed_x, speedY: a.clouds.speed_y } : undefined, tint: a.tint, tintAmount: a.tint_amount, motes: a.motes ?? undefined, relief: a.relief ? { strength: a.relief.strength, bands: a.relief.bands, rim: a.relief.rim, lightHeight: a.relief.light_height, tiles: a.relief.tiles, sun: a.relief.sun } : undefined });
 
 const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
   const stepSchema = z.record(z.string(), valueSchema).describe('{ type: "...", ...params }');
@@ -216,6 +230,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       width: z.number().int().min(16).max(1920).optional().describe('Viewport width in game pixels (e.g. 320)'),
       height: z.number().int().min(16).max(1080).optional().describe('Viewport height (e.g. 180)'),
       zoom: z.union([z.literal('fit'), z.number().int().min(1).max(16)]).optional().describe('"fit" = largest integer zoom that fits the window'),
+      ui_scale: z.number().int().min(1).max(8).optional().describe('Interface pixels are this many canvas pixels: width 960 with ui_scale 3 keeps scripts and dialogs in 320×180, and a Camera zoom of 2 then shows 480×270 of the world with square pixels'),
       background: z.string().optional(),
       start_scene: z.string().optional(),
       gravity: z.number().optional().describe('px/s² for platformer/patrol (default 900)'),
@@ -245,6 +260,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         if (a.width !== undefined) g.width = a.width;
         if (a.height !== undefined) g.height = a.height;
         if (a.zoom !== undefined) g.zoom = a.zoom;
+        if (a.ui_scale !== undefined) { if (a.ui_scale > 1) g.uiScale = a.ui_scale; else delete g.uiScale; }
         if (a.background !== undefined) g.background = a.background;
         if (a.start_scene !== undefined) {
           if (!ws.sceneExists(a.start_scene)) throw new Error(`No scene "${a.start_scene}"`);
@@ -265,11 +281,13 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
 
   const tileRuleSchema = z.object({
     tile: z.number().int().min(0).describe('The painted tile index'),
-    kind: z.enum(['grid', 'random', 'blob']).describe('grid = big seamless texture cut into size×size pieces by position; random = one of count alternatives by position; blob = 47-shape autotile from the 8 neighbours (size×size pieces per shape)'),
+    kind: z.enum(['grid', 'random', 'blob', 'corners']).describe('grid = big seamless texture cut into size×size pieces by position; random = one of count alternatives by position; blob = 47-shape autotile from the 8 neighbours (size×size pieces per shape); corners = 16-tile corner set for two terrains (pixellab_import_tileset): put the rule on the lower terrain with group = the painted tiles of the upper one'),
     first: z.number().int().min(0).describe("First tile of the rule's block in the tileset"),
     size: z.number().int().min(1).max(16).optional().describe('grid / blob: pieces per side (default 1)'),
-    count: z.number().int().min(1).optional().describe('random: number of alternatives'),
-    group: z.array(z.number().int().min(0)).optional().describe('blob: painted tiles counted as the same terrain (default just tile)'),
+    count: z.number().int().min(1).optional().describe('random: number of alternatives. corners: alternatives of the plain terrain, from alt'),
+    group: z.array(z.number().int().min(0)).optional().describe('blob: painted tiles counted as the same terrain (default just tile). corners: required, the painted tiles of the other terrain'),
+    alt: z.number().int().min(0).optional().describe('corners: first of the count alternatives for cells that touch no other terrain'),
+    invert: z.boolean().optional().describe('corners: put the rule on the upper terrain with group = the lower one, so the border is drawn inside its cells. Use it for solid terrain (water, walls, dense forest), so walkable cells stay clear'),
     border: z.boolean().optional().describe('blob: outside the map counts as the same terrain (default true)'),
     frames: z.number().int().min(1).max(64).optional().describe('Animated: this many copies of the block follow each other (water, lava)'),
     fps: z.number().min(0.1).max(60).optional().describe('Animation speed (default 4)'),
@@ -286,7 +304,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
 
   tool(
     'set_tileset_rules',
-    'Tile rules of a tileset (game.json tilesets): autotiling (blob), big seamless textures (grid), random variants, animated tiles and edge overlays (grass creeping onto paths, foam on shores). Scenes keep storing only the painted tile; the game and the scene editor draw the generated pieces. rules / edges replace their whole list when given (null clears); paintable = how many tiles (from 0) the editor palette shows. clear removes all rules of the tileset.',
+    'Tile rules of a tileset (game.json tilesets): autotiling (blob, or corners for two-terrain sets), big seamless textures (grid), random variants, animated tiles and edge overlays (grass creeping onto paths, foam on shores). Scenes keep storing only the painted tile; the game and the scene editor draw the generated pieces. rules / edges replace their whole list when given (null clears); paintable = how many tiles (from 0) the editor palette shows. clear removes all rules of the tileset.',
     {
       tileset: z.string().describe('Tileset sprite (has a tile grid)'),
       rules: z.array(tileRuleSchema).nullable().optional(),
@@ -324,6 +342,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       sprite: z.string().nullable().optional().describe('Sprite drawn for instances (null = none, e.g. for text objects)'),
       animation: z.string().optional().describe('Default animation tag ("" = all frames)'),
       hitbox: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).nullable().optional().describe('Collision box relative to the sprite top-left (null = whole frame). Make it a bit smaller than the art for fair collisions.'),
+      sprite_offset: z.object({ x: z.number(), y: z.number() }).nullable().optional().describe('Draw the sprite shifted from the instance position (null = none), so a larger canvas keeps the same position and hitbox'),
       z: z.number().optional().describe('Draw order (higher = in front; tile layers default to -10..)'),
       text: z.string().nullable().optional().describe('Text objects: expression shown as text, e.g. "\\"Score: \\" + score"'),
       text_color: z.string().optional(),
@@ -368,6 +387,8 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         }
         if (a.text_color !== undefined) o.textColor = a.text_color;
         if (a.text_size !== undefined) o.textSize = a.text_size;
+        if (a.sprite_offset === null) delete o.spriteOffset;
+        else if (a.sprite_offset) o.spriteOffset = a.sprite_offset;
         if (a.tags !== undefined) {
           const t = normalizeTags(a.tags);
           if (t) o.tags = t;
@@ -543,7 +564,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
 
   tool(
     'update_scene',
-    'Change scene properties: size (keeps the top-left content), tileset, background color, parallax background sprites, scene variables, y-sort, name, atmosphere (lighting, contact shadows, cloud shadows, color grade, vignette, ambient particles).',
+    'Change scene properties: size (keeps the top-left content), tileset, background color, parallax background sprites, scene variables, y-sort, name, atmosphere (lighting, per-pixel relief lighting with sun and cast shadows, contact shadows, cloud shadows, color grade, vignette, ambient particles).',
     {
       scene: z.string(),
       new_name: z.string().optional(),

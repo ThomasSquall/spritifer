@@ -200,6 +200,16 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
   const animSel = h('select', {});
   const hbAuto = h('input', { type: 'checkbox', checked: !obj.hitbox });
   const hbIns = (['x', 'y', 'w', 'h'] as const).map((k) => h('input', { type: 'number', class: 'num', value: String(obj.hitbox?.[k] ?? ''), disabled: !obj.hitbox }));
+  const offsetIns = (['x', 'y'] as const).map((k) => {
+    const inp = h('input', { type: 'number', class: 'num', value: String(obj.spriteOffset?.[k] ?? 0) });
+    inp.addEventListener('change', () => {
+      const [x, y] = offsetIns.map((field) => Number(field.value) || 0);
+      if (x || y) obj.spriteOffset = { x, y };
+      else delete obj.spriteOffset;
+      changed();
+    });
+    return inp;
+  });
   let frameSize = { w: 16, h: 16 };
   let assetImg: { img: HTMLImageElement; frame: { x: number; y: number; w: number; h: number } } | null = null;
 
@@ -332,6 +342,7 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
           h('label', {}, 'Default animation', animSel),
           h('label', { class: 'inline' }, hbAuto, 'Hitbox = whole frame'),
           h('div', { class: 'row4' }, ...hbIns.map((inp, i) => h('label', {}, ['x', 'y', 'width', 'height'][i], inp))),
+          h('div', { class: 'row4', title: 'Draws the sprite shifted from the instance position, so a larger canvas keeps the same position and hitbox' }, ...offsetIns.map((inp, i) => h('label', {}, `Sprite offset ${'xy'[i]}`, inp))),
           h('label', {}, 'Draw order (z)', zIn),
           h('label', { title: 'Soft contact shadow under instances in scenes with an atmosphere: width in px. Empty = automatic (hitbox width), 0 = none (rugs, doormats, flowerbeds)' }, 'Shadow width (px)', shadowIn),
           lightBox,

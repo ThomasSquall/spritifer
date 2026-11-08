@@ -124,6 +124,12 @@ export function renderGameSettings(root: HTMLElement): () => void {
       h('option', { value: 'fit', selected: g.zoom === 'fit' }, 'Fit window (integer)'),
       ...Array.from({ length: 16 }, (_, i) => i + 1).map((z) => h('option', { value: String(z), selected: g.zoom === z }, `${z}×`)),
     );
+    const uiScaleIn = h('input', { type: 'number', min: '1', max: '8', title: 'Interface pixels are this many canvas pixels: width 960 with UI scale 3 keeps scripts and dialogs in 320×180', value: String(g.uiScale ?? 1), onchange: () => {
+      const k = Math.max(1, Math.min(8, Math.round(Number(uiScaleIn.value) || 1)));
+      if (k > 1) g.uiScale = k;
+      else delete g.uiScale;
+      changed();
+    } });
     const bgIn = colorInput(g.background, (v) => { if (v) { g.background = v; changed(); } }, { fallback: '#181425' });
     const gravIn = h('input', { type: 'number', value: String(g.gravity), oninput: () => { g.gravity = Number(gravIn.value) || 0; changed(); } });
     const startSel = h('select', { onchange: () => { g.startScene = startSel.value; changed(); } }, ...state.scenes.map((s) => h('option', { value: s.name, selected: s.name === g.startScene }, s.name)));
@@ -157,7 +163,8 @@ export function renderGameSettings(root: HTMLElement): () => void {
           h('label', {}, 'Title', titleIn),
           h('div', { class: 'row2' }, h('label', {}, 'Screen width (px)', wIn), h('label', {}, 'Screen height (px)', hIn)),
           presets,
-          h('div', { class: 'row2' }, h('label', {}, 'Zoom', zoomSel), h('label', {}, 'Background', bgIn)),
+          h('div', { class: 'row2' }, h('label', {}, 'Zoom', zoomSel), h('label', {}, 'UI scale', uiScaleIn)),
+          h('label', {}, 'Background', bgIn),
           h('div', { class: 'row2' }, h('label', {}, 'Gravity (px/s²)', gravIn), h('label', {}, 'Start scene', startSel)),
           h('label', { class: 'inline' }, touchIn, 'On-screen controls on phones and tablets'),
         ),
@@ -188,6 +195,7 @@ export function renderGameSettings(root: HTMLElement): () => void {
             h('tr', {}, h('td', {}, h('kbd', {}, 'Space'), ' ', h('kbd', {}, 'Z'), ' ', h('kbd', {}, 'J')), h('td', {}, 'action (jump)')),
             h('tr', {}, h('td', {}, h('kbd', {}, 'X'), ' ', h('kbd', {}, 'K')), h('td', {}, 'action2')),
             h('tr', {}, h('td', {}, h('kbd', {}, 'F2')), h('td', {}, 'show hitboxes')),
+            h('tr', {}, h('td', {}, h('kbd', {}, 'F3')), h('td', {}, 'music on/off')),
           ),
         ),
       ),

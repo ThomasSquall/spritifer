@@ -326,6 +326,7 @@ export const DIALOGUE_REFERENCE = `DIALOGUES — conversations as plain text fil
 
 === name            starts a dialogue (letters, digits, _ and -)
 Speaker: text       a line with a speaker name box
+Speaker [mood]: text  the same with a face: sprite portrait_<speaker>_<mood>, or portrait_<speaker> (at most 48x48); an actor with that name holds its tag pose_<mood>_<facing>, or pose_talk_<facing> without a mood
 self: text          the speaking instance's name (the placed instance's Name, else its object type)
 text                narration (no name box)
 {expression}        inserted value: "You have {gold} gold.", "{self.name} waves."

@@ -26,6 +26,7 @@ import { mountRamps } from './rampsPanel.js';
 import { mountReferenceControls } from './referencePanel.js';
 import { mountGuide } from './guidePanel.js';
 import { mountRig } from './rigPanel.js';
+import { mountRelief } from './reliefPanel.js';
 
 const TOOLS: { id: ToolName; label: string; key: string }[] = [
   { id: 'pencil', label: 'Pencil', key: 'B' },
@@ -64,6 +65,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
   const ramps = mountRamps(ed);
   const guide = mountGuide(ed, view);
   const rig = mountRig(ed, view);
+  const relief = mountRelief(ed);
   const DOCK_KEY = 'spritifer.characterDock';
   let dockOpen = (() => {
     try {
@@ -575,7 +577,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
   root.append(
     h('div', { class: 'editor' },
       topbar,
-      h('div', { class: 'workspace' }, toolbar, h('main', { class: 'center' }, view.el, statusbar), sidebar, h('aside', { class: 'sprite-dock' }, guide.el, rig.el)),
+      h('div', { class: 'workspace' }, toolbar, h('main', { class: 'center' }, view.el, statusbar), sidebar, h('aside', { class: 'sprite-dock' }, guide.el, rig.el, relief.el)),
       timeline,
     ),
   );
@@ -832,6 +834,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
           renderToggles();
           refControls.render();
           guide.render();
+          relief.render();
           rig.render('structure');
           break;
         case 'view':
@@ -840,12 +843,14 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
           runPlayback();
           refControls.render();
           guide.render();
+          relief.render();
           rig.render('view');
           break;
         case 'tool':
           renderToolState();
           refControls.render();
           guide.render();
+          relief.render();
           rig.render('view');
           break;
         case 'color':
@@ -866,6 +871,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
   renderStatus();
   refControls.render();
   guide.render();
+          relief.render();
   rig.render('structure');
   renderDock();
 

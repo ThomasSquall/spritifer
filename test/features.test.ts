@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { World, emptyInput, runPlaytest } from '../src/core/game/engine.js';
+import { World, emptyInput, renderWorld, runPlaytest } from '../src/core/game/engine.js';
+import { collectLights } from '../src/core/game/atmosphere.js';
 import { defaultEvaluator, scriptLocation } from '../src/core/game/script.js';
 import { type GameBundle, createGame, createScene, normalizeObject } from '../src/core/game/types.js';
 import { nodeEvaluator } from '../src/server/scripts.js';
@@ -164,5 +165,88 @@ describe('hot reload', () => {
     expect(w.scripts.hotReload({ Counter: 'export default class Counter extends Behaviour {', plain: '' }).length).toBe(1);
     await steps(w, 1);
     expect(comp.count).toBe(before + 300);
+  });
+});
+
+describe('larger sprites and dialogue poses', () => {
+  const frames = (n: number) => Array.from({ length: n }, (_, i) => ({ x: i * 40, y: 0, w: 40, h: 40, duration: 100 }));
+  const tag = (name: string, from: number, to: number) => ({ name, from, to, direction: 'forward' as const });
+  function poseBundle(): GameBundle {
+    const a = createScene({ name: 'a', cols: 20, rows: 12, tileSize: 16 });
+    a.instances.push({ id: 'p', object: 'player', x: 50, y: 60, name: 'Aren' });
+    const game = createGame({
+      startScene: 'a',
+      objects: [normalizeObject({ name: 'player', sprite: 'aren', animation: 'idle_down', spriteOffset: { x: -10, y: -20 }, hitbox: { x: 2, y: 3, w: 4, h: 5 }, behaviors: [{ type: 'topdown', speed: 80 }] })],
+    });
+    const tags = [tag('idle_down', 0, 0), tag('pose_talk_down', 1, 2), tag('pose_sorpreso_down', 3, 4)];
+    return { game, scenes: { a }, sprites: { aren: { name: 'aren', width: 40, height: 40, frames: frames(5), tags, grid: null } }, tilesets: {} } as unknown as GameBundle;
+  }
+  const advance = (w: World) => w.scripts.updateDialog(0, true, false, false, null);
+
+  it('draws at the offset without moving the hitbox', async () => {
+    const w = new World(poseBundle(), { evaluator: nodeEvaluator });
+    await steps(w, 1);
+    const player = w.actors[0];
+    expect(player.box()).toEqual({ x: 52, y: 63, w: 4, h: 5 });
+    const images: number[][] = [];
+    const renderer = new Proxy({}, { get: (_, key) => key === 'image' ? (...args: unknown[]) => images.push([args[5] as number, args[6] as number]) : () => undefined });
+    renderWorld(w, renderer as never);
+    expect(images).toContainEqual([40 - Math.round(w.camera.x), 40 - Math.round(w.camera.y)]);
+  });
+
+  it('holds the mood pose for the line, then returns to idle', async () => {
+    const w = new World(poseBundle(), { evaluator: nodeEvaluator });
+    await steps(w, 1);
+    const player = w.actors[0];
+    void w.scripts.openDialog('Cosa?', { speaker: 'Aren [sorpreso]' });
+    expect(player.anim).toBe('pose_sorpreso_down');
+    await steps(w, 60);
+    expect(player.frameIndex()).toBe(4);
+    void w.scripts.openDialog('Va bene.', { speaker: 'Aren' });
+    w.scripts.dialog!.shown = w.scripts.dialog!.text.length;
+    advance(w);
+    expect(player.anim).toBe('pose_talk_down');
+    w.scripts.dialog!.shown = w.scripts.dialog!.text.length;
+    advance(w);
+    expect(player.anim).toBe('idle_down');
+    expect(player.holdLast).toBe(false);
+    expect(player.animLock).toBe(0);
+  });
+
+  it('casts the sun shadow and the light from where the sprite is drawn', () => {
+    const lights = collectLights({
+      clock: 0, game: { width: 320, height: 180 }, motes: { list: [] }, vfx: undefined,
+      actors: [{ id: 1, x: 100, y: 100, z: 0, opacity: 1, visible: true, destroyed: false, light: { radius: 10 }, asset: { width: 40, height: 40 }, type: { spriteOffset: { x: -10, y: -20 } }, box: () => ({ x: 0, y: 0, w: 1, h: 1 }) }],
+    } as never, 0, 0, 1);
+    expect(lights[0]).toMatchObject({ x: 110, y: 100 });
+  });
+
+  it('keeps the interface in its own pixels on a larger canvas', async () => {
+    const b = poseBundle();
+    b.game.width = 960;
+    b.game.height = 540;
+    b.game.uiScale = 3;
+    b.game.objects[0].behaviors.push({ type: 'camera', zoom: 2 });
+    b.scenes.a.cols = 60;
+    b.scenes.a.rows = 40;
+    b.scripts = { 'hud.js': `onDraw((ui) => { log('ui ' + ui.width + 'x' + ui.height + ' game ' + game.width); ui.rect(10, 20, 30, 5, '#ffffff') })` };
+    const w = new World(b, { evaluator: nodeEvaluator });
+    await steps(w, 2);
+    expect([w.zoom, w.viewWidth, w.viewHeight]).toEqual([2, 480, 270]);
+    const rects: number[][] = [];
+    const renderer = new Proxy({}, { get: (_, key) => key === 'rect' ? (...args: number[]) => rects.push(args.slice(0, 4)) : () => undefined });
+    renderWorld(w, renderer as never);
+    expect(rects).toContainEqual([30, 60, 90, 15]);
+    expect(w.logs.some((line) => line.includes('ui 320x180 game 320'))).toBe(true);
+  });
+
+  it('frames scenes without a Camera at the interface scale', async () => {
+    const b = poseBundle();
+    b.game.width = 960;
+    b.game.height = 540;
+    b.game.uiScale = 3;
+    const w = new World(b, { evaluator: nodeEvaluator });
+    await steps(w, 1);
+    expect([w.zoom, w.viewWidth]).toEqual([3, 320]);
   });
 });

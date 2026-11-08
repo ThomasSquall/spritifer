@@ -61,6 +61,16 @@ export interface Rig {
   finish?: RigFinish;
 }
 
+/** How a sprite takes per-pixel light. */
+export interface SpriteRelief {
+  /** Keep the sprite flat: rugs, shadows, effects. */
+  off?: boolean;
+  /** How pronounced its volumes are, 0..3 (default 1). */
+  depth?: number;
+  /** Colors that glow by themselves and are never darkened: crystals, eyes, lava. */
+  glow?: string[];
+}
+
 /** Fixes what rotating separate pieces leaves behind. */
 export interface RigFinish {
   /** Removes outline pixels left inside the figure where limb segments overlap (elbow, knee, ankle). */
@@ -131,6 +141,13 @@ export interface TileGrid {
   height: number;
 }
 
+export const SPRITE_CATEGORIES = ['characters', 'tileset', 'backgrounds', 'props', 'items', 'effects', 'portraits', 'ui'] as const;
+export type SpriteCategory = typeof SPRITE_CATEGORIES[number];
+
+export function isSpriteCategory(value: unknown): value is SpriteCategory {
+  return SPRITE_CATEGORIES.some((category) => category === value);
+}
+
 export interface Sprite {
   name: string;
   width: number;
@@ -140,10 +157,16 @@ export interface Sprite {
   layers: Layer[];
   frames: Frame[];
   tags: Tag[];
+  /** Gallery category. Undefined allows an automatic category, null leaves the sprite untagged. */
+  category?: SpriteCategory | null;
   /** Optional tile grid, used for tilesets / environments. */
   grid: TileGrid | null;
   /** Cut-out rig for characters (parts + per-frame poses). */
   rig: Rig | null;
+  /** How the sprite takes per-pixel light in scenes with relief lighting. */
+  relief?: SpriteRelief;
+  /** Persistent PixelLab character ID for generated sprites. */
+  pixelLabCharacterId?: string;
   /** Named color ramps, darkest first (e.g. skin: 4 shades). Referenced as "skin.2". */
   ramps: Record<string, string[]>;
   reference: Reference | null;
@@ -165,8 +188,12 @@ export interface SpriteFile {
   layers: Layer[];
   frames: Frame[];
   tags: Tag[];
+  category?: SpriteCategory | null;
   grid: TileGrid | null;
   rig?: Rig | null;
+  relief?: SpriteRelief;
+  /** Persistent PixelLab character ID for generated sprites. */
+  pixelLabCharacterId?: string;
   ramps?: Record<string, string[]>;
   reference?: Reference | null;
   guide?: PoseGuide | null;
@@ -211,6 +238,7 @@ export interface CreateSpriteOptions {
   /** Explicit colors, or the name of a built-in palette. */
   palette?: string[] | string;
   grid?: TileGrid | null;
+  category?: SpriteCategory | null;
   frameDuration?: number;
 }
 
@@ -232,6 +260,7 @@ export function createSprite(opts: CreateSpriteOptions): Sprite {
     layers: [{ id: newId(), name: 'Layer 1', visible: true, opacity: 1 }],
     frames: [{ id: newId(), duration: opts.frameDuration ?? 100 }],
     tags: [],
+    category: opts.category,
     grid: opts.grid ?? null,
     rig: null,
     ramps: {},
@@ -253,6 +282,7 @@ export function cloneSprite(s: Sprite): Sprite {
     tags: s.tags.map((t) => ({ ...t })),
     grid: s.grid ? { ...s.grid } : null,
     rig: s.rig ? structuredClone(s.rig) : null,
+    ...(s.relief ? { relief: structuredClone(s.relief) } : {}),
     ramps: structuredClone(s.ramps),
     reference: s.reference,
     guide: s.guide ? structuredClone(s.guide) : null,
@@ -284,8 +314,11 @@ export function serializeSprite(s: Sprite, updatedBy?: string): SpriteFile {
     layers: s.layers,
     frames: s.frames,
     tags: s.tags,
+    ...(s.category !== undefined ? { category: s.category } : {}),
     grid: s.grid,
     ...(s.rig ? { rig: s.rig } : {}),
+    ...(s.relief ? { relief: s.relief } : {}),
+    ...(s.pixelLabCharacterId ? { pixelLabCharacterId: s.pixelLabCharacterId } : {}),
     ...(Object.keys(s.ramps).length ? { ramps: s.ramps } : {}),
     ...(s.reference ? { reference: s.reference } : {}),
     ...(s.guide ? { guide: s.guide } : {}),
@@ -313,8 +346,11 @@ export function deserializeSprite(file: SpriteFile): Sprite {
     layers: file.layers.map((l) => ({ ...l, visible: l.visible ?? true, opacity: l.opacity ?? 1 })),
     frames: file.frames.map((f) => ({ ...f, duration: f.duration || 100 })),
     tags: file.tags ?? [],
+    ...(file.category === null || isSpriteCategory(file.category) ? { category: file.category } : {}),
     grid: file.grid ?? null,
     rig: file.rig ?? null,
+    ...(file.relief ? { relief: file.relief } : {}),
+    ...(typeof file.pixelLabCharacterId === 'string' ? { pixelLabCharacterId: file.pixelLabCharacterId } : {}),
     ramps: file.ramps ?? {},
     reference: file.reference ?? null,
     guide: file.guide ?? null,

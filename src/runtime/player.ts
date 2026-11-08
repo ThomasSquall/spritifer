@@ -5,7 +5,7 @@
 
 import { type InputFrame, type Renderer, STEP, World, renderWorld } from '../core/game/engine.js';
 import { CanvasRenderer } from './canvasRenderer.js';
-import type { GameBundle } from '../core/game/types.js';
+import { type GameBundle, interfaceSize } from '../core/game/types.js';
 import { SoundBoard } from './audio.js';
 
 export interface PlayerOptions {
@@ -16,6 +16,12 @@ export interface PlayerOptions {
   debug?: boolean;
   /** Focus the canvas so keys work immediately. */
   autofocus?: boolean;
+  /** false: start this run without music. Otherwise the last choice made in this browser applies. */
+  music?: boolean;
+  /** Small on-screen music button (off inside the editor, whose Play bar has its own). */
+  musicButton?: boolean;
+  /** Called with the music state at start and whenever it changes. */
+  onMusicChange?: (on: boolean) => void;
 }
 
 export interface Player {
@@ -26,6 +32,8 @@ export interface Player {
   paused: boolean;
   /** Advances one frame while paused. */
   stepOnce(): void;
+  /** Music on or off while the game runs (effects are not affected). */
+  music: boolean;
 }
 
 /** Physical key code → logical keys. Letters keep their own name and WASD also act as arrows. */
@@ -72,7 +80,13 @@ const STYLE = `
 .spf-touch button.on{background:#ffffff66}
 .spf-btns button{width:64px;height:64px;border-radius:50%}
 .spf-loading{color:#888;font:14px system-ui}
+.spf-music{position:absolute;top:8px;right:8px;width:30px;height:30px;padding:0;border:1px solid #ffffff55;border-radius:50%;background:#0008;color:#fff;font:16px system-ui;cursor:pointer;opacity:0;transition:opacity .15s}
+.spf-root:hover .spf-music,.spf-music:focus-visible{opacity:.85}
+.spf-music.off{text-decoration:line-through;color:#ffffff99}
+@media (hover:none){.spf-music{opacity:.5}}
 `;
+
+const MUSIC_PREF = '__music';
 
 /** Starts the game inside `container`. Resolves once the sprites are loaded. */
 export async function mountPlayer(container: HTMLElement, bundle: GameBundle, opts: PlayerOptions = {}): Promise<Player> {
@@ -101,9 +115,12 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
   canvas.height = game.height;
   canvas.tabIndex = 0;
   root.append(canvas);
-  const ctx = canvas.getContext('2d')!;
+  // Per-pixel lighting reads the frame back every time it is drawn.
+  const usesRelief = Object.values(bundle.scenes).some((s) => s.atmosphere?.relief);
+  const ctx = canvas.getContext('2d', usesRelief ? { willReadFrequently: true } : undefined)!;
   ctx.imageSmoothingEnabled = false;
   const renderer = new CanvasRenderer(ctx, images, game.width, game.height);
+  if (usesRelief) renderer.useRelief(bundle.sprites, interfaceSize(game));
 
   const sound = new SoundBoard();
   sound.setFiles(bundle.audio);
@@ -124,6 +141,38 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     root.innerHTML = `<div class="spf-loading">${String((err as Error).message)}</div>`;
     throw err;
   }
+
+  // ---------------------------------------------------------------- music switch
+  let musicOn = opts.music ?? storage.get(MUSIC_PREF) !== 'off';
+  sound.musicMuted = !musicOn;
+  let musicBtn: HTMLButtonElement | null = null;
+  const showMusic = () => {
+    if (musicBtn) {
+      musicBtn.classList.toggle('off', !musicOn);
+      musicBtn.title = `Music ${musicOn ? 'on' : 'off'} (F3)`;
+      musicBtn.setAttribute('aria-pressed', String(musicOn));
+    }
+    opts.onMusicChange?.(musicOn);
+  };
+  const setMusic = (on: boolean) => {
+    musicOn = on;
+    sound.musicMuted = !on;
+    storage.set(MUSIC_PREF, on ? 'on' : 'off');
+    showMusic();
+  };
+  if (opts.musicButton !== false && Object.keys(bundle.audio ?? {}).length) {
+    musicBtn = document.createElement('button');
+    musicBtn.className = 'spf-music';
+    musicBtn.textContent = '♪';
+    musicBtn.setAttribute('aria-label', 'Music');
+    musicBtn.addEventListener('click', () => {
+      sound.unlock();
+      setMusic(!musicOn);
+      canvas.focus();
+    });
+    root.append(musicBtn);
+  }
+  showMusic();
 
   // ---------------------------------------------------------------- scaling
   const fit = () => {
@@ -156,6 +205,11 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     sound.unlock();
     if (e.code === 'F2') {
       showHitboxes = !showHitboxes;
+      e.preventDefault();
+      return;
+    }
+    if (e.code === 'F3') {
+      if (!e.repeat) setMusic(!musicOn);
       e.preventDefault();
       return;
     }
@@ -334,6 +388,12 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     },
     stepOnce() {
       stepRequests++;
+    },
+    get music() {
+      return musicOn;
+    },
+    set music(on: boolean) {
+      setMusic(on);
     },
     destroy() {
       cancelAnimationFrame(raf);

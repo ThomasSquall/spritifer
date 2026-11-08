@@ -12,6 +12,7 @@
     "build:web": "vite build",
     "build:runtime": "vite build -c vite.runtime.config.ts",
     "build:server": "tsc -p tsconfig.server.json",
+    "dev": "node scripts/dev.mjs",
     "dev:web": "vite",
     "start": "node dist/server/cli.js serve",
     "mcp": "node dist/server/cli.js mcp",

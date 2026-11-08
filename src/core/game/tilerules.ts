@@ -5,6 +5,8 @@
  * - "random": one of `count` alternatives picked by position.
  * - "blob": 47-shape autotile (edges, outer and inner corners) chosen from the 8 neighbours, optionally
  *   with k×k position pieces per shape (forest canopies, cliffs, water bodies).
+ * - "corners": 16-tile corner autotile for two terrains (the sets PixelLab generates). Cells of the other
+ *   terrain stay whole; the transition is drawn on this terrain's cells next to them.
  * - edges: overlays drawn on cells next to other terrain (grass creeping onto paths, foam on shores).
  *
  * The scene stores only the painted tile; collisions use it too. Rules live in game.json → tilesets.
@@ -15,15 +17,19 @@ import type { SpriteAsset, TileLayer } from './types.js';
 export interface TileRule {
   /** The painted tile index. */
   tile: number;
-  kind: 'grid' | 'random' | 'blob';
+  kind: 'grid' | 'random' | 'blob' | 'corners';
   /** First tile of the rule's block in the tileset. */
   first: number;
   /** grid / blob: pieces per side (block of size×size per shape). Default 1. */
   size?: number;
-  /** random: number of alternatives. */
+  /** random: number of alternatives. corners: alternatives of the plain terrain, starting at `alt`. */
   count?: number;
-  /** blob: painted tiles counted as the same terrain (default just `tile`). */
+  /** blob: painted tiles counted as the same terrain (default just `tile`). corners: the painted tiles of the other terrain (required). */
   group?: number[];
+  /** corners: first of the `count` alternatives drawn where no corner touches the other terrain. */
+  alt?: number;
+  /** corners: the rule sits on the upper terrain and `group` lists the lower one, so the border stays inside this terrain's cells (water, walls). */
+  invert?: boolean;
   /** blob: outside the map counts as the same terrain (default true). */
   border?: boolean;
   /** Animated: this many copies of the block follow each other (water, lava). */
@@ -70,6 +76,14 @@ export function reduceBlob(m: number): number {
 export const BLOB_MASKS: number[] = [...new Set(Array.from({ length: 256 }, (_, m) => reduceBlob(m)))].sort((a, b) => a - b);
 const BLOB_INDEX = new Map(BLOB_MASKS.map((m, i) => [m, i]));
 export const BLOB_FULL = BLOB_INDEX.get(255)!;
+
+/** Tiles in a corners block. */
+export const CORNER_TILES = 16;
+
+/** Tile of a corners block from a neighbour mask: a corner counts when any cell sharing it matches (NW 8, NE 4, SW 2, SE 1). */
+export function cornerIndex(m: number): number {
+  return (m & (W | NW | N) ? 8 : 0) + (m & (N | NE | E) ? 4 : 0) + (m & (S | SW | W) ? 2 : 0) + (m & (E | SE | S) ? 1 : 0);
+}
 
 /** Stable per-cell hash in [0, 1). */
 export function cellHash(x: number, y: number, salt = 0): number {
@@ -122,6 +136,12 @@ export class TileResolver {
       const piece = mod(ty, k) * k + mod(tx, k);
       if (r.kind === 'grid') out.push(r.first + frame(r, k * k) + piece);
       else if (r.kind === 'random') out.push(r.first + frame(r, Math.max(1, r.count ?? 1)) + Math.floor(cellHash(tx, ty, t) * Math.max(1, r.count ?? 1)));
+      else if (r.kind === 'corners') {
+        const corner = cornerIndex(this.mask(layer, cols, rows, tx, ty, (x) => r.groupSet.has(x), false));
+        if (r.invert) out.push(r.first + frame(r, CORNER_TILES) + CORNER_TILES - 1 - corner);
+        else if (!corner && r.alt !== undefined && r.count) out.push(r.alt + Math.floor(cellHash(tx, ty, t) * r.count));
+        else out.push(r.first + frame(r, CORNER_TILES) + corner);
+      }
       else {
         const shape = BLOB_INDEX.get(reduceBlob(this.mask(layer, cols, rows, tx, ty, (x) => r.groupSet.has(x), r.border !== false))) ?? BLOB_FULL;
         out.push(r.first + frame(r, BLOB_MASKS.length * k * k) + shape * k * k + piece);
@@ -149,7 +169,7 @@ export function normalizeTilesetRules(v: unknown): TilesetRules | undefined {
     const R = (x ?? {}) as Record<string, unknown>;
     const tile = int(R.tile);
     const first = int(R.first);
-    const kind = R.kind === 'grid' || R.kind === 'random' || R.kind === 'blob' ? R.kind : undefined;
+    const kind = R.kind === 'grid' || R.kind === 'random' || R.kind === 'blob' || R.kind === 'corners' ? R.kind : undefined;
     if (tile === undefined || first === undefined || !kind) continue;
     const rule: TileRule = { tile, kind, first };
     const size = int(R.size);
@@ -158,6 +178,10 @@ export function normalizeTilesetRules(v: unknown): TilesetRules | undefined {
     if (count) rule.count = count;
     const group = ints(R.group);
     if (group?.length) rule.group = group;
+    if (kind === 'corners' && !rule.group) continue;
+    const alt = int(R.alt);
+    if (kind === 'corners' && alt !== undefined) rule.alt = alt;
+    if (kind === 'corners' && R.invert === true) rule.invert = true;
     if (R.border === false) rule.border = false;
     const frames = int(R.frames);
     if (frames && frames > 1) rule.frames = Math.min(64, frames);

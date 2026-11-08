@@ -79,6 +79,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .brand .logo { width: 32px; height: 32px; border-radius: 8px; background-position: 9px 11px, 18px 11px, 0 0; background-size: 5px 5px, 5px 5px, auto; }
 .gallery-body { display: grid; grid-template-columns: 1fr 320px; gap: 28px; align-items: start; }
 .gallery-main h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 12px; }
+.gallery-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
 .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
 .sprite-card {
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer;
@@ -89,6 +90,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .sprite-card .thumb img { image-rendering: pixelated; max-width: 92%; max-height: 92%; }
 .sprite-card .meta { padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
 .sprite-card .meta span { font-size: 12px; }
+.sprite-category { display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; margin-top: 4px; }
 .card-actions { position: absolute; top: 6px; right: 6px; display: flex; gap: 2px; opacity: 0; transition: opacity 0.12s; }
 .card-actions .icon-btn { background: #15171ccc; }
 .sprite-card:hover .card-actions { opacity: 1; }

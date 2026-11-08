@@ -1,3 +1,4 @@
+import { PixelLabProvider, pixelLabCreate, pixelLabAnimate, pixelLabImage, pixelLabImport, pixelLabTileset, pixelLabTilesetImport } from './pixellab.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -97,9 +98,11 @@ import {
   shift,
   transform,
 } from '../core/draw.js';
-import { exportSpritesheet, previewPng, referenceBitmap, referenceCoverage, renderBitmapRows, spriteFromPng } from './ops.js';
+import { exportSpritesheet, previewPng, readPicture, referenceBitmap, referenceCoverage, renderBitmapRows, spriteFromPng } from './ops.js';
+import { artContactSheet, cleanArt, cropBitmap, spriteFromArt } from '../core/artImport.js';
 import { decodePng, encodePng } from './png.js';
 import type { Workspace } from './store.js';
+import { buildAsset, renderReliefPreview } from './game.js';
 import { GAME_INSTRUCTIONS, registerGameTools } from './mcpGame.js';
 import { type ProjectInfo, ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
 
@@ -147,7 +150,7 @@ The rig layer is re-rendered from the rig: put hand-drawn effects on another lay
 
 Static frame-by-frame animation: add_frames with copy_from, edit only what moves (transform shift, redraw limbs), set_tag, set_frame_duration, preview with tag + onion, export_spritesheet.
 
-Environments / tilesets: create_sprite with tile_width/tile_height, draw each tile (draw_pixels with "tile", or draw_shapes), then build scenes on a bigger canvas with copy_region (source_sprite = the tileset). Separate layers for background, terrain, props.
+Environments / tilesets: create_sprite with tile_width/tile_height, draw each tile (draw_pixels with "tile", or draw_shapes), then build scenes on a bigger canvas with copy_region (source_sprite = the tileset). Separate layers for background, terrain, props. For generated terrain use pixellab_create_tileset, not pixellab_generate_image.
 
 Every change is saved immediately; undo reverts your own recent changes.`;
 
@@ -211,6 +214,59 @@ export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string 
       }
     }) as never);
   };
+
+  const pixelLab = new PixelLabProvider();
+  tool('pixellab_create_character', 'Spend PixelLab credits to create a persistent eight-direction character. Pass concept art with reference_path (or base64 in reference) and optionally style_sprite to set the pixel style. Returns a character ID and job ID.',
+    {
+      ...pixelLabCreate.shape,
+      reference_path: z.string().optional().describe('Picture file (PNG, WebP, JPEG) used as the reference'),
+      reference_crop: z.object({ x: z.number().int(), y: z.number().int(), width: z.number().int().min(1), height: z.number().int().min(1) }).optional().describe('Region of reference_path, in its own pixels'),
+      reference_mode: z.enum(['concept', 'sprite']).optional().describe('concept (default): art or a turnaround sheet. sprite: one transparent south-facing sprite'),
+      style_sprite: z.string().optional().describe('Project sprite whose first frame sets the pixel style (up to 168×168; concept references only)'),
+    },
+    async ({ reference_path, reference_crop, reference_mode, style_sprite, ...args }) => {
+      const picture = reference_path ? readPicture(reference_path) : undefined;
+      const reference = picture ? { mode: reference_mode ?? 'concept', png: encodePng(reference_crop ? cropBitmap(picture, reference_crop) : picture).toString('base64') } : args.reference;
+      const style_png = style_sprite ? encodePng(compositeFrame(ws.load(style_sprite), 0)).toString('base64') : args.style_png;
+      return text(JSON.stringify(await pixelLab.create({ ...args, reference, style_png })));
+    });
+  tool('pixellab_character', 'Get a PixelLab character and the IDs of its completed animation groups.', { id: z.string() },
+    async ({ id }) => text(JSON.stringify(await pixelLab.describe(id))), { readOnlyHint: true });
+  tool('pixellab_job', 'Check one PixelLab background job before requesting more generation.', { id: z.string() },
+    async ({ id }) => text(JSON.stringify(await pixelLab.job(id))), { readOnlyHint: true });
+  tool('pixellab_animate_character', 'Spend PixelLab credits to animate one preset or custom action of an existing character, for all or only the chosen directions (each direction is billed).', pixelLabAnimate.shape,
+    async (args) => text(JSON.stringify(await pixelLab.animate(args))));
+  tool('pixellab_import_character', 'Validate a character and selected complete animation groups. Set previewOnly for a preview without writing. Existing sprites cannot be replaced.',
+    { ...pixelLabImport.shape, previewOnly: z.boolean().optional() }, async ({ previewOnly, ...args }) => {
+      const workspace = ws;
+      const sprite = await pixelLab.sprite(args);
+      if (!previewOnly) workspace.save(sprite, 'pixellab', false);
+      return [...text(`${sprite.name}: ${sprite.width}×${sprite.height}, ${sprite.frames.length} frames, tags: ${sprite.tags.map((tag) => tag.name).join(', ')}`),
+        image(previewPng(sprite, { frames: [0] }))];
+    });
+
+  tool('pixellab_balance', 'Show the remaining PixelLab credits and subscription generations. Free.', {},
+    async () => text(JSON.stringify(await pixelLab.balance())), { readOnlyHint: true });
+  tool('pixellab_generate_image', 'Spend PixelLab credits to generate one image (prop, item, tile, icon, backdrop) from text and save it as a new sprite in the open project. Returns a preview and the cost. Use pixellab_create_character for animated characters.',
+    pixelLabImage.shape, async (args) => {
+      const workspace = ws;
+      const { sprite, usage } = await pixelLab.generateImage(workspace, args);
+      workspace.save(sprite, 'pixellab', false);
+      remember(sprite.name, null);
+      const cost = usage?.usd != null ? `$${usage.usd}` : usage?.generations != null ? `${usage.generations} generations` : 'not reported';
+      return [...text(`${sprite.name}: ${sprite.width}×${sprite.height}, ${sprite.palette.length} colors, cost: ${cost}`), image(previewPng(sprite, { frames: [0] }))];
+    });
+
+  tool('pixellab_create_tileset', 'Spend PixelLab credits (about 15 generations in pro mode) to generate a seamless 16-tile terrain tileset: a lower terrain, an upper terrain and every corner transition between them. Runs in the background: check pixellab_job with background_job_id, then call pixellab_import_tileset with tileset_id and the same name. Prefer this over pixellab_generate_image for ground, which repeats a visible motif.',
+    pixelLabTileset.shape, async (args) => text(JSON.stringify(await pixelLab.createTileset(ws, args))));
+  tool('pixellab_import_tileset', 'Save a finished PixelLab tileset as a new 4×4 sprite with a tile grid. Tile number = 8 if the NW corner is upper terrain, plus 4 for NE, 2 for SW, 1 for SE (0 = all lower, 15 = all upper). Free. Existing sprites are never replaced. To autotile it in scenes: set_tileset_rules with { tile: 0, kind: "corners", first: 0, group: [15] }, then paint with tiles 0 and 15.',
+    pixelLabTilesetImport.shape, async (args) => {
+      const workspace = ws;
+      const sprite = await pixelLab.tilesetSprite(workspace, args);
+      workspace.save(sprite, 'pixellab', false);
+      remember(sprite.name, null);
+      return [...text(`${sprite.name}: 16 tiles of ${sprite.grid!.width}×${sprite.grid!.height}, ${sprite.palette.length} colors`), image(previewPng(sprite, { frames: [0] }))];
+    });
 
   // Common params.
   const P = {
@@ -939,6 +995,31 @@ Typical flow: block in each material with one flat color (draw_shapes fill / dra
   );
 
   tool(
+    'set_relief',
+    `How a sprite takes per-pixel light in scenes with relief lighting (update_scene atmosphere.relief). The normal map is computed from the pixels, so nothing needs drawing: use this to make a sprite flat (rugs, puddles), deepen or soften its volumes, or list the colors that glow by themselves and are never darkened (crystals, eyes, lava). Tilesets and full-screen backdrops are always flat.
+Returns the sprite, its normal map and how it looks lit from the left, the right, above and below.`,
+    {
+      sprite: P.sprite,
+      off: z.boolean().optional().describe('Keep this sprite flat'),
+      depth: z.number().min(0).max(3).optional().describe('How pronounced its volumes are (default 1)'),
+      glow: z.array(z.string()).optional().describe('Colors that glow by themselves; [] for none'),
+      frame: z.number().int().min(0).optional().describe('Frame to preview (default 0)'),
+      scale: z.number().int().min(1).max(12).optional(),
+    },
+    (a) => {
+      const { sprite } = mutate(a.sprite, (s) => {
+        const next = { ...(s.relief ?? {}) };
+        if (a.off !== undefined) { if (a.off) next.off = true; else delete next.off; }
+        if (a.depth !== undefined) { if (a.depth === 1) delete next.depth; else next.depth = a.depth; }
+        if (a.glow !== undefined) { if (a.glow.length) next.glow = a.glow.map((c) => toHex(color(s, c))); else delete next.glow; }
+        if (Object.keys(next).length) s.relief = next;
+        else delete s.relief;
+      });
+      return [...text(`Relief of "${a.sprite}": ${JSON.stringify(sprite.relief ?? 'automatic')}. Shown: art, normal map, then lit from left, right, above, below.`), image(renderReliefPreview(buildAsset(sprite, false), { frame: a.frame, scale: a.scale }))];
+    },
+  );
+
+  tool(
     'selout',
     'Selective outline: interior outline pixels (between two materials) become a dark shade of the material they enclose, and silhouette pixels on the lit side soften too; the shadow-side silhouette stays dark. Uses the ramps to pick shades. Makes sprites read less "coloring book".',
     {
@@ -1087,6 +1168,58 @@ The picture also becomes the sprite's reference (unless keep_reference), so prev
         return `Pixelized ${full.width}x${full.height}${a.crop ? ` (crop ${a.crop.width}x${a.crop.height})` : ''} → ${w}x${h} at (${x},${y}) on layer "${layer.name}", ${biasNote}, ${used.length} colors: ${used.join(' ')}`;
       });
       return [...text(result), image(previewPng(sprite, { compare: !!sprite.reference, rulers: true }))];
+    },
+  );
+
+  tool(
+    'import_art',
+    `Import pixel art made by an image generator (ChatGPT sheets with portraits, full figures, walk cycles) and clean it. Those pictures only look like pixel art: this measures the size of their fake pixels, rebuilds each crop at its true resolution with one shared palette, and removes the background without eating outlines or hair.
+Give one item per piece, with its crop in the picture's own pixels (read them from the picture). Items with the same sprite become its frames, standing on the bottom edge; give a tag to make animations. Use background "keep" for portraits in a framed box, with inset to cut the frame. Import portraits together in one call so they share a palette.
+Portraits for dialogues: name them portrait_<speaker> (the default face) and portrait_<speaker>_<mood>, at most 48x48; a dialogue line "Aren [deciso]: ..." then shows them by itself.
+For a clean sheet (flat background, square pixels) pass exact: true: nothing is reinterpreted, a frame too big for the canvas is an error instead of being squeezed.
+The result image shows what was created. If the art looks too blocky or too blurry, pass pixel_size (the report gives the measured one per item).`,
+    {
+      path: z.string().describe('Picture: PNG, or WebP/JPEG on macOS'),
+      items: z.array(z.object({
+        sprite: z.string().describe('Sprite to create; repeated names become frames of that sprite'),
+        x: z.number().int(),
+        y: z.number().int(),
+        width: z.number().int().min(1),
+        height: z.number().int().min(1),
+        inset: z.number().int().min(0).optional().describe('Pixels cut from every side of the crop: panel borders and frames'),
+        tag: z.string().optional().describe('Animation this frame belongs to'),
+        background: z.enum(['remove', 'keep']).optional(),
+        pixel_size: z.number().min(1).optional().describe('Fake pixel size for this item'),
+      })).min(1),
+      pixel_size: z.number().min(1).optional().describe('Fake pixel size in picture pixels (default: measured on each item)'),
+      colors: z.number().int().min(2).max(128).optional().describe('Size of the shared palette (default 32)'),
+      background: z.enum(['remove', 'keep']).optional().describe('Default "remove"'),
+      tolerance: z.number().min(0).max(1).optional().describe('How far from the border color still counts as background, in OKLab (default: measured). Raise it if background is left, lower it if the figure is eaten.'),
+      remove_shadow: z.boolean().optional().describe('Also remove the shadow the figure stands on (default true)'),
+      trim: z.boolean().optional().describe('Cut empty rows and columns (default true)'),
+      margin: z.number().int().min(0).optional().describe('Empty pixels kept around a trimmed sprite'),
+      canvas_width: z.number().int().min(1).optional().describe('Fixed canvas, to replace an existing sprite: frames stand on baseline, centered. Give canvas_height too'),
+      canvas_height: z.number().int().min(1).optional(),
+      baseline: z.number().int().min(0).optional().describe('With a fixed canvas: the row the feet stand on (default the last row)'),
+      exact: z.boolean().optional().describe('Keep the art as it is: each art pixel is the color in the middle of its block, with no palette reduction, outline rules or noise removal; the background goes only if it is real transparency or one flat color. Use it for clean sheets, with pixel_size set (1 = already at real size)'),
+      line_bias: z.number().min(0).max(1).optional().describe('How much of a pixel dark lines must cover to win (default 0.5); raise it, for example to 0.72, when small sprites come out too dark'),
+      outline: z.boolean().optional().describe('Darken the edge of the figure, for small sprites on busy ground (default false)'),
+      align: z.enum(['center', 'head']).optional().describe('What stays still from frame to frame; "head" stops a swinging cape from shaking walk cycles (default center)'),
+      overwrite: z.boolean().optional().describe('Replace existing sprites with these names'),
+    },
+    (a) => {
+      const results = cleanArt(readPicture(a.path), a.items.map((it) => ({
+        sprite: it.sprite, crop: { x: it.x, y: it.y, width: it.width, height: it.height }, inset: it.inset, tag: it.tag, background: it.background, pixelSize: it.pixel_size,
+      })), { pixelSize: a.pixel_size, colors: a.colors, background: a.background, tolerance: a.tolerance, removeShadow: a.remove_shadow, trim: a.trim, margin: a.margin, align: a.align, exact: a.exact, lineBias: a.line_bias, outline: a.outline, canvas: a.canvas_width && a.canvas_height ? { width: a.canvas_width, height: a.canvas_height, baseline: a.baseline } : undefined });
+      const taken = results.filter((r) => ws.exists(r.sprite)).map((r) => r.sprite);
+      if (taken.length && !a.overwrite) throw new Error(`Already exist: ${taken.join(', ')} (pass overwrite: true to replace them)`);
+      const lines = results.map((r) => {
+        remember(r.sprite, ws.exists(r.sprite) ? ws.readRaw(r.sprite) : null);
+        ws.save(spriteFromArt(r), AUTHOR);
+        const g = r.grids[0];
+        return `${r.sprite}: ${r.width}x${r.height}, ${r.frames.length} frame(s), fake pixel ${g.size}px (regularity ${g.confidence})`;
+      });
+      return [...text(lines.join('\n')), image(encodePng(artContactSheet(results)))];
     },
   );
 

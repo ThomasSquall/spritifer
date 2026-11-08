@@ -4,6 +4,7 @@
  */
 
 import { type TilesetRules, normalizeTilesetRules } from './tilerules.js';
+import type { SpriteRelief } from '../sprite.js';
 import type { VfxGraph } from './vfxGraph.js';
 
 export type Value = number | string | boolean;
@@ -62,6 +63,8 @@ export interface ObjectType {
   animation?: string;
   /** Collision box relative to the sprite's top-left corner. Default: the whole frame. */
   hitbox?: Hitbox;
+  /** Draws the sprite shifted from the instance position, so a larger canvas keeps the same position, hitbox and scene layout. */
+  spriteOffset?: { x: number; y: number };
   /** Draw order: higher is drawn in front. */
   z?: number;
   /** Text objects show the value of this expression (e.g. `"Score: " + score`). */
@@ -140,6 +143,35 @@ export interface SceneAtmosphere {
   tint?: string;
   tintAmount?: number;
   motes?: SceneMotes;
+  /** Per-pixel lighting: lights and the sun shape the volumes of the sprites. */
+  relief?: SceneRelief;
+}
+
+/** Per-pixel lighting of a scene. */
+export interface SceneRelief {
+  /** How strongly the light shapes the sprites, 0..2 (default 1). */
+  strength?: number;
+  /** Light steps on the sprites, 0 = smooth (default 4). */
+  bands?: number;
+  /** Light caught on the edges facing it, 0..2 (default 0.9). */
+  rim?: number;
+  /** Height of point lights as a fraction of their radius, 0.05..2 (default 0.3). Lower = more dramatic. */
+  lightHeight?: number;
+  /** Tiles on solid layers (walls, treetops) take the light too; the ground stays clean (default true). */
+  tiles?: boolean;
+  sun?: SceneSun;
+}
+
+export interface SceneSun {
+  /** Direction of the sun on screen in degrees: 0 = right, 90 = down, -90 = up (default -135, top left). */
+  angle?: number;
+  /** Height over the horizon in degrees, 5..90 (default 50). */
+  elevation?: number;
+  color?: string;
+  /** 0..3 (default 1). */
+  intensity?: number;
+  /** Color of the side away from the sun (default a soft blue-violet). */
+  shade?: string;
 }
 
 export interface Instance {
@@ -218,6 +250,8 @@ export interface GameProject {
   height: number;
   /** "fit" scales by the largest integer that fits the window; a number forces that zoom. */
   zoom: 'fit' | number;
+  /** Interface pixels are this many canvas pixels: scripts and dialogs work in width/uiScale × height/uiScale. Scenes without a Camera zoom the same. Default 1. */
+  uiScale?: number;
   background: string;
   startScene: string;
   /** Pixels per second squared, used by platformer and patrol behaviors. */
@@ -330,6 +364,8 @@ export function normalizeObject(v: unknown): ObjectType {
   if (typeof o.animation === 'string' && o.animation) obj.animation = o.animation;
   const hb = o.hitbox as Record<string, unknown> | undefined;
   if (hb && typeof hb === 'object') obj.hitbox = { x: num(hb.x, 0), y: num(hb.y, 0), w: Math.max(1, num(hb.w, 8)), h: Math.max(1, num(hb.h, 8)) };
+  const so = o.spriteOffset as Record<string, unknown> | undefined;
+  if (so && typeof so === 'object') obj.spriteOffset = { x: num(so.x, 0), y: num(so.y, 0) };
   if (typeof o.z === 'number') obj.z = o.z;
   if (typeof o.text === 'string') obj.text = o.text;
   if (typeof o.textColor === 'string') obj.textColor = o.textColor;
@@ -354,6 +390,7 @@ export function normalizeGame(v: unknown): GameProject {
     width: Math.max(16, Math.min(1920, Math.round(num(o.width, 320)))),
     height: Math.max(16, Math.min(1080, Math.round(num(o.height, 180)))),
     zoom,
+    ...(num(o.uiScale, 1) > 1 ? { uiScale: Math.min(8, Math.round(num(o.uiScale, 1))) } : {}),
     background: str(o.background, '#181425'),
     startScene: str(o.startScene, ''),
     gravity: num(o.gravity, 900),
@@ -427,8 +464,21 @@ export function normalizeAtmosphere(v: unknown): SceneAtmosphere | undefined {
     tint: colorOr(A.tint),
     tintAmount: clampN(A.tintAmount, 0, 1),
     motes,
+    relief: normalizeRelief(A.relief),
   });
   return Object.keys(out).length ? out : undefined;
+}
+
+function normalizeRelief(v: unknown): SceneRelief | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const R = v as Record<string, unknown>;
+  const S = R.sun as Record<string, unknown> | undefined;
+  const sun: SceneSun | undefined =
+    S && typeof S === 'object'
+      ? compact({ angle: clampN(S.angle, -360, 360), elevation: clampN(S.elevation, 5, 90), color: colorOr(S.color), intensity: clampN(S.intensity, 0, 3), shade: colorOr(S.shade) })
+      : undefined;
+  // An empty object means "on with the defaults".
+  return compact({ strength: clampN(R.strength, 0, 2), bands: clampN(R.bands, 0, 16), rim: clampN(R.rim, 0, 2), lightHeight: clampN(R.lightHeight, 0.05, 2), tiles: typeof R.tiles === 'boolean' ? R.tiles : undefined, sun });
 }
 
 export function normalizeScene(v: unknown): Scene {
@@ -545,7 +595,11 @@ export interface SpriteAsset {
   grid: { width: number; height: number } | null;
   /** Spritesheet image (data URL) in exported games; absent in headless runs. */
   image?: string;
+  /** How the sprite takes per-pixel light. */
+  relief?: SpriteReliefSettings;
 }
+
+export type SpriteReliefSettings = SpriteRelief;
 
 // ---------------------------------------------------------------------------
 // Data tables (data/<name>.json): the game's database — items, weapons, classes, quests, enemies...
@@ -662,6 +716,12 @@ export function cellValue(t: DataTable, row: DataRow, col: string): DataValue {
 }
 
 /** Everything needed to run the game. */
+/** The screen in interface pixels. */
+export function interfaceSize(game: Pick<GameProject, 'width' | 'height' | 'uiScale'>): { width: number; height: number } {
+  const k = game.uiScale ?? 1;
+  return { width: game.width / k, height: game.height / k };
+}
+
 export interface GameBundle {
   game: GameProject;
   scenes: Record<string, Scene>;

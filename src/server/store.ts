@@ -8,13 +8,14 @@ import {
   newId,
   serializeSprite,
 } from '../core/sprite.js';
+import { type VfxGraph, normalizeVfx } from '../core/game/vfxGraph.js';
 import { type DataTable, type GameProject, type Scene, assertIdentifier, createGame, newGameId, normalizeGame, normalizeScene, normalizeTable } from '../core/game/types.js';
 
 const SUFFIX = '.sprite.json';
 const SCENE_SUFFIX = '.scene.json';
 export const GAME_FILE = 'game.json';
 
-export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data';
+export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data' | 'vfx';
 const SCRIPT_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
 const AUDIO_MIME: Record<string, string> = { mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4' };
 /** Script names are paths in scripts/ without .js: "enemies/Patrol". */
@@ -452,6 +453,61 @@ export class Workspace {
     fs.rmSync(this.tableFile(name));
   }
 
+  // ------------------------------------------------------------------ visual effects
+
+  get vfxDir(): string {
+    return path.join(this.dir, 'vfx');
+  }
+
+  vfxFile(name: string): string {
+    if (!SCRIPT_RE.test(name)) throw new Error(`Invalid effect name "${name}". Use letters, digits, "_" and "-".`);
+    return path.join(this.vfxDir, `${name}.json`);
+  }
+
+  vfxExists(name: string): boolean {
+    return fs.existsSync(this.vfxFile(name));
+  }
+
+  listVfx(): { name: string; nodes: number; description?: string; updatedAt: number; rev?: string }[] {
+    if (!fs.existsSync(this.vfxDir)) return [];
+    const out: { name: string; nodes: number; description?: string; updatedAt: number; rev?: string }[] = [];
+    for (const f of fs.readdirSync(this.vfxDir)) {
+      if (!f.endsWith('.json') || f.startsWith('.') || !SCRIPT_RE.test(f.slice(0, -5))) continue;
+      try {
+        const g = this.loadVfx(f.slice(0, -5));
+        out.push({ name: g.name, nodes: g.nodes.length, ...(g.description ? { description: g.description } : {}), updatedAt: fs.statSync(path.join(this.vfxDir, f)).mtimeMs, ...(g.rev ? { rev: g.rev } : {}) });
+      } catch {
+        // A broken file shouldn't hide the others.
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  loadVfx(name: string): VfxGraph {
+    const f = this.vfxFile(name);
+    if (!fs.existsSync(f)) {
+      const names = this.listVfx().map((g) => g.name);
+      throw new Error(`Effect "${name}" not found.${names.length ? ' Effects: ' + names.join(', ') : ' There are no effects yet.'}`);
+    }
+    return normalizeVfx(JSON.parse(fs.readFileSync(f, 'utf8')), name);
+  }
+
+  loadAllVfx(): Record<string, VfxGraph> {
+    return Object.fromEntries(this.listVfx().map((g) => [g.name, this.loadVfx(g.name)]));
+  }
+
+  saveVfx(graph: VfxGraph, updatedBy?: string): VfxGraph {
+    const g = normalizeVfx({ ...graph, rev: newGameId(), ...(updatedBy ? { updatedBy } : {}) }, graph.name);
+    const f = this.vfxFile(g.name);
+    fs.mkdirSync(this.vfxDir, { recursive: true });
+    this.atomicWrite(f, JSON.stringify(g, null, 2));
+    return g;
+  }
+
+  removeVfx(name: string): void {
+    fs.rmSync(this.vfxFile(name));
+  }
+
   private atomicWrite(target: string, data: string): void {
     const tmp = path.join(this.dir, `.${path.basename(target)}.${process.pid}.tmp`);
     fs.writeFileSync(tmp, data);
@@ -532,11 +588,23 @@ export class Workspace {
         onChange(name, 'data');
       }, 40));
     });
+    fs.mkdirSync(this.vfxDir, { recursive: true });
+    const vfxWatcher = fs.watch(this.vfxDir, (_event, filename) => {
+      if (!filename || !filename.endsWith('.json') || filename.startsWith('.')) return;
+      const name = filename.slice(0, -5);
+      const key = 'vfx:' + name;
+      clearTimeout(timers.get(key));
+      timers.set(key, setTimeout(() => {
+        timers.delete(key);
+        onChange(name, 'vfx');
+      }, 40));
+    });
     return () => {
       watcher.close();
       scriptWatcher.close();
       dialogueWatcher.close();
       dataWatcher.close();
+      vfxWatcher.close();
     };
   }
 }

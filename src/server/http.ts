@@ -18,6 +18,7 @@ import { renameComponentRefs } from '../core/game/refactor.js';
 import { SCRIPT_REFERENCE } from '../core/game/script.js';
 import { DIALOGUE_REFERENCE, buildDialogueBook } from '../core/game/dialogue.js';
 import { DIALOGUE_TEMPLATE } from './scripts.js';
+import { VFX_TEMPLATES, normalizeVfx } from '../core/game/vfxGraph.js';
 
 const WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
 
@@ -87,6 +88,11 @@ export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1
           const t = pws.loadTable(name);
           rev = t.rev;
           updatedBy = t.updatedBy;
+        } else if (kind === 'vfx') {
+          refreshScriptTypes(pws);
+          const g = pws.loadVfx(name);
+          rev = g.rev ?? null;
+          updatedBy = g.updatedBy;
         } else if (kind === 'scene') {
           const sc = pws.loadScene(name);
           rev = sc.rev;
@@ -198,6 +204,7 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
   if (parts[1] === 'scripts') return handleScripts(ws, req, res, parts.slice(2));
   if (parts[1] === 'dialogues') return handleDialogues(ws, req, res, parts.slice(2));
   if (parts[1] === 'data') return handleData(ws, req, res, parts.slice(2));
+  if (parts[1] === 'vfx') return handleVfx(ws, req, res, parts.slice(2));
   if (parts[1] === 'audio') return handleAudio(ws, req, res, parts.slice(2));
 
   if (parts[1] !== 'sprites') throw new HttpError(404, 'Not found');
@@ -528,6 +535,47 @@ async function handleData(ws: Workspace, req: http.IncomingMessage, res: http.Se
     t.name = body.to;
     ws.saveTable(t, 'editor');
     ws.removeTable(name);
+    return sendJson(res, 200, { name: body.to });
+  }
+  throw new HttpError(404, 'Not found');
+}
+
+/** Visual effects: /api/vfx (list, create), /api/vfx/<name> (get, put, delete), /api/vfx/<name>/rename. */
+async function handleVfx(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {
+  const method = req.method ?? 'GET';
+  const name = parts[0];
+  if (!name) {
+    if (method === 'GET') return sendJson(res, 200, ws.listVfx());
+    if (method === 'POST') {
+      const body = (await readJson(req)) as { name: string; template?: string };
+      if (ws.vfxExists(body.name)) throw new HttpError(409, `Effect "${body.name}" already exists`);
+      const tpl = VFX_TEMPLATES.find((t) => t.id === body.template);
+      const g = ws.saveVfx(normalizeVfx({ name: body.name, ...(tpl ? { description: tpl.description, ...tpl.graph } : {}) }, body.name), 'editor');
+      return sendJson(res, 201, g);
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  const sub = parts[1];
+  if (!sub) {
+    if (method === 'GET') return sendJson(res, 200, ws.loadVfx(name));
+    if (method === 'PUT') {
+      const body = (await readJson(req)) as Record<string, unknown>;
+      const g = ws.saveVfx(normalizeVfx({ ...body, name }, name), 'editor');
+      return sendJson(res, 200, { rev: g.rev, graph: g });
+    }
+    if (method === 'DELETE') {
+      ws.removeVfx(name);
+      return sendJson(res, 200, { ok: true });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (sub === 'rename' && method === 'POST') {
+    const body = (await readJson(req)) as { to: string };
+    if (ws.vfxExists(body.to)) throw new HttpError(409, `Effect "${body.to}" already exists`);
+    const g = ws.loadVfx(name);
+    g.name = body.to;
+    ws.saveVfx(g, 'editor');
+    ws.removeVfx(name);
     return sendJson(res, 200, { name: body.to });
   }
   throw new HttpError(404, 'Not found');

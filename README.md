@@ -19,7 +19,7 @@ Avvia l'editor web (sprite salvati in `./sprites`):
 npm start
 ```
 
-Poi apri http://localhost:7420. Le schede in alto sono le parti del gioco: **Sprites** (asset), **Objects** (tipi di oggetto), **Scenes** (livelli), **Dialogues** (conversazioni), **Scripts** (codice), **Data** (tabelle: oggetti, armi, classi, nemici…), **Game** (impostazioni ed export), più **Play** ed **Export**. Il pulsante con il nome del progetto, in alto a sinistra, apre la pagina **Projects**.
+Poi apri http://localhost:7420. Le schede in alto sono le parti del gioco: **Sprites** (asset), **Objects** (tipi di oggetto), **Scenes** (livelli), **Dialogues** (conversazioni), **Scripts** (codice), **Data** (tabelle: oggetti, armi, classi, nemici…), **VFX** (effetti visivi di attacchi e magie), **Game** (impostazioni ed export), più **Play** ed **Export**. Il pulsante con il nome del progetto, in alto a sinistra, apre la pagina **Projects**.
 
 ### Progetti
 
@@ -139,6 +139,14 @@ export default class Patrol extends Behaviour {
 - `goto('dungeon', { fade: 0.4 })` e `restart({ fade: 0.3 })` fanno una dissolvenza in nero (o del colore scelto). Anche le azioni evento *Go to scene* e *Restart scene* hanno il campo *fade*.
 
 **Particelle.** `particles(x, y, 'dust')` crea una raffica di particelle. Preset: `dust`, `sparks`, `hit`, `explosion`, `smoke`, `magic`, `leaves`, `splash`, `confetti`, `heal`. Si possono anche definire da zero (`{ color, speed, angle, spread, life, size, gravity, drag, fade, shrink, behind }`). Negli eventi c'è l'azione **Particles**; in libreria `fx/ParticleEmitter` produce particelle di continuo (polvere sotto i piedi, torce, aure).
+
+**Effetti visivi (VFX).** La scheda **VFX** crea gli effetti di attacchi, magie e colpi come piccoli **grafi di nodi** (`vfx/<nome>.json`): *Start* parte, ogni nodo fa la sua cosa e alla fine attiva i nodi collegati dopo di lui. Due fili che escono dallo stesso nodo vanno in parallelo, un *Delay* li sfasa.
+
+- **Nodi**: flusso (*Delay*, *Repeat*, *Message*), forme (*Slash*, *Ring*, *Beam* con laser e fulmini, *Projectile* che insegue il bersaglio, *Sprite* per animazioni disegnate a mano), *Particles* (raffica o flusso), feedback (*Screen flash*, *Light*, *Screen shake*, *Hit stop*, *Blink*, *Sound*).
+- **Editor**: si trascina da un pallino a un nodo per collegarli; a destra i parametri, l'anteprima in loop con attaccante (blu) e bersaglio (rosso) trascinabili, la timeline. Si parte da zero o da un modello (fendente, impatto, palla di fuoco, fulmine, cura).
+- **Nel gioco**: `await vfx('fireball', self, nemico)` finisce quando finisce l'effetto; opzioni `{ tint, scale, speed, angle }`. Senza bersaglio parte nella direzione in cui guarda l'istanza. Negli eventi c'è l'azione **Play effect**; un evento di frame chiamato `vfx:slash` lo lancia su quel fotogramma.
+- **Quando applicare il danno**: un nodo *Message* (`hit`) nel punto in cui il colpo arriva equivale a `emit('hit', { effect, x, y })`, quindi `this.on('hit', ...)` o il trigger *Message received*.
+- **Da Claude**: `vfx_reference`, `write_vfx`, `update_vfx`, `preview_vfx` (filmstrip e timeline). Le modifiche compaiono dal vivo nella scheda.
 
 **Eventi sui frame delle animazioni.** Nell'editor degli sprite, il campo ⚑ accanto alla durata assegna degli eventi a un frame, per esempio `hit` sul frame del colpo di spada o `step` sui passi. Quando quel frame compare, i componenti ricevono `onAnimationEvent(evento, animazione)` e negli eventi scatta il trigger **Animation event**.
 
@@ -312,6 +320,7 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Verifica | `preview` (righelli con coordinate, `region` per lo zoom, `tags` = una riga per animazione, `onion`, `diff`, `compare`/`underlay` col riferimento), `lint` (problemi con coordinate), `read_pixels` (griglia testuale) |
 | Export/import | `export_spritesheet` (PNG + JSON), `import_png` |
 | Gioco | `game_reference` (vocabolario completo di trigger, condizioni, azioni, comportamenti ed espressioni), `get_game`, `set_game`, `set_object`, `delete_object`, `set_events` |
+| Effetti visivi | `vfx_reference`, `list_vfx`, `read_vfx`, `write_vfx`, `update_vfx`, `delete_vfx`, `preview_vfx` (grafi in `vfx/`) |
 | Dati | `list_data`, `read_data`, `write_data`, `update_data`, `delete_data` (tabelle in `data/`); `place_instances` / `update_instances` con `active_if` |
 | Scene | `create_scene`, `get_scene` (anche la mappa come griglia di caratteri), `update_scene`, `delete_scene`, `set_tile_layer`, `paint_tiles` (righe + legenda come `draw_pixels`, o rettangoli), `place_instances`, `update_instances`, `tileset_preview` (indici dei tile) |
 | Dialoghi | `dialogue_reference`, `list_dialogues`, `read_dialogue`, `write_dialogue` (controllato prima di salvare), `edit_dialogue`, `delete_dialogue`; `place_instances` / `update_instances` con nome, sprite e `props.dialogue` per istanza |
@@ -430,6 +439,7 @@ Il workspace (default `./sprites`) contiene tutto il progetto:
 - `scripts/<cartella>/<Nome>.js`: gli script del gioco (componenti e moduli), più `jsconfig.json` e `spritifer.d.ts` generati per l'autocompletamento negli IDE;
 - `dialogues/<nome>.dialogue`: i dialoghi;
 - `data/<tabella>.json`: le tabelle dati (colonne tipizzate e righe con `id`).
+- `vfx/<nome>.json`: gli effetti visivi (nodi e fili).
 
 Sono JSON leggibili e versionabili. L'editor e il server MCP leggono e scrivono gli stessi file; un watcher notifica le modifiche al browser via WebSocket.
 

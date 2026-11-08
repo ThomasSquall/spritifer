@@ -199,6 +199,7 @@ export const GLOBALS: ApiEntry[] = [
   fn('overlapCircle', 'overlapCircle(x: number, y: number, radius: number, filter?: QueryFilter): Instance[]', 'Instances whose hitbox touches a circle: explosions, auras.'),
   fn('raycast', 'raycast(x1: number, y1: number, x2: number, y2: number, filter?: QueryFilter & { solids?: boolean; instances?: boolean }): RayHit | null', 'First thing on the segment: solid tiles and solid instances, plus instances matching { tag, object } (or any with instances: true). null = clear. Line of sight: raycast(me.centerX, me.centerY, p.centerX, p.centerY, { object: "player", ignore: me })?.instance === p'),
   fn('particles', "particles(x: number, y: number, preset?: ParticlePreset | ParticleOptions, overrides?: ParticleOptions): void", 'A burst of pixel particles: particles(self.centerX, self.y, "dust"), particles(x, y, "explosion", { count: 60 }), or your own { color: ["#fff", "#ff0"], speed: [20, 60], angle: -90, spread: 90, life: 0.5, size: [1, 2], gravity: 100, drag: 1, fade: true, shrink: true, behind: false }.', "particles($0)"),
+  fn('vfx', "vfx(effect: VfxName, from: Instance | { x: number; y: number }, to?: Instance | { x: number; y: number } | null, opts?: VfxOptions): Promise<void>", 'Plays a visual effect from the VFX tab; resolves when it ends. await vfx("fireball", self, enemy). Without a target it fires where "from" is facing. Options: { tint: "#ff4060", scale: 1.5, speed: 1.2, angle: 90, onMessage: m => ... }. Message nodes also reach this.on() and events.', "vfx('$0', this.self)"),
   fn('findPath', 'findPath(x1: number, y1: number, x2: number, y2: number, opts?: { diagonal?: boolean; partial?: boolean }): { x: number; y: number }[] | null', 'Waypoints from one point to another around solid tiles and instances (null = no way; partial: as close as possible).'),
   fn('isSolidAt', 'isSolidAt(x: number, y: number): boolean', 'A solid tile or solid instance at a world point (ledge checks, placement).'),
   fn('findComponent', 'findComponent<T = any>(type: ComponentName): T | null', 'First component of a type anywhere (game, scene or instances).', "findComponent('$0')"),
@@ -342,6 +343,7 @@ UI WIDGETS AND PAUSE (inside onDraw(ui))
 PARTICLES AND ANIMATION EVENTS
 - particles(x, y, 'dust' | 'sparks' | 'hit' | 'explosion' | 'smoke' | 'magic' | 'leaves' | 'splash' | 'confetti' | 'heal', { count, color, speed, angle, spread, life, size, gravity, drag, fade, shrink, behind })
 - Frames can carry events (sprite editor ⚑ field, MCP set_frame_events): onAnimationEvent(event, animation) in components, trigger "Animation event" in events
+- await vfx('fireball', self, enemy, { tint, scale, speed, angle }): plays a graph from the VFX tab, Message nodes inside it tell you when it connects (this.on('hit', ...)). A frame event named "vfx:slash" plays it on that frame.
 
 PATHS, CAMERA, VARIANTS
 - await self.pathTo(x, y, speed, { diagonal, maxSteps }) walks around walls (A* on tiles); self.stopMoving(); findPath(x1, y1, x2, y2) → waypoints | null
@@ -404,6 +406,7 @@ export interface ProjectTypeInfo {
   tags?: string[];
   /** Audio files (audio/). */
   audio?: string[];
+  vfx?: string[];
   /** Data tables: name → columns (for typed rows). */
   tables?: Record<string, { description?: string; columns: { name: string; type: string; help?: string }[] }>;
 }
@@ -451,8 +454,10 @@ type AudioName = ${union(p.audio ?? [])};
 type SceneName = ${union(p.scenes)};
 type SoundName = ${union(p.sounds)};
 type DialogueName = ${union(p.dialogues)};
+type VfxName = ${union(p.vfx ?? [])};
+interface VfxOptions { tint?: string; scale?: number; speed?: number; angle?: number; onMessage?: (message: string) => void }
 type ParticlePreset = 'dust' | 'sparks' | 'hit' | 'explosion' | 'smoke' | 'magic' | 'leaves' | 'splash' | 'confetti' | 'heal';
-interface ParticleOptions { count?: number; color?: string | string[]; speed?: number | [number, number]; angle?: number; spread?: number; life?: number | [number, number]; size?: number | [number, number]; gravity?: number; drag?: number; fade?: boolean; shrink?: boolean; areaW?: number; areaH?: number; behind?: boolean }
+interface ParticleOptions { count?: number; color?: string | string[]; speed?: number | [number, number]; angle?: number; spread?: number; life?: number | [number, number]; size?: number | [number, number]; gravity?: number; drag?: number; fade?: boolean; shrink?: boolean; areaW?: number; areaH?: number; behind?: boolean; colorOverLife?: boolean; additive?: boolean }
 type EaseName = 'linear' | 'inQuad' | 'outQuad' | 'inOutQuad' | 'inCubic' | 'outCubic' | 'inOutCubic' | 'inOutSine' | 'outBack' | 'outElastic' | 'outBounce';
 type TagName = ${union(p.tags ?? [])};
 interface QueryFilter { tag?: TagName; object?: ObjectName; ignore?: Instance | Instance[] }

@@ -2,6 +2,7 @@
 
 import type { DataTable, GameProject, Scene, SpriteAsset } from '../core/game/types.js';
 import type { Problem } from '../core/game/catalog.js';
+import type { VfxGraph } from '../core/game/vfxGraph.js';
 import type { ScriptInfo } from '../core/game/script.js';
 import { apiBase } from './api.js';
 
@@ -94,6 +95,12 @@ export const gameApi = {
   createDialogue: (name: string) => req<{ name: string }>('POST', `${apiBase()}/dialogues`, { name }),
   deleteDialogue: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/dialogues/${enc(name)}`),
   renameDialogue: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/dialogues/${enc(name)}/rename`, { to }),
+  listVfx: () => req<{ name: string; nodes: number; description?: string; updatedAt: number; rev?: string }[]>('GET', `${apiBase()}/vfx`),
+  getVfx: (name: string) => req<VfxGraph>('GET', `${apiBase()}/vfx/${enc(name)}`),
+  saveVfx: (g: VfxGraph) => req<{ rev: string; graph: VfxGraph }>('PUT', `${apiBase()}/vfx/${enc(g.name)}`, g),
+  createVfx: (name: string, template?: string) => req<VfxGraph>('POST', `${apiBase()}/vfx`, { name, ...(template ? { template } : {}) }),
+  deleteVfx: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/vfx/${enc(name)}`),
+  renameVfx: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/vfx/${enc(name)}/rename`, { to }),
   listTables: () => req<TableSummary[]>('GET', `${apiBase()}/data`),
   getTable: (name: string) => req<DataTable>('GET', `${apiBase()}/data/${enc(name)}`),
   saveTable: (t: DataTable) => req<{ rev: string; table: DataTable }>('PUT', `${apiBase()}/data/${enc(t.name)}`, t),

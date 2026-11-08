@@ -35,10 +35,12 @@ export class CanvasRenderer implements Renderer {
     c.restore();
   }
 
-  rect(x: number, y: number, w: number, h: number, color: string, alpha = 1): void {
+  rect(x: number, y: number, w: number, h: number, color: string, alpha = 1, blend?: 'add'): void {
     this.ctx.globalAlpha = alpha;
     this.ctx.fillStyle = color;
+    if (blend === 'add') this.ctx.globalCompositeOperation = 'lighter';
     this.ctx.fillRect(x, y, w, h);
+    if (blend === 'add') this.ctx.globalCompositeOperation = 'source-over';
     this.ctx.globalAlpha = 1;
   }
 

@@ -31,7 +31,8 @@ import {
   normalizeTable,
   resizeScene,
 } from '../core/game/types.js';
-import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePreview, renderViewport } from './game.js';
+import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePreview, renderVfxStrip, renderViewport } from './game.js';
+import { type VfxEdge, type VfxGraph, VFX_NAME_RE, VFX_REFERENCE, VFX_TEMPLATES, VFX_TEMPLATE_IDS, VFX_NODE_TYPES, checkVfx, normalizeVfx, vfxEdgePort, vfxHasCycle, vfxInputErrors } from '../core/game/vfxGraph.js';
 import { encodePng } from './png.js';
 import { scaleBitmap } from '../core/draw.js';
 import type { Workspace } from './store.js';
@@ -68,6 +69,7 @@ Model:
 - RPGs: top-down player (topdown + camera, sprite tags walk_<dir>/idle_<dir>), scene y_sort and persistent (towns remember chests/positions after battles), solid tile layers for walls, NPCs and chests via dialogues (~ self.opened = true), an intro via a scene event (start → dialogue), battles in a scene driven by a scene component (class Battle extends Behaviour { async start() {...} } attached to the battle scene).
 - Juice and polish: particles(x, y, "dust"|"sparks"|"explosion"...) or the event action Particles (and the ParticleEmitter component), animation events on frames (set_frame_events: "hit" on the swing frame → onAnimationEvent / trigger "Animation event"), music per scene (import_audio, update_scene music, music("name")), camera zoom/dead zone/look ahead, tweens, fades.
 - Menus and HUD: inside onDraw use ui.menu / ui.button / ui.window (keyboard, gamepad and mouse ready) and pause(true) for pause menus and inventories. Input actions (set_game actions: { attack: ["x", "pad:b"] }) give controls names usable everywhere like keys.
+- Visual effects (vfx_reference, write_vfx, update_vfx, preview_vfx): attacks, spells and hits as small flow graphs of slashes, shockwaves, beams, projectiles, particles, flashes, shake and hit stop. Played with await vfx("fireball", self, enemy), the event action "Play effect", or a frame event "vfx:slash". Put a Message node where the attack connects and apply damage there. Check them with preview_vfx.
 - Data tables (write_data / update_data / read_data / list_data): the game's database in data/<table>.json — items, weapons with tiers and prices, classes, skills, enemy stats, shop stock, quest rewards. Scripts read db.weapons, db.get('weapons', 'bronze'), db.where('weapons', { tier: 2 }); events, dialogues and activeIf read db("weapons", "bronze", "price"). Prefer tables over constants in scripts for anything a designer would tweak.
 - Things that appear as the game progresses (a town that grows: new buildings, residents, upgraded shops, opened bridges): place them once with active_if (an expression such as "inn_lv >= 1" or "quest_bram == 2"); the engine shows them only while it is true, checking continuously. fn("name", args) in expressions calls a func() from a plain script (synchronous), for conditions too complex for an expression.
 - Projects: list_projects / open_project / create_project switch between games; each project folder has its own sprites, scenes, scripts and game.json.
@@ -1180,6 +1182,147 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     ws.removeTable(a.table);
     return text(`Deleted data/${a.table}.json.`);
   }, { destructiveHint: true });
+
+  // ------------------------------------------------------------------ visual effects
+
+  const vfxNodeSchema = z.object({
+    id: z.string().describe('Unique in the effect, used by the wires, e.g. "boom"'),
+    type: z.enum(VFX_NODE_TYPES as [string, ...string[]]),
+    params: z.record(z.string(), z.unknown()).optional().describe('See vfx_reference; anything omitted keeps its default'),
+  });
+  const vfxEdgeSchema = z.object({ from: z.string(), to: z.string(), port: z.string().optional().describe('Only for nodes with several outputs (repeat: each, done)') });
+
+  const vfxText = (g: VfxGraph): string => {
+    const params = (p: Record<string, unknown>) => (Object.keys(p).length ? ` ${JSON.stringify(p)}` : '');
+    return `Effect "${g.name}"${g.description ? ` — ${g.description}` : ''}\nNodes:\n${g.nodes.map((n) => `- ${n.id}: ${n.type}${params(n.params)}`).join('\n')}\nWires:\n${g.edges.map((e) => `- ${e.from}${e.port ? `.${e.port}` : ''} -> ${e.to}`).join('\n') || '- none'}`;
+  };
+  const vfxProblems = (g: VfxGraph): string[] => checkVfx(g, { sprites: new Map(ws.list().map((s) => [s.name, s.tags ?? []])), sounds: [...SOUNDS, ...ws.listAudio().map((x) => x.name)] });
+  const vfxPreview = (g: VfxGraph, o: Parameters<typeof renderVfxStrip>[2] = {}) => {
+    const { png, timeline, times } = renderVfxStrip(loadGameBundle(ws), g, o);
+    const spans = timeline.spans.map((s) => `  ${s.from.toFixed(2)}–${s.to.toFixed(2)}s ${s.id} (${s.type})`).join('\n');
+    const messages = timeline.messages.length ? `\nMessages: ${timeline.messages.map((m) => `"${m.message}" at ${m.time.toFixed(2)}s`).join(', ')}` : '\nNo Message node: nothing tells the game when it connects.';
+    return [...text(`"${g.name}" lasts ${timeline.duration.toFixed(2)}s, peak ${timeline.peakParticles} particles.${messages}\nTimeline:\n${spans}\nFilmstrip at ${times.map((t) => t.toFixed(2)).join(', ')}s (blue = source, red = target).`), image(png)];
+  };
+  const saveVfxChecked = (raw: unknown, name: string): Content => {
+    const g = normalizeVfx(raw, name);
+    if (vfxHasCycle(g)) throw new Error('The wires form a loop; an effect has to end. Use a Repeat node.');
+    const saved = ws.saveVfx(g, AUTHOR);
+    const problems = vfxProblems(saved);
+    return text(`Saved vfx/${saved.name}.json. Scripts: await vfx("${saved.name}", self, target).\n${vfxText(saved)}${problems.length ? `\nPROBLEMS:\n${problems.map((p) => `- ${p}`).join('\n')}` : ''}`);
+  };
+  const failOnInputErrors = (nodes: { id?: unknown; type?: unknown; params?: Record<string, unknown> }[]) => {
+    const errors = vfxInputErrors(nodes);
+    if (errors.length) throw new Error(errors.join('\n'));
+  };
+
+  tool('vfx_reference', 'Reference of visual effect graphs: every node with its params and defaults, and how to play effects from scripts, events and animation frames. Read it before writing effects.', {}, () => text(VFX_REFERENCE), { readOnlyHint: true });
+
+  tool('list_vfx', 'List the visual effects (vfx/<name>.json).', {}, () => {
+    const list = ws.listVfx();
+    return text(list.length ? list.map((g) => `- ${g.name}: ${g.nodes} nodes${g.description ? ` — ${g.description}` : ''}`).join('\n') : `No effects yet. Create one with write_vfx (templates: ${VFX_TEMPLATE_IDS.join(', ')}).`);
+  }, { readOnlyHint: true });
+
+  tool('read_vfx', 'Read a visual effect: its nodes with their params, and its wires.', { effect: z.string() }, (a) => text(vfxText(ws.loadVfx(a.effect))), { readOnlyHint: true });
+
+  tool(
+    'write_vfx',
+    'Create or replace a visual effect: a flow graph for an attack, spell or hit (see vfx_reference). Give nodes and edges, or a template to start from (nodes/edges then replace nothing: use update_vfx to tweak it). A Start node with id "start" is added if missing. The web editor (VFX tab) shows it live.',
+    {
+      effect: z.string().describe('Name, e.g. "fireball"'),
+      description: z.string().optional(),
+      template: z.enum(VFX_TEMPLATE_IDS as [string, ...string[]]).optional(),
+      nodes: z.array(vfxNodeSchema).optional(),
+      edges: z.array(vfxEdgeSchema).optional(),
+      preview: z.boolean().optional().describe('Also return the filmstrip'),
+    },
+    (a) => {
+      if (!VFX_NAME_RE.test(a.effect)) throw new Error(`Invalid effect name "${a.effect}". Use letters, digits, "_" and "-".`);
+      const tpl = VFX_TEMPLATES.find((t) => t.id === a.template);
+      if (!tpl && !a.nodes) throw new Error('Give nodes (and edges), or a template.');
+      failOnInputErrors(a.nodes ?? []);
+      const out = saveVfxChecked(a.nodes ? { description: a.description ?? tpl?.description, nodes: a.nodes, edges: a.edges ?? [] } : { description: a.description ?? tpl?.description, ...tpl!.graph }, a.effect);
+      return a.preview ? [...out, ...vfxPreview(ws.loadVfx(a.effect))] : out;
+    },
+  );
+
+  tool(
+    'update_vfx',
+    'Tweak a visual effect without rewriting it: change params of nodes (only the ones you give), add or remove nodes, connect or disconnect wires, rename.',
+    {
+      effect: z.string(),
+      description: z.string().optional(),
+      set: z.record(z.string(), z.record(z.string(), z.unknown())).optional().describe('Node id → params to change, e.g. { "arc": { "radius": 28, "colors": ["#fff", "#f00"] } }'),
+      add_nodes: z.array(vfxNodeSchema).optional(),
+      remove_nodes: z.array(z.string()).optional(),
+      connect: z.array(vfxEdgeSchema).optional(),
+      disconnect: z.array(vfxEdgeSchema).optional(),
+      rename_to: z.string().optional(),
+      preview: z.boolean().optional().describe('Also return the filmstrip'),
+    },
+    (a) => {
+      const g = ws.loadVfx(a.effect);
+      failOnInputErrors(a.add_nodes ?? []);
+      for (const [id, params] of Object.entries(a.set ?? {})) {
+        const node = g.nodes.find((n) => n.id === id);
+        if (!node) throw new Error(`No node "${id}" in "${a.effect}" (nodes: ${g.nodes.map((n) => n.id).join(', ')})`);
+        failOnInputErrors([{ id, type: node.type, params }]);
+        Object.assign(node.params, params);
+      }
+      for (const id of a.remove_nodes ?? []) {
+        const node = g.nodes.find((n) => n.id === id);
+        if (!node) throw new Error(`No node "${id}" in "${a.effect}"`);
+        if (node.type === 'start') throw new Error('The Start node cannot be removed');
+        g.nodes = g.nodes.filter((n) => n.id !== id);
+        g.edges = g.edges.filter((e) => e.from !== id && e.to !== id);
+      }
+      for (const n of a.add_nodes ?? []) {
+        if (g.nodes.some((x) => x.id === n.id)) throw new Error(`Node "${n.id}" already exists`);
+        // No position: normalizing places it in the column its wires call for.
+        g.nodes.push({ id: n.id, type: n.type, params: (n.params ?? {}) as VfxGraph['nodes'][number]['params'] } as VfxGraph['nodes'][number]);
+      }
+      const sameWire = (x: VfxEdge, y: VfxEdge) => x.from === y.from && x.to === y.to && vfxEdgePort(g, x) === vfxEdgePort(g, y);
+      for (const d of a.disconnect ?? []) {
+        if (!g.edges.some((e) => sameWire(e, d))) throw new Error(`No wire ${d.from} -> ${d.to}`);
+        g.edges = g.edges.filter((e) => !sameWire(e, d));
+      }
+      for (const c of a.connect ?? []) {
+        for (const id of [c.from, c.to]) if (!g.nodes.some((n) => n.id === id)) throw new Error(`No node "${id}" in "${a.effect}"`);
+        g.edges.push(c);
+      }
+      if (a.description !== undefined) g.description = a.description;
+      const to = a.rename_to ?? a.effect;
+      if (a.rename_to && a.rename_to !== a.effect) {
+        if (!VFX_NAME_RE.test(a.rename_to)) throw new Error(`Invalid effect name "${a.rename_to}"`);
+        if (ws.vfxExists(a.rename_to)) throw new Error(`Effect "${a.rename_to}" already exists`);
+      }
+      const out = saveVfxChecked(g, to);
+      if (to !== a.effect) ws.removeVfx(a.effect);
+      return a.preview ? [...out, ...vfxPreview(ws.loadVfx(to))] : out;
+    },
+  );
+
+  tool('delete_vfx', 'Delete a visual effect.', { effect: z.string() }, (a) => {
+    ws.loadVfx(a.effect);
+    ws.removeVfx(a.effect);
+    return text(`Deleted vfx/${a.effect}.json.\n\n${problemsText()}`);
+  }, { destructiveHint: true });
+
+  tool(
+    'preview_vfx',
+    'See a visual effect: a filmstrip of evenly spaced moments drawn as in the game (blue block = source, red block = target) and its timeline: when each node runs, when messages fire, how long it lasts. Use it after every change.',
+    {
+      effect: z.string(),
+      frames: z.number().int().min(1).max(24).optional().describe('Moments to show (default 8)'),
+      scale: z.number().int().min(1).max(4).optional().describe('Zoom (default 2)'),
+      distance: z.number().int().min(16).max(400).optional().describe('Pixels between source and target (default 96)'),
+      dark: z.boolean().optional().describe('Dark scene, to judge Light nodes and glow'),
+      tint: z.string().optional().describe('Preview vfx(..., { tint })'),
+      speed: z.number().positive().optional().describe('Preview vfx(..., { speed })'),
+      size: z.number().positive().optional().describe('Preview vfx(..., { scale })'),
+    },
+    (a) => vfxPreview(ws.loadVfx(a.effect), a),
+    { readOnlyHint: true },
+  );
 
   tool('validate_game', 'Check the game for problems: unknown triggers/actions/behaviors, bad expressions, missing sprites, objects and scenes.', {}, () => text(problemsText()), { readOnlyHint: true });
 

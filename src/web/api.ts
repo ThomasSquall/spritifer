@@ -68,7 +68,7 @@ export const api = {
 };
 
 export interface ChangeEvent {
-  type: 'sprite-changed' | 'scene-changed' | 'game-changed' | 'script-changed' | 'dialogue-changed' | 'data-changed';
+  type: 'sprite-changed' | 'scene-changed' | 'game-changed' | 'script-changed' | 'dialogue-changed' | 'data-changed' | 'vfx-changed';
   /** Project the change belongs to. */
   project?: string;
   name: string;

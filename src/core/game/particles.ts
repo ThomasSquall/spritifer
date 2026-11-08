@@ -31,6 +31,10 @@ export interface ParticleOptions {
   areaH?: number;
   /** Draw behind the instances (above tiles). */
   behind?: boolean;
+  /** Each particle goes through the colors as it ages, instead of picking one. */
+  colorOverLife?: boolean;
+  /** Blend by adding light (glows on dark backgrounds). */
+  additive?: boolean;
 }
 
 export const PARTICLE_PRESETS: Record<string, ParticleOptions> = {
@@ -57,6 +61,9 @@ interface Particle {
   life: number;
   size: number;
   color: string;
+  /** Colors over its life. */
+  ramp: string[] | null;
+  additive: boolean;
   gravity: number;
   drag: number;
   fade: boolean;
@@ -102,6 +109,8 @@ export class ParticleSystem {
         life: Math.max(0.02, this.pick(o.life, 0.5)),
         size: Math.max(1, this.pick(o.size, 1)),
         color: colors[Math.floor(this.random() * colors.length)] ?? '#ffffff',
+        ramp: o.colorOverLife && colors.length > 1 ? colors : null,
+        additive: o.additive ?? false,
         gravity: o.gravity ?? 0,
         drag: o.drag ?? 0,
         fade: o.fade ?? false,
@@ -140,7 +149,7 @@ export class ParticleSystem {
       if (p.behind !== behind) continue;
       const t = p.age / p.life;
       const size = Math.max(1, Math.round((p.shrink ? p.size * (1 - t) : p.size) * zoom));
-      r.rect(Math.round((p.x - camX) * zoom - size / 2), Math.round((p.y - camY) * zoom - size / 2), size, size, p.color, p.fade ? Math.max(0, 1 - t) : 1);
+      r.rect(Math.round((p.x - camX) * zoom - size / 2), Math.round((p.y - camY) * zoom - size / 2), size, size, p.ramp ? p.ramp[Math.min(p.ramp.length - 1, Math.floor(t * p.ramp.length))] : p.color, p.fade ? Math.max(0, 1 - t) : 1, p.additive ? 'add' : undefined);
     }
   }
 }

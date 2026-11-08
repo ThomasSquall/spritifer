@@ -78,6 +78,7 @@ export function refreshScriptTypes(ws: Workspace, info?: ScriptInfo): boolean {
       properties,
       tags: [...new Set(game.objects.flatMap((o) => o.tags ?? []))].sort(),
       audio: ws.listAudio().map((a) => a.name),
+      vfx: ws.listVfx().map((g) => g.name),
       tables: Object.fromEntries(Object.values(ws.loadTables()).map((t) => [t.name, { description: t.description, columns: t.columns }])),
     });
     const a = ws.writeScriptSupportFile('jsconfig.json', JSCONFIG);

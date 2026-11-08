@@ -18,6 +18,8 @@ class GameState {
   audio: string[] = [];
   /** What the project scripts register (for dropdowns) and their loading errors. */
   scriptInfo: ScriptInfo = { behaviors: [], functions: [], errors: [], components: [] };
+  /** Visual effect names (VFX tab). */
+  vfx: string[] = [];
   /** Data tables (Data tab): names, columns, row counts. */
   tables: TableSummary[] = [];
   /** Dialogue names and parse errors (Dialogues tab). */
@@ -28,7 +30,7 @@ class GameState {
   private dirty = false;
 
   async load(): Promise<void> {
-    const [game, sprites, scenes, scriptInfo, dialogueInfo, audio, tables] = await Promise.all([
+    const [game, sprites, scenes, scriptInfo, dialogueInfo, audio, tables, vfx] = await Promise.all([
       gameApi.getGame(),
       api.list(),
       gameApi.listScenes(),
@@ -36,7 +38,9 @@ class GameState {
       gameApi.dialogueInfo().catch(() => this.dialogueInfo),
       gameApi.listAudio().catch(() => []),
       gameApi.listTables().catch(() => []),
+      gameApi.listVfx().catch(() => []),
     ]);
+    this.vfx = vfx.map((v) => v.name);
     this.tables = tables;
     this.audio = audio.map((a) => a.name);
     this.scriptInfo = scriptInfo;
@@ -124,7 +128,12 @@ class GameState {
   }
 
   /** Handles live notifications from the server (Claude editing through MCP, other tabs). */
-  async remote(kind: 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data', rev: string | null): Promise<boolean> {
+  async remote(kind: 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data' | 'vfx', rev: string | null): Promise<boolean> {
+    if (kind === 'vfx') {
+      this.vfx = (await gameApi.listVfx()).map((v) => v.name);
+      this.emit();
+      return true;
+    }
     if (kind === 'data') {
       this.tables = await gameApi.listTables();
       this.emit();

@@ -50,6 +50,7 @@ export function sheetContext(obj: ObjectType | null, animations: string[]): Shee
     sprites: state.sprites.map((s) => s.name),
     audio: state.audio,
     actions: Object.keys(g.actions ?? {}),
+    vfx: state.vfx,
   };
 }
 

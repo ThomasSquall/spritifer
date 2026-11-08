@@ -12,6 +12,7 @@ import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, field
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
 import { resolveObjectTypes } from './variants.js';
 import { ParticleSystem } from './particles.js';
+import { type VfxAnchor, type VfxPoint, VfxSystem } from './vfx.js';
 import { TileResolver, tilesetFrame } from './tilerules.js';
 import { MoteField, type ScreenLight, drawClouds, drawShadows, postProcess } from './atmosphere.js';
 
@@ -268,6 +269,17 @@ export class World {
   cameraTarget: Actor | null | undefined = undefined;
   /** Visual particles (world space). */
   readonly particles = new ParticleSystem(() => this.random());
+  /** Visual effect graphs playing now (vfx/). Reports to the game through this host. */
+  readonly vfx = new VfxSystem({
+    asset: (name) => this.bundle.sprites[name],
+    sound: (name, volume) => this.opts.sound?.(name, volume),
+    shake: (intensity, seconds) => this.startShake(intensity, seconds),
+    hitstop: (seconds) => (this.hitstopUntil = Math.max(this.hitstopUntil, this.clock + seconds)),
+    message: (message, data) => this.emit(message, data),
+    log: (message) => this.log(message),
+  });
+  /** Hit stop: the game holds still until this clock time, effects keep playing. */
+  private hitstopUntil = 0;
   /** Ambient floating particles of the scene atmosphere (own random: gameplay stays deterministic). */
   readonly motes = new MoteField();
   private resolvers = new Map<string, TileResolver>();
@@ -488,6 +500,8 @@ export class World {
     this.camera = { x: 0, y: 0, zoom: 1 };
     this.paused = false;
     this.particles?.clear();
+    this.vfx?.clear();
+    this.hitstopUntil = 0;
     this.cameraBounds = null;
     this.cameraTarget = undefined;
     this.lookX = 0;
@@ -900,6 +914,46 @@ export class World {
     this.shake = { until: this.clock + dur, intensity: Math.max(0, Math.min(32, intensity)), duration: dur };
   }
 
+  /**
+   * Plays an effect from the vfx/ folder; resolves when it ends. Source and target are instances (which it
+   * tracks while they move) or fixed points. Without a target it fires where the source is facing.
+   */
+  playVfx(name: string, source: Actor | VfxPoint, target?: Actor | VfxPoint | null, opts: { tint?: string; scale?: number; speed?: number; angle?: number; onMessage?: (message: string) => void } = {}): Promise<void> {
+    const graph = this.bundle.vfx?.[name];
+    if (!graph) {
+      this.log(`no effect "${name}" in vfx/`);
+      return Promise.resolve();
+    }
+    const anchor = (who: Actor | VfxPoint): VfxAnchor => {
+      if (!(who instanceof Actor)) return { x: who.x, y: who.y };
+      // A destroyed instance leaves the effect where it last was.
+      let last: VfxPoint = { x: 0, y: 0 };
+      const live = () => {
+        if (who.destroyed) return last;
+        const b = who.box();
+        return (last = { x: b.x + b.w / 2, y: b.y + b.h / 2 });
+      };
+      live();
+      return live;
+    };
+    const actorOf = (who: Actor | VfxPoint | null | undefined) => (who instanceof Actor ? who : undefined);
+    const angle = opts.angle ?? (target ? undefined : actorOf(source)?.flipX ? 180 : 0);
+    const run = this.vfx.play(graph, {
+      source: anchor(source),
+      ...(target ? { target: anchor(target) } : {}),
+      ...(angle !== undefined ? { angle } : {}),
+      ...(opts.tint ? { tint: opts.tint } : {}),
+      ...(opts.scale ? { scale: opts.scale } : {}),
+      ...(opts.speed ? { speed: opts.speed } : {}),
+      ...(opts.onMessage ? { onMessage: opts.onMessage } : {}),
+      blink: (who, seconds) => {
+        const a = actorOf(who === 'source' ? source : target);
+        if (a) a.flashUntil = this.clock + seconds;
+      },
+    });
+    return run.done;
+  }
+
   /** Queues a message (with optional data) for events, onMessage hooks and on() listeners, delivered this frame. */
   emit(message: string, data?: unknown): void {
     this.messages.push({ name: message, data });
@@ -926,6 +980,18 @@ export class World {
 
   // ------------------------------------------------------------------ main loop
 
+  /** Delivers queued messages to events, onMessage and on() listeners; handlers may queue more. */
+  private deliverMessages(): void {
+    for (let round = 0; round < 10 && this.messages.length; round++) {
+      const msgs = this.messages.splice(0);
+      for (const { name: m, data } of msgs) {
+        this.scripts.dispatch(m, data);
+        for (const a of [...this.actors]) if (!a.destroyed) this.fireObject(a, 'message', (t) => t.message === m);
+        this.fireScene('message', (t) => t.message === m);
+      }
+    }
+  }
+
   step(input: InputFrame = emptyInput(), dt = STEP): void {
     input = this.mapActions(input);
     this.input = input;
@@ -939,6 +1005,7 @@ export class World {
       return;
     }
     this.particles.tick(dt);
+    this.vfx.tick(dt);
     const moteCfg = this.scene.atmosphere?.motes;
     if (moteCfg !== this.motesFor) {
       this.motesFor = moteCfg;
@@ -971,6 +1038,15 @@ export class World {
     this.scripts.tick(dt);
     if (inDialog) {
       for (const a of this.actors) if (!a.destroyed) this.updateAnimation(a, dt);
+      this.updateTexts();
+      this.clock += dt;
+      this.frame++;
+      this.applyPendingScene();
+      return;
+    }
+    if (this.clock < this.hitstopUntil) {
+      // Messages still arrive: the hit stop usually starts on the very frame the damage is applied.
+      this.deliverMessages();
       this.updateTexts();
       this.clock += dt;
       this.frame++;
@@ -1048,14 +1124,7 @@ export class World {
       for (const a of [...this.actors]) if (!a.destroyed && a.components.some((c) => sh.has(c, 'onClick')) && this.clickHits(a)) sh.invokeAll(a.components, 'onClick');
     }
     this.runSceneEvents();
-    for (let round = 0; round < 10 && this.messages.length; round++) {
-      const msgs = this.messages.splice(0);
-      for (const { name: m, data } of msgs) {
-        sh.dispatch(m, data);
-        for (const a of [...this.actors]) if (!a.destroyed) this.fireObject(a, 'message', (t) => t.message === m);
-        this.fireScene('message', (t) => t.message === m);
-      }
-    }
+    this.deliverMessages();
 
     // Late update: after movement, collisions and events.
     sh.invokeAll(this.gameComponents, 'lateUpdate', dt);
@@ -1698,6 +1767,8 @@ export class World {
     if (!events?.length) return;
     for (const ev of events) {
       a.flags.animEvents.push(ev);
+      // "vfx:<effect>" on a frame plays that effect on the instance, facing where it faces.
+      if (ev.startsWith('vfx:')) void this.playVfx(ev.slice(4), a);
       this.scripts.invokeAll(a.components, 'onAnimationEvent', ev, a.anim);
     }
   }
@@ -2078,6 +2149,11 @@ export class World {
         this.particles.burst(x, y, String(s.preset || 'sparks'), count > 0 ? { count } : {});
         return;
       }
+      case 'vfx': {
+        const to = s.to === 'self' ? ctx.self : s.to === 'other' ? ctx.other : undefined;
+        void this.playVfx(String(s.effect ?? ''), this.target(ctx, s.from) ?? { x: this.camera.x + this.viewWidth / 2, y: this.camera.y + this.viewHeight / 2 }, to);
+        return;
+      }
       case 'saveGame':
         this.saveGame(String(s.slot || 'auto'));
         return;
@@ -2312,7 +2388,8 @@ export interface Renderer {
   clear(color: string): void;
   /** Draws part of a sprite's spritesheet. */
   image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, opts: { flipX: boolean; opacity: number; angle: number; scale?: number }): void;
-  rect(x: number, y: number, w: number, h: number, color: string, alpha?: number): void;
+  /** blend "add" adds light instead of painting over (glows). */
+  rect(x: number, y: number, w: number, h: number, color: string, alpha?: number, blend?: 'add'): void;
   text(text: string, x: number, y: number, color: string, scale: number): void;
   /** Multiplies the frame by the ambient color plus the lights, then adds their glow (scene atmosphere). */
   lighting?(ambient: string, lights: ScreenLight[], glow: number): void;
@@ -2405,7 +2482,7 @@ export function renderWorld(w: World, r: Renderer): void {
   // Contact shadows: above the ground layers, below everything standing on them.
   if (atm) items.push({ z: -1.5, order: 0, draw: () => drawShadows(w, r, atm, camX, camY, zoom) });
   // Particles: behind the instances (above tiles), and in front of them.
-  items.push({ z: -1, order: 1e9, draw: () => w.particles.draw(r, camX, camY, zoom, true) });
+  items.push({ z: -1, order: 1e9, draw: () => { w.particles.draw(r, camX, camY, zoom, true); w.vfx.draw(r, camX, camY, zoom, true); } });
   items.push({ z: 50, order: 1e9, draw: () => w.particles.draw(r, camX, camY, zoom, false) });
   const hud: Actor[] = [];
   w.actors.forEach((a, i) => {
@@ -2424,6 +2501,9 @@ export function renderWorld(w: World, r: Renderer): void {
     w.motes.draw(r, camX, camY, zoom);
     postProcess(w, r, atm, camX, camY, zoom);
   }
+  // After the lighting: a fireball in a dark cave glows instead of being darkened with the scene.
+  w.vfx.draw(r, camX, camY, zoom, false);
+  w.vfx.drawScreen(r, vw, vh);
   hud.sort((p, q) => p.z - q.z);
   for (const a of hud) drawActor(w, r, a, 0, 0);
   w.scripts.draw(r, camX, camY, zoom);

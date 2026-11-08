@@ -6,6 +6,7 @@
 import { checkExpr } from './expr.js';
 import type { Behavior, DataTable, EventStep, GameEvent, GameProject, Scene, Value } from './types.js';
 import { resolveObjectTypes } from './variants.js';
+import { type VfxGraph, checkVfx } from './vfxGraph.js';
 
 export type ParamType =
   | 'expr' // expression, evaluated at run time
@@ -25,6 +26,7 @@ export type ParamType =
   | 'sprite' // sprite name
   | 'color' // #rrggbb
   | 'music' // audio file name
+  | 'vfx' // visual effect name
   | 'choice';
 
 export interface ParamSpec {
@@ -110,6 +112,7 @@ export const ACTIONS: StepSpec[] = [
   { type: 'dialogue', label: 'Start dialogue', help: 'Play a dialogue written in the Dialogues tab (lines, choices, conditions). "self" in the dialogue is this instance.', params: [{ name: 'dialogue', type: 'dialogue', default: '' }] },
   { type: 'talk', label: 'Show one line', help: 'Open an RPG dialog box (typewriter text, waits for the player). The game pauses while it is open. For conversations with choices use a script.', params: [{ name: 'text', type: 'expr', default: '"Hello!"' }, { name: 'speaker', type: 'text', default: '', optional: true }] },
   { type: 'particles', label: 'Particles', help: 'A burst of pixel particles at an instance (or the screen center on scene sheets): dust, sparks, hit, explosion, smoke, magic, leaves, splash, confetti, heal.', params: [{ name: 'preset', type: 'choice', options: ['sparks', 'dust', 'hit', 'explosion', 'smoke', 'magic', 'leaves', 'splash', 'confetti', 'heal'], default: 'sparks' }, { name: 'target', type: 'instance', default: 'self' }, { name: 'count', type: 'number', default: 0, label: 'count (0 = preset)', optional: true }, { name: 'dx', type: 'expr', default: '0', optional: true }, { name: 'dy', type: 'expr', default: '0', optional: true }] },
+  { type: 'vfx', label: 'Play effect', help: 'Play a visual effect from the VFX tab. "from" is the attacker, "to" the victim; with no victim it fires where "from" is facing.', params: [{ name: 'effect', type: 'vfx', default: '' }, { name: 'from', type: 'instance', default: 'self' }, { name: 'to', type: 'choice', options: ['none', 'self', 'other'], default: 'none' }] },
   { type: 'playMusic', label: 'Play music', help: 'Play a music track from the audio/ folder (Game tab), crossfading from the current one. The same track keeps playing.', params: [{ name: 'music', type: 'music', default: '' }, { name: 'fade', type: 'number', default: 1, label: 'fade (s)' }, { name: 'volume', type: 'number', default: 0.6 }] },
   { type: 'stopMusic', label: 'Stop music', help: 'Fade the music out.', params: [{ name: 'fade', type: 'number', default: 1, label: 'fade (s)' }] },
   { type: 'pauseGame', label: 'Pause game', help: 'Freeze the game (or resume it) for pause menus: nothing moves, onDraw and pausedUpdate keep running. Changing scene resumes.', params: [{ name: 'paused', type: 'bool', default: true }] },
@@ -223,7 +226,7 @@ export interface ScriptShape {
 }
 
 /** Checks one component use: it exists, its params exist and reference real objects, scenes, sprites... */
-function checkComponent(where: string, name: string, config: Record<string, Value>, scripts: ScriptShape, refs: { objects: Set<string>; scenes: Set<string>; sprites: Set<string>; dialogues?: string[]; audio?: string[]; actions?: string[] }, out: Problem[]): void {
+function checkComponent(where: string, name: string, config: Record<string, Value>, scripts: ScriptShape, refs: { objects: Set<string>; scenes: Set<string>; sprites: Set<string>; dialogues?: string[]; audio?: string[]; actions?: string[]; vfx?: string[] }, out: Problem[]): void {
   const comp = scripts.components?.find((c) => c.name === name);
   if (!comp) {
     if (!scripts.behaviors.includes(name)) out.push({ where, message: name ? `no component "${name}" (create scripts/${name}.js: export default class ${name} extends Behaviour)` : 'component without a name' });
@@ -251,7 +254,7 @@ function checkComponent(where: string, name: string, config: Record<string, Valu
   }
 }
 
-function checkSteps(where: string, steps: EventStep[], specs: Map<string, StepSpec>, ctx: { objects: Set<string>; scenes: Set<string>; object: boolean; functions?: string[]; dialogues?: string[]; components?: string[]; audio?: string[]; actions?: string[] }, out: Problem[]): void {
+function checkSteps(where: string, steps: EventStep[], specs: Map<string, StepSpec>, ctx: { objects: Set<string>; scenes: Set<string>; object: boolean; functions?: string[]; dialogues?: string[]; components?: string[]; audio?: string[]; actions?: string[]; vfx?: string[] }, out: Problem[]): void {
   steps.forEach((s, i) => {
     const spec = specs.get(s.type);
     const at = `${where}[${i}] ${s.type}`;
@@ -280,6 +283,8 @@ function checkSteps(where: string, steps: EventStep[], specs: Map<string, StepSp
         out.push({ where: `${at}.${p.name}`, message: `unknown sound "${v}"` });
       } else if (p.type === 'dialogue' && ctx.dialogues && !ctx.dialogues.includes(String(v))) {
         out.push({ where: `${at}.${p.name}`, message: `no dialogue "${v}"` });
+      } else if (p.type === 'vfx' && ctx.vfx && !ctx.vfx.includes(String(v))) {
+        out.push({ where: `${at}.${p.name}`, message: `no effect "${v}" in vfx/` });
       } else if (p.type === 'function' && ctx.functions && !ctx.functions.includes(String(v))) {
         out.push({ where: `${at}.${p.name}`, message: `no script function "${v}" (define it with func("${v}", ...))` });
       } else if (p.type === 'scriptBehavior' && v !== '' && ctx.components && !ctx.components.includes(String(v))) {
@@ -291,7 +296,7 @@ function checkSteps(where: string, steps: EventStep[], specs: Map<string, StepSp
   });
 }
 
-function checkEvents(where: string, events: GameEvent[], ctx: { objects: Set<string>; scenes: Set<string>; object: boolean; functions?: string[]; dialogues?: string[]; components?: string[]; audio?: string[]; actions?: string[] }, out: Problem[]): void {
+function checkEvents(where: string, events: GameEvent[], ctx: { objects: Set<string>; scenes: Set<string>; object: boolean; functions?: string[]; dialogues?: string[]; components?: string[]; audio?: string[]; actions?: string[]; vfx?: string[] }, out: Problem[]): void {
   events.forEach((e, i) => {
     const w = `${where} event ${i}`;
     checkSteps(`${w} trigger`, [e.trigger], TRIGGER_MAP, ctx, out);
@@ -301,8 +306,9 @@ function checkEvents(where: string, events: GameEvent[], ctx: { objects: Set<str
 }
 
 /** Static checks: unknown types, bad expressions, missing objects/scenes/sprites. */
-export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<string>, scripts?: ScriptShape, dialogues?: { nodes: string[]; errors: { file: string; line: number; message: string }[] }, audio?: string[], tables?: Record<string, DataTable>): Problem[] {
+export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<string>, scripts?: ScriptShape, dialogues?: { nodes: string[]; errors: { file: string; line: number; message: string }[] }, audio?: string[], tables?: Record<string, DataTable>, vfx?: { graphs: Record<string, VfxGraph>; sprites: Map<string, string[]> }): Problem[] {
   const out: Problem[] = [];
+  for (const g of Object.values(vfx?.graphs ?? {})) for (const message of checkVfx(g, { sprites: vfx?.sprites, sounds: [...SOUNDS, ...(audio ?? [])] })) out.push({ where: `effect ${g.name}`, message });
   // db("table", ...) in an expression must name a table.
   const checkDb = (where: string, src: string) => {
     if (!tables) return;
@@ -382,7 +388,7 @@ export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<st
       if (err) out.push({ where: `object ${o.name}.text`, message: err });
     }
     for (const b of o.behaviors) if (b.type === 'dialogue' && b.dialogue && dialogues && !dialogues.nodes.includes(String(b.dialogue))) out.push({ where: `object ${o.name} behavior Talks`, message: `no dialogue "${b.dialogue}"` });
-    checkEvents(`object ${o.name}`, o.events, { objects, scenes: sceneNames, object: true, functions: scripts?.functions, dialogues: dialogues?.nodes, components: compNames, audio, actions: Object.keys(game.actions ?? {}) }, out);
+    checkEvents(`object ${o.name}`, o.events, { objects, scenes: sceneNames, object: true, functions: scripts?.functions, dialogues: dialogues?.nodes, components: compNames, audio, actions: Object.keys(game.actions ?? {}), ...(vfx ? { vfx: Object.keys(vfx.graphs) } : {}) }, out);
   }
   for (const s of scenes) {
     if (s.tileset && !sprites.has(s.tileset)) out.push({ where: `scene ${s.name}`, message: `tileset sprite "${s.tileset}" not found` });
@@ -390,7 +396,7 @@ export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<st
     for (const b of s.backgrounds) if (!sprites.has(b.sprite)) out.push({ where: `scene ${s.name} background`, message: `sprite "${b.sprite}" not found` });
     const missing = new Set(s.instances.filter((i) => !objects.has(i.object)).map((i) => i.object));
     for (const m of missing) out.push({ where: `scene ${s.name}`, message: `instances of unknown object "${m}"` });
-    checkEvents(`scene ${s.name}`, s.events, { objects, scenes: sceneNames, object: false, functions: scripts?.functions, dialogues: dialogues?.nodes, components: compNames, audio, actions: Object.keys(game.actions ?? {}) }, out);
+    checkEvents(`scene ${s.name}`, s.events, { objects, scenes: sceneNames, object: false, functions: scripts?.functions, dialogues: dialogues?.nodes, components: compNames, audio, actions: Object.keys(game.actions ?? {}), ...(vfx ? { vfx: Object.keys(vfx.graphs) } : {}) }, out);
   }
   return out;
 }

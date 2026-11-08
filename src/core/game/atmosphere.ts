@@ -29,6 +29,8 @@ export interface AtmosphereWorld {
   readonly actors: readonly AtmosphereActor[];
   readonly motes: MoteField;
   readonly bundle: { sprites: Record<string, SpriteAsset | undefined> };
+  /** Lights of the visual effects playing now. */
+  readonly vfx?: { lights(): (LightDef & { x: number; y: number })[] };
 }
 
 /** A light in viewport pixels, ready to draw. */
@@ -70,6 +72,7 @@ export function collectLights(w: AtmosphereWorld, camX: number, camY: number, zo
     if (x + radius < 0 || y + radius < 0 || x - radius > vw || y - radius > vh || k <= 0) return;
     out.push({ x, y, radius, color: l.color ?? '#ffd9a0', intensity: k });
   };
+  for (const l of w.vfx?.lights() ?? []) push(l.x, l.y, l, 0);
   for (const a of w.actors) {
     if (!a.light || a.destroyed || !a.visible || a.type.hud) continue;
     push(a.x + (a.asset?.width ?? 0) / 2 + (a.light.x ?? 0), a.y + (a.asset?.height ?? 0) / 2 + (a.light.y ?? 0), a.light, a.id);

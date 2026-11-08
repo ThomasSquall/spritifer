@@ -4,6 +4,7 @@
  */
 
 import { type TilesetRules, normalizeTilesetRules } from './tilerules.js';
+import type { VfxGraph } from './vfxGraph.js';
 
 export type Value = number | string | boolean;
 
@@ -673,4 +674,6 @@ export interface GameBundle {
   audio?: Record<string, string>;
   /** Data tables by name (data/<name>.json). */
   data?: Record<string, DataTable>;
+  /** Visual effect graphs by name (vfx/<name>.json). */
+  vfx?: Record<string, VfxGraph>;
 }

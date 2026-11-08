@@ -113,6 +113,7 @@ export function completionContext(path: string, scripts: string[]): CompleteCont
     scenes: state.scenes.map((s) => s.name),
     sprites: state.sprites.map((s) => s.name),
     dialogues: state.dialogueInfo.nodes,
+    vfx: state.vfx,
     sounds: SOUNDS,
     keys: [...Object.keys(g?.actions ?? {}), ...KEYS.filter((k) => k !== 'any')],
     audio: state.audio,

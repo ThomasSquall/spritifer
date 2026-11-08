@@ -38,6 +38,8 @@ export interface SheetContext {
   audio?: string[];
   /** Input action names (Game tab). */
   actions?: string[];
+  /** Visual effect names (VFX tab). */
+  vfx?: string[];
 }
 
 /** Plays a built-in sound or an audio file of the project (editor previews). */
@@ -111,6 +113,9 @@ export function paramInput(spec: ParamSpec, value: Value | undefined, onChange: 
       break;
     case 'dialogue':
       input = select([['', ctx.dialogues.length ? '— dialogue —' : '— no dialogues yet —'], ...ctx.dialogues], String(v), onChange);
+      break;
+    case 'vfx':
+      input = select([['', ctx.vfx?.length ? '— effect —' : '— no effects yet —'], ...(ctx.vfx ?? [])], String(v), onChange);
       break;
     case 'scriptBehavior':
       input = select([['', ctx.scriptBehaviors.length ? (spec.optional ? '— any component —' : '— component —') : '— no components yet —'], ...ctx.scriptBehaviors], String(v), onChange);

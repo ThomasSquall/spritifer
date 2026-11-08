@@ -1559,6 +1559,30 @@ export class ScriptHost {
         return hit ? { x: hit.x, y: hit.y, distance: hit.distance, normalX: hit.normalX, normalY: hit.normalY, tile: hit.tile, instance: this.handle(hit.actor ?? undefined) ?? null } : null;
       },
       particles: (x: number, y: number, preset: unknown = 'sparks', overrides: Record<string, unknown> = {}) => w.particles.burst(Number(x), Number(y), preset as string, (overrides ?? {}) as object),
+      vfx: (name: string, from: unknown, to?: unknown, opts: Record<string, unknown> = {}) => {
+        // Instances are followed while they move; { x, y } points stay put.
+        const where = (v: unknown) => {
+          const h = v as Handle | { x?: unknown; y?: unknown } | null | undefined;
+          if (!h || typeof h !== 'object') return undefined;
+          if ('__actor' in h) return (h as Handle).__actor;
+          const p = h as { x?: unknown; y?: unknown };
+          return { x: Number(p.x) || 0, y: Number(p.y) || 0 };
+        };
+        const source = where(from);
+        if (!source) {
+          w.log(`vfx("${name}"): the second argument must be an instance or { x, y }`);
+          return Promise.resolve();
+        }
+        const o = (opts && typeof opts === 'object' ? opts : {}) as { tint?: unknown; scale?: unknown; speed?: unknown; angle?: unknown; onMessage?: unknown };
+        const on = o.onMessage;
+        return w.playVfx(String(name), source, where(to), {
+          ...(typeof o.tint === 'string' ? { tint: o.tint } : {}),
+          ...(typeof o.scale === 'number' ? { scale: o.scale } : {}),
+          ...(typeof o.speed === 'number' ? { speed: o.speed } : {}),
+          ...(typeof o.angle === 'number' ? { angle: o.angle } : {}),
+          ...(typeof on === 'function' ? { onMessage: (m: string) => this.run('vfx onMessage', on as (m: string) => void, m) } : {}),
+        });
+      },
       findPath: (x1: number, y1: number, x2: number, y2: number, opts: { diagonal?: boolean; partial?: boolean } = {}) => w.findPath(Number(x1), Number(y1), Number(x2), Number(y2), opts ?? {}),
       player: () => this.handle(w.actors.find((a) => !a.destroyed && a.behaviors.some((b) => (b.type === 'platformer' || b.type === 'topdown') && b.controls !== false))),
       spawn: (name: string, x: number, y: number, props: Record<string, Value> = {}, opts: { sprite?: string; name?: string; animation?: string } = {}) =>

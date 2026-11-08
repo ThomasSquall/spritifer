@@ -17,6 +17,8 @@ import { inspectScripts } from './scripts.js';
 import type { ScriptInfo } from '../core/game/script.js';
 import { type DialogueError, buildDialogueBook } from '../core/game/dialogue.js';
 import type { Workspace } from './store.js';
+import { type VfxTimeline, VfxSystem, simulateVfx } from '../core/game/vfx.js';
+import type { VfxGraph } from '../core/game/vfxGraph.js';
 
 /** Sprite names a game actually uses (objects, tilesets, backgrounds). */
 export function usedSprites(game: GameProject, scenes: Scene[]): Set<string> {
@@ -92,6 +94,9 @@ export function loadGameBundle(ws: Workspace, opts: { images?: boolean } = {}): 
   for (const t of Object.values(data)) {
     for (const r of t.rows) for (const v of Object.values(r)) for (const x of Array.isArray(v) ? v : [v]) if (typeof x === 'string' && available.has(x)) used.add(x);
   }
+  // ...and sprites drawn by visual effects.
+  const vfx = ws.loadAllVfx();
+  for (const g of Object.values(vfx)) for (const n of g.nodes) if ((n.type === 'sprite' || n.type === 'projectile') && typeof n.params.sprite === 'string' && available.has(n.params.sprite)) used.add(n.params.sprite);
   for (const name of used) {
     if (!available.has(name)) continue;
     const built = buildAsset(ws.load(name), !!opts.images);
@@ -104,11 +109,11 @@ export function loadGameBundle(ws: Workspace, opts: { images?: boolean } = {}): 
   const dialogues = dialogueSources;
   const book = buildDialogueBook(dialogues);
   const dialogueInfo = { nodes: [...book.nodes.keys()].sort(), errors: book.errors };
-  const problems = validateGame(game, scenes, available, scriptInfo, dialogueInfo, ws.listAudio().map((a) => a.name), data);
+  const problems = validateGame(game, scenes, available, scriptInfo, dialogueInfo, ws.listAudio().map((a) => a.name), data, { graphs: vfx, sprites: new Map(ws.list().map((s) => [s.name, s.tags ?? []])) });
   const audioList = ws.listAudio();
   // Played/exported games carry the files as data URLs; headless runs only need the names.
   const audio = Object.fromEntries(audioList.map((a) => [a.name, opts.images ? `data:${a.mime};base64,${ws.readAudio(a.name).data.toString('base64')}` : '']));
-  return { bundle: { game, scenes: Object.fromEntries(scenes.map((s) => [s.name, s])), sprites, scripts, dialogues, ...(audioList.length ? { audio } : {}), ...(Object.keys(data).length ? { data } : {}) }, sheets, problems, scriptInfo, dialogueInfo };
+  return { bundle: { game, scenes: Object.fromEntries(scenes.map((s) => [s.name, s])), sprites, scripts, dialogues, ...(audioList.length ? { audio } : {}), ...(Object.keys(data).length ? { data } : {}), ...(Object.keys(vfx).length ? { vfx } : {}) }, sheets, problems, scriptInfo, dialogueInfo };
 }
 
 // ---------------------------------------------------------------------------
@@ -204,9 +209,10 @@ export class BitmapRenderer implements Renderer {
     for (let i = 0; i < d.length; i += 4) d.set(c, i);
   }
 
-  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; scale?: number }): void {
+  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; angle?: number; scale?: number }): void {
     const src = this.sheets.get(sprite);
     if (!src) return;
+    if (o.angle) return this.rotated(src, sx, sy, sw, sh, dx, dy, { ...o, angle: o.angle });
     const k = Math.max(1, o.scale ?? 1);
     if (k > 1) {
       for (let y = 0; y < sh * k; y++) {
@@ -234,11 +240,49 @@ export class BitmapRenderer implements Renderer {
     }
   }
 
-  rect(x: number, y: number, w: number, h: number, color: string, alpha = 1): void {
+  /** Nearest-neighbour rotation around the sprite's center, like the canvas renderer. */
+  private rotated(src: Bitmap, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; angle: number; scale?: number }): void {
+    const k = Math.max(0.01, o.scale ?? 1);
+    const cx = dx + (sw * k) / 2;
+    const cy = dy + (sh * k) / 2;
+    const reach = Math.ceil(Math.hypot(sw, sh) * k * 0.5) + 1;
+    const a = (-o.angle * Math.PI) / 180;
+    const cos = Math.cos(a);
+    const sin = Math.sin(a);
+    for (let y = Math.floor(cy) - reach; y <= Math.ceil(cy) + reach; y++) {
+      for (let x = Math.floor(cx) - reach; x <= Math.ceil(cx) + reach; x++) {
+        const rx = x + 0.5 - cx;
+        const ry = y + 0.5 - cy;
+        let u = (rx * cos - ry * sin) / k + sw / 2;
+        const v = (rx * sin + ry * cos) / k + sh / 2;
+        if (o.flipX) u = sw - u;
+        if (u < 0 || v < 0 || u >= sw || v >= sh) continue;
+        const i = ((sy + Math.floor(v)) * src.width + sx + Math.floor(u)) * 4;
+        const al = src.data[i + 3] * o.opacity;
+        if (al) this.blend(x, y, src.data[i], src.data[i + 1], src.data[i + 2], al);
+      }
+    }
+  }
+
+  rect(x: number, y: number, w: number, h: number, color: string, alpha = 1, blend?: 'add'): void {
     let c: [number, number, number, number];
     try {
       c = parseColor(color);
     } catch {
+      return;
+    }
+    if (blend === 'add') {
+      const d = this.out.data;
+      const k = (c[3] / 255) * alpha;
+      for (let yy = Math.max(0, Math.floor(y)); yy < Math.min(this.out.height, y + h); yy++) {
+        for (let xx = Math.max(0, Math.floor(x)); xx < Math.min(this.out.width, x + w); xx++) {
+          const i = (yy * this.out.width + xx) * 4;
+          d[i] = Math.min(255, d[i] + c[0] * k);
+          d[i + 1] = Math.min(255, d[i + 1] + c[1] * k);
+          d[i + 2] = Math.min(255, d[i + 2] + c[2] * k);
+          d[i + 3] = Math.max(d[i + 3], k * 255);
+        }
+      }
       return;
     }
     for (let yy = Math.max(0, Math.floor(y)); yy < Math.min(this.out.height, y + h); yy++) {
@@ -350,6 +394,57 @@ export class BitmapRenderer implements Renderer {
 }
 
 /** Renders what the player currently sees. */
+/**
+ * A filmstrip of an effect: evenly spaced moments of it playing between a blue attacker and a red victim, as
+ * the game draws them.
+ */
+export function renderVfxStrip(loaded: Pick<LoadedGame, 'bundle' | 'sheets'>, graph: VfxGraph, opts: { frames?: number; scale?: number; distance?: number; dark?: boolean; tint?: string; speed?: number; size?: number; angle?: number } = {}): { png: Buffer; timeline: VfxTimeline; times: number[] } {
+  const host = { asset: (name: string) => loaded.bundle.sprites[name] };
+  const play = { ...(opts.tint ? { tint: opts.tint } : {}), ...(opts.speed ? { speed: opts.speed } : {}), ...(opts.size ? { scale: opts.size } : {}) };
+  const distance = opts.distance ?? 96;
+  const W = Math.max(120, distance + 80);
+  const H = 110;
+  const src = { x: Math.round((W - distance) / 2), y: 58 };
+  const dst = { x: src.x + distance, y: 58 };
+  const timeline = simulateVfx(graph, { ...play, source: src, target: dst, host });
+  const frames = Math.max(1, Math.min(24, opts.frames ?? 8));
+  const times = Array.from({ length: frames }, (_, i) => (timeline.duration * (i + 0.5)) / frames);
+  const cols = Math.min(4, frames);
+  const rows = Math.ceil(frames / cols);
+  const gap = 2;
+  const sheet = new BitmapRenderer(cols * (W + gap) - gap, rows * (H + gap) - gap, loaded.sheets);
+  sheet.clear('#000000');
+  const sys = new VfxSystem(host);
+  sys.play(graph, { ...play, source: src, target: dst });
+  const STEP = 1 / 60;
+  let clock = 0;
+  times.forEach((t, i) => {
+    while (clock < t) {
+      sys.tick(STEP);
+      clock += STEP;
+    }
+    const cell = new BitmapRenderer(W, H, loaded.sheets);
+    cell.clear(opts.dark ? '#14151f' : '#39424f');
+    if (!opts.dark) cell.rect(0, 70, W, H - 70, '#2d3540');
+    cell.rect(src.x - 6, src.y - 8, 12, 16, '#41a6f6');
+    cell.rect(dst.x - 6, dst.y - 8, 12, 16, '#e43b44');
+    sys.draw(cell, 0, 0, 1, true);
+    if (opts.dark) {
+      const lights = sys.lights().map((l) => ({ ...l, intensity: Math.min(1, l.intensity) }));
+      cell.lighting('#55586e', lights, 0.6);
+    }
+    // In this order in the game too: effects glow over the scene lighting.
+    sys.draw(cell, 0, 0, 1, false);
+    sys.drawScreen(cell, W, H);
+    cell.text(`${t.toFixed(2)}s`, 3, 3, '#ffffff', 1);
+    const ox = (i % cols) * (W + gap);
+    const oy = Math.floor(i / cols) * (H + gap);
+    for (let y = 0; y < H; y++) sheet.out.data.set(cell.out.data.subarray(y * W * 4, (y + 1) * W * 4), (oy + y) * sheet.out.width * 4 + ox * 4);
+  });
+  const scale = Math.max(1, Math.min(4, opts.scale ?? 2));
+  return { png: encodePng(scale > 1 ? scaleBitmap(sheet.out, scale) : sheet.out), timeline, times };
+}
+
 export function renderViewport(world: World, sheets: Map<string, Bitmap>, scale = 1): Buffer {
   const r = new BitmapRenderer(world.game.width, world.game.height, sheets);
   renderWorld(world, r);

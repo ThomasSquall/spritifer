@@ -51,6 +51,7 @@ export interface CompleteContext {
   scenes: string[];
   sprites: string[];
   dialogues: string[];
+  vfx?: string[];
   sounds: string[];
   keys: string[];
   variables: Record<string, Value>;
@@ -526,6 +527,7 @@ const STRING_ARGS: Record<string, (c: CompleteContext) => CompletionItem[]> = {
   music: (c) => (c.audio ?? []).map((o) => plain(o, 'value', 'audio file')),
   dialogue: (c) => c.dialogues.map((o) => plain(o, 'value', 'dialogue')),
   sprite: (c) => c.sprites.map((o) => plain(o, 'value', 'sprite')),
+  vfx: (c) => (c.vfx ?? []).map((o) => plain(o, 'value', 'visual effect')),
   key: (c) => c.keys.map((o) => plain(o, 'value', 'key')),
   method: (c) => [...new Set(c.components.flatMap((x) => x.methods))].map((m) => plain(m, 'method', 'component method')),
   type: () => PARAM_TYPES.map((t) => plain(t, 'value', 'param type')),
@@ -540,7 +542,7 @@ const FN_ARG: Record<string, keyof typeof STRING_ARGS> = {
   goto: 'scene', onSceneStart: 'scene',
   sound: 'sound', dialogue: 'dialogue', sprite: 'sprite', key: 'key', pressed: 'key', sendMessage: 'method',
   findWithTag: 'tag', hasTag: 'tag', addTag: 'tag', removeTag: 'tag', isA: 'object',
-  music: 'music',
+  music: 'music', vfx: 'vfx',
   saveGame: 'slot', loadGame: 'slot', hasSave: 'slot', deleteSave: 'slot',
   db: 'table', get: 'table', where: 'table', columns: 'table',
 };

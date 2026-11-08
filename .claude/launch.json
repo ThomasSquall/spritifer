@@ -39,6 +39,19 @@
         "7422"
       ],
       "port": 7422
+    },
+    {
+      "name": "crystal-vale",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "dist/server/cli.js",
+        "serve",
+        "--workspace",
+        "/Users/thomascocchiara/Documents/Spritifer/crystal-vale",
+        "--port",
+        "7423"
+      ],
+      "port": 7423
     }
   ]
 }

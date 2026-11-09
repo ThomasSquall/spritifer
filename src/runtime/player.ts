@@ -5,6 +5,9 @@
 
 import { type InputFrame, type PlaytestInput, type Renderer, STEP, World, renderWorld } from '../core/game/engine.js';
 import { CanvasRenderer } from './canvasRenderer.js';
+import { HdCompositor } from './hdCompositor.js';
+import { HdScene } from './hdScene.js';
+import { type HdFrame, resolveHd } from '../core/game/hd.js';
 import { type GameBundle, type Value, interfaceSize } from '../core/game/types.js';
 import { SoundBoard } from './audio.js';
 
@@ -28,6 +31,10 @@ export interface PlayerOptions {
   fpsButton?: boolean;
   /** Called with the state of the frame-rate readout at start and whenever it changes. */
   onFpsChange?: (on: boolean) => void;
+  /** Start this run with 2D-HD on or off. Otherwise the last choice made in this browser, then the game's setting. */
+  hd?: boolean;
+  /** Called with the 2D-HD state at start and whenever it changes. */
+  onHdChange?: (on: boolean) => void;
 }
 
 /** A run of the game played by hand, ready to be replayed headless. */
@@ -54,6 +61,8 @@ export interface Player {
   musicVolume: number;
   /** Frame-rate readout on or off (F4). */
   fps: boolean;
+  /** Auto 2D-HD on or off (F6); remembered in this browser. */
+  hd: boolean;
   /** Restarts the game with a known seed and no saved data, and records the input from the first frame. */
   startRecording(): void;
   stopRecording(): Recording;
@@ -94,7 +103,8 @@ const loadImage = (src: string) =>
 
 const STYLE = `
 .spf-root{position:relative;width:100%;height:100%;display:grid;place-items:center;overflow:hidden;background:#000;touch-action:none;user-select:none;-webkit-user-select:none}
-.spf-root canvas{image-rendering:pixelated;image-rendering:crisp-edges;outline:none;display:block}
+.spf-root canvas{image-rendering:pixelated;image-rendering:crisp-edges;outline:none;display:block;grid-area:1/1}
+.spf-root canvas.spf-hd{image-rendering:auto;pointer-events:none}
 .spf-touch{position:absolute;inset:0;pointer-events:none}
 .spf-btns{position:absolute;bottom:18px;right:18px;display:grid;gap:6px;pointer-events:auto;grid-template-columns:repeat(2,64px);align-items:end}
 .spf-stick{position:absolute;width:104px;height:104px;margin:-52px 0 0 -52px;border-radius:50%;border:2px solid #ffffff55;background:#ffffff18;box-sizing:border-box;display:none}
@@ -121,6 +131,7 @@ const STYLE = `
 const MUSIC_PREF = '__music';
 const MUSIC_VOLUME_PREF = '__musicVolume';
 const FPS_PREF = '__fps';
+const HD_PREF = '__hd';
 
 /** Starts the game inside `container`. Resolves once the sprites are loaded. */
 export async function mountPlayer(container: HTMLElement, bundle: GameBundle, opts: PlayerOptions = {}): Promise<Player> {
@@ -167,7 +178,64 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       try { localStorage.setItem(storagePrefix + k, v); } catch { /* storage unavailable */ }
     },
   };
-  const makeWorld = (scene?: string, seed = (Math.random() * 2 ** 31) | 0, store: typeof storage = storage) => new World(bundle, { scene, storage: store, sound: (n, v) => sound.play(n, v), music: (cmd) => sound.music(cmd), log: opts.onLog, seed });
+  // ---------------------------------------------------------------- auto 2D-HD
+  // The look is drawn on a second canvas under the game's. The game's canvas is emptied once the world is copied, so
+  // the interface drawn on it afterwards floats, crisp, above the finished picture. Input keeps arriving on it.
+  const hdCanvas = document.createElement('canvas');
+  hdCanvas.className = 'spf-hd';
+  hdCanvas.style.display = 'none';
+  canvas.before(hdCanvas);
+  let compositor: HdCompositor | null = null;
+  let perspective: HdScene | null = null;
+  const sizeHd = () => {
+    const box = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    hdCanvas.style.width = canvas.style.width;
+    hdCanvas.style.height = canvas.style.height;
+    compositor?.resize(box.width * dpr, box.height * dpr);
+  };
+  const finishWorld = (frame: HdFrame | null) => {
+    if (!frame || !compositor) {
+      hdCanvas.style.display = 'none';
+      return;
+    }
+    compositor.draw(canvas, frame);
+    hdCanvas.style.display = '';
+    ctx.clearRect(0, 0, game.width, game.height);
+  };
+  const startHd = () => {
+    compositor ??= HdCompositor.create(hdCanvas, game.width, game.height);
+    if (compositor) sizeHd();
+    renderer.endWorld = compositor ? finishWorld : undefined;
+    if (!compositor) hdCanvas.style.display = 'none';
+  };
+  const stopHd = () => {
+    renderer.endWorld = undefined;
+    hdCanvas.style.display = 'none';
+  };
+  const savedHd = storage.get(HD_PREF);
+  let hdOn = opts.hd ?? (savedHd === null ? !!game.hd?.enabled : savedHd === 'on');
+  const setHd = (on: boolean) => {
+    hdOn = on;
+    storage.set(HD_PREF, on ? 'on' : 'off');
+    if (on) startHd();
+    else stopHd();
+    opts.onHdChange?.(on);
+  };
+  // A phone can take the GPU away while the game is in the background.
+  hdCanvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    compositor = null;
+    perspective = null;
+    stopHd();
+  });
+  hdCanvas.addEventListener('webglcontextrestored', () => {
+    if (hdOn) startHd();
+  });
+  if (hdOn) startHd();
+  opts.onHdChange?.(hdOn);
+
+  const makeWorld = (scene?: string, seed = (Math.random() * 2 ** 31) | 0, store: typeof storage = storage) => new World(bundle, { scene, storage: store, sound: (n, v) => sound.play(n, v), music: (cmd) => sound.music(cmd), hd: { get: () => hdOn, set: setHd }, log: opts.onLog, seed });
   let world: World;
   try {
     world = makeWorld(opts.scene);
@@ -307,6 +375,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     }
     canvas.style.width = `${game.width * z}px`;
     canvas.style.height = `${game.height * z}px`;
+    sizeHd();
   };
   const ro = new ResizeObserver(fit);
   ro.observe(root);
@@ -335,6 +404,11 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     }
     if (e.code === 'F4') {
       if (!e.repeat) setFps(!fpsOn);
+      e.preventDefault();
+      return;
+    }
+    if (e.code === 'F6') {
+      if (!e.repeat) setHd(!hdOn);
       e.preventDefault();
       return;
     }
@@ -585,7 +659,15 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     // Nothing moved (a screen faster than the game): the picture on it is already right.
     if (steps === 0 && !paused && drawn) return;
     drawn = true;
-    renderWorld(world, renderer);
+    // With a perspective set, the world goes through the 3D view; otherwise through the flat canvas and its effects.
+    const atmosphere = world.scene.atmosphere;
+    const look = renderer.endWorld && compositor ? resolveHd(game.hd, atmosphere?.hd, atmosphere?.ambient) : null;
+    if (look && look.perspective > 0 && compositor) {
+      perspective ??= new HdScene(compositor, renderer, ctx, images, game.width, game.height);
+      perspective.prepare(look);
+      hdCanvas.style.display = '';
+      renderWorld(world, perspective);
+    } else renderWorld(world, renderer);
     if (showHitboxes) {
       ctx.globalAlpha = 0.8;
       ctx.strokeStyle = '#ff004d';
@@ -649,6 +731,12 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     },
     set fps(on: boolean) {
       setFps(on);
+    },
+    get hd() {
+      return hdOn;
+    },
+    set hd(on: boolean) {
+      setHd(on);
     },
     startRecording() {
       const seed = (Math.random() * 2 ** 31) | 0;

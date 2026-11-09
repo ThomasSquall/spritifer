@@ -4,7 +4,8 @@ import { TileResolver, type TilesetRules, tilesetFrame } from '../core/game/tile
 import { swayBands, swayBase } from '../core/game/wind.js';
 import { RainField, drawShafts } from '../core/game/weather.js';
 import { type WaterMap, addWaterActors, drawReflections, findWater } from '../core/game/reflections.js';
-import { type AtmosphereActor, type AtmosphereWorld, MoteField, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
+import { type AtmosphereActor, type AtmosphereWorld, MoteField, collectLights, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
+import { applyHdBuffer, resolveHd } from '../core/game/hd.js';
 import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
 import { CanvasRenderer } from '../runtime/canvasRenderer.js';
 import { atmosphereEditor, lightEditor } from './atmosphereUi.js';
@@ -614,6 +615,18 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       ctx.restore();
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
+      // Auto 2D-HD, shown when the game or this scene has it set.
+      const hd = (state.game?.hd?.enabled || (atm.hd && !atm.hd.off)) ? resolveHd(state.game?.hd, atm.hd, atm.ambient) : null;
+      if (hd) {
+        const k = zoom * dpr;
+        const px = { x: Math.round((panX + view.x * zoom) * dpr), y: Math.round((panY + view.y * zoom) * dpr), w: Math.round(view.w * k), h: Math.round(view.h * k) };
+        const lights = collectLights(world, view.x, view.y, 1).map((l) => ({ ...l, x: l.x * k, y: l.y * k, radius: l.radius * k }));
+        if (px.w > 0 && px.h > 0) {
+          const picture = ctx.getImageData(px.x, px.y, px.w, px.h);
+          applyHdBuffer(picture.data, px.w, px.h, { hd, subjectY: 0.55, lights });
+          ctx.putImageData(picture, px.x, px.y);
+        }
+      }
     }
     lastTick = now;
     hudItems.sort((a, b) => a.z - b.z || a.o - b.o);
@@ -1825,7 +1838,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('label', { class: 'inline', title: 'Coming back to this scene (e.g. after a battle) keeps positions, opened chests, defeated enemies and instance properties. Restart Scene forgets.' },
           h('input', { type: 'checkbox', checked: !!scene.persistent, onchange: (e: Event) => { snapshot(); if ((e.target as HTMLInputElement).checked) scene.persistent = true; else delete scene.persistent; changed(); } }),
           'Remember instances when leaving'),
-        atmosphereEditor({ audio: () => state.audio, before: snapshot, changed, get: () => scene.atmosphere, set: (v) => { if (v) scene.atmosphere = v; else delete scene.atmosphere; },
+        atmosphereEditor({ audio: () => state.audio, before: snapshot, changed, get: () => scene.atmosphere, set: (v) => { if (v) scene.atmosphere = v; else delete scene.atmosphere; }, gameHd: () => state.game?.hd,
           sprites: () => state.sprites.filter((sp) => !sp.grid).map((sp) => sp.name), rerender: () => void loadAssets() }),
         vars,
         componentListCard('Scene components', 'Managers and level logic: a script component here runs for the whole scene (this.self is null), e.g. a battle, a wave spawner, the level HUD.', () => scene.components, (list) => { snapshot(); if (list?.length) scene.components = list; else delete scene.components; }, () => sheetContext(null, []), () => changed()),

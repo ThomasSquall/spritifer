@@ -26,6 +26,10 @@ if (!bundle) {
     scene: params.get('scene') ?? undefined,
     debug: params.has('debug'),
     music: params.has('nomusic') ? false : undefined,
+    hd: params.has('hd') ? params.get('hd') !== '0' : undefined,
+    onHdChange: (on) => {
+      if (inFrame) window.parent.postMessage({ source: 'spritifer-game', type: 'hd', on }, '*');
+    },
     musicButton: !inFrame,
     onMusicChange: (on) => {
       if (inFrame) window.parent.postMessage({ source: 'spritifer-game', type: 'music', on }, '*');
@@ -65,6 +69,9 @@ if (!bundle) {
             return;
           case 'fps':
             player.fps = !!d.on;
+            return;
+          case 'hd':
+            player.hd = !!d.on;
             return;
           case 'record':
             if (d.on) player.startRecording();

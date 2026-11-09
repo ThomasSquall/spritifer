@@ -290,6 +290,15 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
       else obj.shadow = Math.max(0, Math.round(Number(v)));
       changed();
     } });
+  const poseSel = h('select', { onchange: () => {
+    if (poseSel.value === 'flat' || poseSel.value === 'stand') obj.hdPose = poseSel.value;
+    else delete obj.hdPose;
+    changed();
+  } },
+    h('option', { value: '', selected: !obj.hdPose }, 'Automatic'),
+    h('option', { value: 'stand', selected: obj.hdPose === 'stand' }, 'Stands up'),
+    h('option', { value: 'flat', selected: obj.hdPose === 'flat' }, 'Lies flat'),
+  );
   // Wind: seen moving in Play and in the scene editor's game look.
   const swaySet = (amount: string, speed: string, react = swayReactIn.value) => {
     const a = Number(amount);
@@ -382,6 +391,7 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
           h('div', { class: 'row4', title: 'Draws the sprite shifted from the instance position, so a larger canvas keeps the same position and hitbox' }, ...offsetIns.map((inp, i) => h('label', {}, `Sprite offset ${'xy'[i]}`, inp))),
           h('label', {}, 'Draw order (z)', zIn),
           h('label', { title: 'Soft contact shadow under instances in scenes with an atmosphere: width in px. Empty = automatic (hitbox width), 0 = none (rugs, doormats, flowerbeds)' }, 'Shadow width (px)', shadowIn),
+          h('label', { title: 'In the 2D-HD perspective: lies on the ground (rugs, decals) or stands up (characters, trees). Automatic = flat when the draw order is below 0' }, '2D-HD pose', poseSel),
           h('div', { class: 'row4', title: 'The wind bends the sprite when drawn, without new art or frames: the top moves by this many pixels, the foot stays still and the hitbox does not move. Trees want 2-4' }, h('label', {}, 'Wind sway (px)', swayIn), h('label', {}, 'Wind speed', swaySpeedIn), h('label', { title: 'Pixels a character walking through pushes the top aside; it springs back after. Grass and ferns want 2-4. Seen in Play' }, 'Pushed by walkers (px)', swayReactIn)),
           h('div', { class: 'row4', title: 'A sound that loops around every instance of this object (fire, fountain): louder the closer the camera is. Heard in Play' }, h('label', {}, 'Ambient sound', ambientSel), h('label', {}, 'Volume', ambientVolIn), h('label', {}, 'Heard up to (px)', ambientRadiusIn)),
           lightBox,

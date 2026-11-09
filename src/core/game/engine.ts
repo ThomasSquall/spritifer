@@ -14,7 +14,9 @@ import { resolveObjectTypes } from './variants.js';
 import { ParticleSystem } from './particles.js';
 import { type VfxAnchor, type VfxPoint, VfxSystem } from './vfx.js';
 import { TileResolver, tilesetFrame } from './tilerules.js';
-import { type CastShape, MoteField, type ScreenLight, drawClouds, drawShadows, postProcess } from './atmosphere.js';
+import { type CastShape, MoteField, type ScreenLight, collectLights, drawClouds, drawShadows, postProcess } from './atmosphere.js';
+import { type HdFrame, resolveHd } from './hd.js';
+import { type WallCell, findWalls } from './hd3d.js';
 import { RainField, drawShafts } from './weather.js';
 import { type ReflectionBand, type WaterMap, type WaterPiece, addWaterActors, drawReflections, findWater } from './reflections.js';
 import { type Walker, pushTarget, stepPush, swayBands, swayBase } from './wind.js';
@@ -53,6 +55,8 @@ export interface EngineOptions {
   sound?: (name: string, volume: number) => void;
   /** Music commands for the player (crossfades and volumes are its job). */
   music?: (cmd: MusicCommand) => void;
+  /** The player's 2D-HD switch (headless runs have none). */
+  hd?: { get(): boolean; set(on: boolean): void };
   log?: (message: string) => void;
   /** Start in this scene instead of game.startScene. */
   scene?: string;
@@ -307,6 +311,7 @@ export class World {
   private rainFor: unknown = null;
   /** The water of the current scene (found when first needed). */
   private water: { scene: unknown; map: WaterMap } | null = null;
+  private walls: { scene: unknown; rows: number; cells: (WallCell | null)[] } | null = null;
   /** The scene's own looping sounds (spatial ones are added to these), and what was last sent to the player. */
   private ambienceBase: { name: string; volume: number }[] = [];
   private ambienceSent = '[]';
@@ -373,6 +378,9 @@ export class World {
   /** The music playing ("" = none). */
   music = '';
   volumes = { music: 1, sfx: 1 };
+  /** Auto 2D-HD on or off for this player. */
+  get hd(): boolean { return !!this.opts.hd?.get(); }
+  set hd(on: boolean) { this.opts.hd?.set(!!on); }
 
   private actionsDown = new Set<string>();
 
@@ -421,6 +429,14 @@ export class World {
   }
 
   /** Where the water of this scene is. */
+  /** Which cells of the map stand up in the 2D-HD perspective. */
+  wallMap(rows: number): (WallCell | null)[] {
+    if (this.walls?.scene !== this.scene || this.walls.rows !== rows) {
+      this.walls = { scene: this.scene, rows, cells: findWalls(this.scene.layers, this.scene.cols, this.scene.rows, this.tileResolver(this.scene.tileset ?? ''), rows) };
+    }
+    return this.walls.cells;
+  }
+
   waterMap(): WaterMap | null {
     const cfg = this.scene.atmosphere?.reflections;
     if (!cfg) return null;
@@ -2559,6 +2575,9 @@ export class World {
 // ---------------------------------------------------------------------------
 // Rendering (renderer-agnostic)
 
+/** ground: lies on the floor. stand: upright with its feet at x, y (view pixels). air: over everything. */
+export type WorldMark = { kind: 'backdrop' | 'ground' | 'air' | 'screen' } | { kind: 'stand'; x: number; y: number };
+
 export interface Renderer {
   clear(color: string): void;
   /** Draws part of a sprite's spritesheet. */
@@ -2576,6 +2595,15 @@ export interface Renderer {
   reliefLighting?(relief: ResolvedRelief, ambient: string, lights: ScreenLight[], glow: number): void;
   /** Which pixels of a sprite frame are solid (1 per pixel, row by row), or null when it stays flat. */
   spriteMask?(sprite: string, x: number, y: number, w: number, h: number): Uint8Array | null;
+  /** Only the 2D-HD perspective has these. What the next draw calls are, in the world being drawn. */
+  mark?(m: WorldMark): void;
+  /** View pixels beyond each screen edge that are in view: the perspective sees more ground than the flat screen. */
+  overscan?: { left: number; top: number; right: number; bottom: number };
+  /** Rows of a wall's front (0: no walls), and one map tile standing up. */
+  wallRows?: number;
+  tileWall?(sprite: string, sx: number, sy: number, sw: number, sh: number, x: number, y: number, size: number, cell: WallCell): void;
+  /** The world is finished, the interface comes next. Present only while 2D-HD is on; null = this scene stays flat. */
+  endWorld?(frame: HdFrame | null): void;
   /** Soft-light color grade over the frame. */
   grade?(tint: string, amount: number): void;
   /** Darkens the screen edges. */
@@ -2619,6 +2647,8 @@ export function renderWorld(w: World, r: Renderer): void {
     camY = Math.round(camY * zoom) / zoom;
   }
 
+  r.mark?.({ kind: 'backdrop' });
+  const over = r.overscan ?? { left: 0, top: 0, right: 0, bottom: 0 };
   for (const bg of scene.backgrounds) {
     const asset = w.bundle.sprites[bg.sprite];
     if (!asset || !asset.frames.length) continue;
@@ -2650,10 +2680,12 @@ export function renderWorld(w: World, r: Renderer): void {
       draw: () => {
         const lx = camX * par;
         const ly = camY * par;
-        const x0 = Math.max(0, Math.floor(lx / ts));
-        const y0 = Math.max(0, Math.floor(ly / ts));
-        const x1 = Math.min(scene.cols - 1, Math.floor((lx + vw / zoom) / ts));
-        const y1 = Math.min(scene.rows - 1, Math.floor((ly + vh / zoom) / ts));
+        const x0 = Math.max(0, Math.floor((lx - over.left / zoom) / ts));
+        const y0 = Math.max(0, Math.floor((ly - over.top / zoom) / ts));
+        const x1 = Math.min(scene.cols - 1, Math.floor((lx + (vw + over.right) / zoom) / ts));
+        const y1 = Math.min(scene.rows - 1, Math.floor((ly + (vh + over.bottom) / zoom) / ts));
+        r.mark?.({ kind: (layer.z ?? -10) > 0 ? 'air' : 'ground' });
+        const walls = r.tileWall && r.wallRows ? w.wallMap(r.wallRows) : null;
         const resolver = w.tileResolver(tileset.name);
         // The ground stays clean: only walls and other solid layers take the light as relief.
         const opts = { ...img((ts / grid.width) || 1), flat: !layer.solid };
@@ -2666,7 +2698,10 @@ export function renderWorld(w: World, r: Renderer): void {
             for (const d of draw) {
               const sx = f0.x + (d % tcols) * grid.width;
               const sy = f0.y + Math.floor(d / tcols) * grid.height;
-              r.image(tileset.name, sx, sy, grid.width, grid.height, zx(tx * ts - lx), zx(ty * ts - ly), opts);
+              const wall = walls?.[ty * scene.cols + tx];
+              // A wall also stays on the floor: where the view looks past its edge, the floor is what shows.
+              if (!wall || !layer.solid) r.image(tileset.name, sx, sy, grid.width, grid.height, zx(tx * ts - lx), zx(ty * ts - ly), opts);
+              if (wall) r.tileWall!(tileset.name, sx, sy, grid.width, grid.height, zx(tx * ts - lx), zx(ty * ts - ly), ts * zoom, wall);
             }
           }
         }
@@ -2687,10 +2722,10 @@ export function renderWorld(w: World, r: Renderer): void {
     } });
   }
   // Contact shadows: above the ground layers, below everything standing on them.
-  if (atm) items.push({ z: -1.5, order: 0, draw: () => drawShadows(w, r, atm, camX, camY, zoom) });
+  if (atm) items.push({ z: -1.5, order: 0, draw: () => { r.mark?.({ kind: 'ground' }); drawShadows(w, r, atm, camX, camY, zoom); } });
   // Particles: behind the instances (above tiles), and in front of them.
-  items.push({ z: -1, order: 1e9, draw: () => { w.particles.draw(r, camX, camY, zoom, true); if (!w.scripts.effectsInUi) w.vfx.draw(r, camX, camY, zoom, true); } });
-  items.push({ z: 50, order: 1e9, draw: () => w.particles.draw(r, camX, camY, zoom, false) });
+  items.push({ z: -1, order: 1e9, draw: () => { r.mark?.({ kind: 'ground' }); w.particles.draw(r, camX, camY, zoom, true); if (!w.scripts.effectsInUi) w.vfx.draw(r, camX, camY, zoom, true); } });
+  items.push({ z: 50, order: 1e9, draw: () => { r.mark?.({ kind: 'air' }); w.particles.draw(r, camX, camY, zoom, false); } });
   const hud: Actor[] = [];
   w.actors.forEach((a, i) => {
     if (a.type.hud) {
@@ -2703,15 +2738,22 @@ export function renderWorld(w: World, r: Renderer): void {
       const oy = a.type.spriteOffset?.y ?? 0;
       const sx = (a.x + ox - camX) * zoom;
       const sy = (a.y + oy - camY) * zoom;
-      if (sx + a.asset.width * zoom < -8 || sy + a.asset.height * zoom < -8 || sx > vw + 8 || sy > vh + 8) return;
+      if (sx + a.asset.width * zoom < -8 - over.left || sy + a.asset.height * zoom < -8 - over.top || sx > vw + 8 + over.right || sy > vh + 8 + over.bottom) return;
     }
     // y-sort: within the same z, instances lower on screen are drawn in front (top-down / RPG depth).
     const order = scene.ySort ? 1000 + a.box().y + a.box().h + i / 10000 : 1000 + i;
-    items.push({ z: a.z, order, draw: () => drawActor(w, r, a, camX, camY, zoom) });
+    items.push({ z: a.z, order, draw: () => {
+      if (r.mark) {
+        const b = a.box();
+        r.mark((a.type.hdPose ?? (a.z < 0 ? 'flat' : 'stand')) === 'flat' ? { kind: 'ground' } : { kind: 'stand', x: (b.x + b.w / 2 - camX) * zoom, y: (b.y + b.h - camY) * zoom });
+      }
+      drawActor(w, r, a, camX, camY, zoom);
+    } });
   });
   items.sort((p, q) => p.z - q.z || p.order - q.order);
   for (const it of items) it.draw();
   r.endRelief?.();
+  r.mark?.({ kind: 'air' });
   if (atm) {
     drawClouds(w, r, atm, camX, camY, zoom);
     w.motes.draw(r, camX, camY, zoom);
@@ -2719,12 +2761,20 @@ export function renderWorld(w: World, r: Renderer): void {
     w.rain.draw(r, camX, camY, zoom);
     postProcess(w, r, atm, camX, camY, zoom);
     if (atm.shafts) drawShafts(r, atm.shafts, w.clock, camX, camY, zoom, vw, vh, [w.motes, w.motes2]);
+    r.mark?.({ kind: 'screen' });
     w.rain.drawFlash(r, vw, vh);
+    r.mark?.({ kind: 'air' });
   }
   // After the lighting: a fireball in a dark cave glows instead of being darkened with the scene.
   if (!w.scripts.effectsInUi) {
     w.vfx.draw(r, camX, camY, zoom, false);
+    r.mark?.({ kind: 'screen' });
     w.vfx.drawScreen(r, vw, vh);
+  }
+  if (r.endWorld) {
+    const hd = resolveHd(w.game.hd, atm?.hd, atm?.ambient);
+    const box = held?.box();
+    r.endWorld(hd && { hd, subjectY: box ? ((box.y + box.h / 2 - camY) * zoom) / vh : 0.55, lights: hd.halo > 0 && hd.darkness > 0 ? collectLights(w, camX, camY, zoom) : [] });
   }
   hud.sort((p, q) => p.z - q.z);
   const screen = scaledRenderer(r, w.uiScale);
@@ -2816,7 +2866,8 @@ function drawActor(w: World, r: Renderer, a: Actor, camX: number, camY: number, 
   const y = Math.round((a.y + (offset?.y ?? 0) - camY) * zoom);
   if (a.asset && a.asset.frames.length) {
     const f = a.asset.frames[a.frameIndex()] ?? a.asset.frames[0];
-    if (x + f.w * zoom < -8 || y + f.h * zoom < -8 || x > w.game.width + 8 || y > w.game.height + 8) return;
+    const over = r.overscan;
+    if (x + f.w * zoom < -8 - (over?.left ?? 0) || y + f.h * zoom < -8 - (over?.top ?? 0) || x > w.game.width + 8 + (over?.right ?? 0) || y > w.game.height + 8 + (over?.bottom ?? 0)) return;
     const opts = { flipX: a.flipX, opacity: a.opacity, angle: a.angle, ...(zoom !== 1 ? { scale: zoom } : {}) };
     // Bands need whole screen rows to meet without a seam; a zoom tween in progress draws the plant still.
     if (a.type.sway && !a.angle && Number.isInteger(zoom)) {

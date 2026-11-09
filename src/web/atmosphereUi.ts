@@ -5,6 +5,7 @@
  */
 
 import { type LightDef, MOTE_PRESETS, type SceneAtmosphere, type SceneMotes } from '../core/game/types.js';
+import { type GameHd, HD_FIELDS, type HdSettings } from '../core/game/hd.js';
 import { clear, h } from './dom.js';
 
 /** `before` runs once at the start of each edit gesture (undo snapshot); `changed` after every change. */
@@ -66,6 +67,18 @@ function numberField(label: string, value: number | undefined, placeholder: stri
   return h('label', {}, label, inp);
 }
 
+/** One slider per 2D-HD parameter. Values not set in `own` show the one they fall back to. */
+export function hdSliders(own: HdSettings, fallback: HdSettings | undefined, hooks: EditHooks): HTMLElement {
+  const rows = HD_FIELDS.map((f) => slider(f.label, own[f.key] ?? fallback?.[f.key] ?? f.dflt, f.min, f.max, f.step, hooks, (v) => {
+    if (f.key === 'focusY' && v < 0) delete own.focusY;
+    else own[f.key] = v;
+  }, f.hint));
+  const haze = colorField('Haze color', own.hazeColor ?? fallback?.hazeColor, '#cfe0ff', hooks, (v) => { own.hazeColor = v; }, 'Left alone, it follows the ambient light of the scene');
+  const grid: HTMLElement[] = [];
+  for (let i = 0; i < rows.length; i += 2) grid.push(h('div', { class: 'row2' }, rows[i], rows[i + 1] ?? null));
+  return h('div', {}, ...grid, haze);
+}
+
 // ---------------------------------------------------------------------------------------------- atmosphere
 
 /** Starting points for a scene's look (the same values a designer would type in the fields). */
@@ -99,6 +112,8 @@ export interface AtmosphereEditorOptions extends EditHooks {
   audio?(): string[];
   /** Re-render after a structural change (preset, on/off, clouds on/off). */
   rerender?(): void;
+  /** The game-wide 2D-HD settings this scene falls back to. */
+  gameHd?(): GameHd | undefined;
 }
 
 /** The "Atmosphere" section of the scene settings. */
@@ -193,6 +208,26 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
         colorField('Shade', sun.shade, '#6a70b0', o, (v) => { sun.shade = v; }, 'Color of the side away from the sun'),
         slider('Intensity', sun.intensity ?? 1, 0, 3, 0.05, o, (v) => sunOpt('intensity', v)),
       ) : null,
+    );
+
+    // Auto 2D-HD for this scene.
+    const hdMode = !atm.hd ? 'game' : atm.hd.off ? 'off' : 'own';
+    const hdSel = h('select', { onchange: () => {
+      o.before();
+      if (hdSel.value === 'game') delete atm.hd;
+      else if (hdSel.value === 'off') atm.hd = { off: true };
+      else atm.hd = {};
+      o.changed();
+      render();
+    } },
+      h('option', { value: 'game', selected: hdMode === 'game' }, 'As the rest of the game'),
+      h('option', { value: 'own', selected: hdMode === 'own' }, 'Own settings'),
+      h('option', { value: 'off', selected: hdMode === 'off' }, 'Off in this scene'),
+    );
+    const hd2 = h('div', { class: 'atm-group' },
+      h('div', { class: 'atm-group-title', title: 'Bloom, depth of field and haze over the picture. Maps and sprites are not touched. The game-wide values are in Game settings' }, 'Auto 2D-HD'),
+      hdSel,
+      hdMode === 'own' && atm.hd ? hdSliders(atm.hd, o.gameHd?.(), o) : null,
     );
 
     // Shadows.
@@ -323,7 +358,7 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
     );
     };
 
-    box.append(h('div', { class: 'form atm-form' }, h('label', {}, 'Preset', presetSel), lighting, relief, shadows, clouds, grade, moteGroup('motes', 'Particles'), moteGroup('motes2', 'More particles'), weather()));
+    box.append(h('div', { class: 'form atm-form' }, h('label', {}, 'Preset', presetSel), lighting, relief, hd2, shadows, clouds, grade, moteGroup('motes', 'Particles'), moteGroup('motes2', 'More particles'), weather()));
   };
   render();
   return box;

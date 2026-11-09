@@ -10,6 +10,7 @@ import { scaleBitmap } from '../core/draw.js';
 import { BUILTIN_FONT, type PixelFont, fontPixelSize, rasterText } from '../core/game/font.js';
 import { type Renderer, World, renderWorld } from '../core/game/engine.js';
 import type { ScreenLight } from '../core/game/atmosphere.js';
+import { type HdFrame, applyHdBuffer } from '../core/game/hd.js';
 import { type ResolvedRelief, buildNormalSheet, frameMask, normalSheetFor, reliefKind, resolveRelief, shadeRelief } from '../core/game/relief.js';
 import { type Problem, validateGame } from '../core/game/catalog.js';
 import { type GameBundle, type GameProject, type Scene, type SpriteAsset, type Value, gameSlug, interfaceSize } from '../core/game/types.js';
@@ -184,6 +185,7 @@ const normalSheets = new WeakMap<Bitmap, Uint8ClampedArray>();
 
 export class BitmapRenderer implements Renderer {
   readonly out: Bitmap;
+  endWorld?: (frame: HdFrame | null) => void;
   private relief: { assets: Record<string, SpriteAsset | undefined>; view: { width: number; height: number }; normals: Uint8ClampedArray; on: boolean; tiles: boolean } | null = null;
   constructor(width: number, height: number, private sheets: Map<string, Bitmap>) {
     this.out = { width, height, data: new Uint8ClampedArray(width * height * 4) };
@@ -567,8 +569,9 @@ export function renderReliefPreview(built: { sheet: Bitmap; asset: SpriteAsset }
   return encodePng(scale > 1 ? scaleBitmap(out, scale) : out);
 }
 
-export function renderViewport(world: World, sheets: Map<string, Bitmap>, scale = 1): Buffer {
+export function renderViewport(world: World, sheets: Map<string, Bitmap>, scale = 1, hd = false): Buffer {
   const r = new BitmapRenderer(world.game.width, world.game.height, sheets).useRelief(world.bundle.sprites, interfaceSize(world.game));
+  if (hd) r.endWorld = (frame) => { if (frame) applyHdBuffer(r.out.data, r.out.width, r.out.height, frame); };
   renderWorld(world, r);
   return encodePng(scale > 1 ? scaleBitmap(r.out, scale) : r.out);
 }

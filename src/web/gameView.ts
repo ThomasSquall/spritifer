@@ -14,6 +14,7 @@ import { componentListCard } from './componentsUi.js';
 import { sheetContext } from './objectsView.js';
 import { VALUE_HINT, formatValue, parseValue } from './values.js';
 import { colorInput } from './colorInput.js';
+import { hdSliders } from './atmosphereUi.js';
 
 const RESOLUTIONS: [number, number, string][] = [
   [160, 144, 'handheld'],
@@ -140,6 +141,10 @@ export function renderGameSettings(root: HTMLElement): () => void {
     const bgIn = colorInput(g.background, (v) => { if (v) { g.background = v; changed(); } }, { fallback: '#181425' });
     const gravIn = h('input', { type: 'number', value: String(g.gravity), oninput: () => { g.gravity = Number(gravIn.value) || 0; changed(); } });
     const startSel = h('select', { onchange: () => { g.startScene = startSel.value; changed(); } }, ...state.scenes.map((s) => h('option', { value: s.name, selected: s.name === g.startScene }, s.name)));
+    // Stored in the game only once something is set.
+    const hdOwn = g.hd ?? {};
+    const hdChanged = () => { g.hd = hdOwn; changed(); };
+    const hdIn = h('input', { type: 'checkbox', checked: !!hdOwn.enabled, onchange: () => { hdOwn.enabled = hdIn.checked; hdChanged(); } });
     const touchIn = h('input', { type: 'checkbox', checked: g.touchControls, onchange: () => { g.touchControls = touchIn.checked; changed(); } });
 
     const setAndroid = (key: 'package' | 'version' | 'icon', value: string) => {
@@ -189,6 +194,9 @@ export function renderGameSettings(root: HTMLElement): () => void {
           h('div', { class: 'row2' }, h('label', {}, 'Font', fontSel), h('label', {}, 'Background', bgIn)),
           h('div', { class: 'row2' }, h('label', {}, 'Gravity (px/s²)', gravIn), h('label', {}, 'Start scene', startSel)),
           h('label', { class: 'inline' }, touchIn, 'On-screen controls on phones and tablets'),
+          h('h3', { title: 'Bloom, depth of field and haze over the picture. Maps and sprites are not touched, and players can switch it with F6. A scene can have its own settings or none, in its Atmosphere panel' }, 'Auto 2D-HD'),
+          h('label', { class: 'inline' }, hdIn, 'On when the game starts'),
+          hdSliders(hdOwn, undefined, { before() {}, changed: hdChanged }),
           h('h3', {}, 'Android'),
           h('label', {}, 'Package', packageIn),
           h('div', { class: 'row2' }, h('label', {}, 'Version', versionIn), h('label', {}, 'App icon', iconSel)),
@@ -221,6 +229,7 @@ export function renderGameSettings(root: HTMLElement): () => void {
             h('tr', {}, h('td', {}, h('kbd', {}, 'X'), ' ', h('kbd', {}, 'K')), h('td', {}, 'action2')),
             h('tr', {}, h('td', {}, h('kbd', {}, 'F2')), h('td', {}, 'show hitboxes')),
             h('tr', {}, h('td', {}, h('kbd', {}, 'F3')), h('td', {}, 'sound on/off')),
+            h('tr', {}, h('td', {}, h('kbd', {}, 'F6')), h('td', {}, '2D-HD on/off')),
           ),
         ),
       ),

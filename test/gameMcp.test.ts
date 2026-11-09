@@ -168,3 +168,21 @@ describe('bundling', () => {
     expect(Object.keys(loadGameBundle(ws).bundle.sprites)).toContain('boss_art');
   });
 });
+
+describe('auto 2D-HD through MCP', () => {
+  it('stores the game and scene settings and shows them in a playtest screenshot', async () => {
+    await buildPlatformer();
+    await call('set_game', { hd: { enabled: true, bloom: 1.5, blur_far: 0.4, focus_y: 0.5, haze_color: '#112233' } });
+    expect(ws.loadGame().hd).toEqual({ enabled: true, bloom: 1.5, blurFar: 0.4, focusY: 0.5, hazeColor: '#112233' });
+    const scene = ws.listScenes()[0].name;
+    await call('update_scene', { scene, atmosphere: { ambient: '#ffffff', hd: { off: true } } });
+    expect(ws.loadScene(scene).atmosphere?.hd).toEqual({ off: true });
+    await call('update_scene', { scene, atmosphere: { ambient: '#ffffff', hd: { haze: 0.5 } } });
+    const flat = await call('playtest', { seconds: 0.2 });
+    const hd = await call('playtest', { seconds: 0.2, hd: true });
+    const shot = (r: ToolResult) => r.content.filter((c) => c.type === 'image').at(-1)!.data;
+    expect(shot(hd)).not.toEqual(shot(flat));
+    await call('set_game', { hd: null });
+    expect(ws.loadGame().hd).toBeUndefined();
+  });
+});

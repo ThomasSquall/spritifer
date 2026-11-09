@@ -160,6 +160,7 @@ export const GAME_MEMBERS: ApiEntry[] = [
   prop('animClock', 'readonly animClock: number', 'Like clock, but stands still during a hitstop: use it to animate what you draw yourself.'),
   prop('paused', 'readonly paused: boolean', 'The game is paused with pause(true).'),
   prop('music', 'readonly music: string', 'The music track playing ("" = none).'),
+  prop('hd', 'hd: boolean', 'Auto 2D-HD on or off for this player (remembered in this browser). Put it in an options menu.'),
   prop('dialogOpen', 'readonly dialogOpen: boolean', 'A dialog box is open (the game is paused).'),
 ];
 

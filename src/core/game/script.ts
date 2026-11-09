@@ -1601,6 +1601,8 @@ export class ScriptHost {
         get dialogOpen() { return !!host.dialog; },
         get paused() { return w.paused; },
         get music() { return w.music; },
+        get hd() { return w.hd; },
+        set hd(on: boolean) { w.hd = !!on; },
       },
       camera: {
         get x() { return w.camera.x; },

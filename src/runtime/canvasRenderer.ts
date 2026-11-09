@@ -5,6 +5,7 @@
 
 import type { Renderer } from '../core/game/engine.js';
 import type { CastShape, ScreenLight } from '../core/game/atmosphere.js';
+import type { HdFrame } from '../core/game/hd.js';
 import { BUILTIN_FONT, type PixelFont, fontPixelSize, rasterText, textBitmapSize } from '../core/game/font.js';
 import { type ResolvedRelief, frameMask, normalSheetFor, reliefKind, shadeRelief } from '../core/game/relief.js';
 import type { ReflectionBand, WaterPiece } from '../core/game/reflections.js';
@@ -20,6 +21,9 @@ interface NormalSheet {
 export class CanvasRenderer implements Renderer {
   private textCache = new Map<string, HTMLCanvasElement>();
   constructor(private ctx: CanvasRenderingContext2D, private images: Map<string, CanvasImageSource>, private w: number, private h: number) {}
+
+  /** Set by the player only while 2D-HD is on. */
+  endWorld?: (frame: HdFrame | null) => void;
 
   clear(color: string): void {
     this.ctx.globalAlpha = 1;
@@ -200,6 +204,16 @@ export class CanvasRenderer implements Renderer {
     const g = read.getContext('2d', { willReadFrequently: true })!;
     g.drawImage(img, 0, 0);
     return { data: g.getImageData(0, 0, width, height).data, width, height };
+  }
+
+  /** The normal sheet of a sprite, for the perspective view; null when it has none. */
+  normalsOf(sprite: string): Uint8ClampedArray | null {
+    return this.relief ? (this.normalSheet(sprite)?.data ?? null) : null;
+  }
+
+  /** Is the frame being drawn lit per pixel? */
+  get reliefActive(): boolean {
+    return !!this.relief?.on;
   }
 
   private normalSheet(sprite: string): NormalSheet | null {

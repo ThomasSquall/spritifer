@@ -7,6 +7,7 @@ import { type TilesetRules, normalizeTilesetRules } from './tilerules.js';
 import type { SpriteRelief } from '../sprite.js';
 import type { VfxGraph } from './vfxGraph.js';
 import { BUILTIN_FONT, FONTS } from './font.js';
+import { type GameHd, type SceneHd, normalizeHd } from './hd.js';
 import type { ScatterRecipe, SceneGroup } from './sceneOps.js';
 
 export type Value = number | string | boolean;
@@ -82,6 +83,8 @@ export interface ObjectType {
   light?: LightDef;
   /** Soft contact shadow under the instance: width in px (0 = none). Absent = automatic (hitbox width) when the scene has shadows. */
   shadow?: number;
+  /** In the 2D-HD perspective: lies on the ground or stands up. Absent = flat when its z is below 0. */
+  hdPose?: 'flat' | 'stand';
   /** Moved by the wind when drawn (trees, tall plants): the hitbox and the art don't change. */
   sway?: ObjectSway;
   /** Sound looping around the instance (fires, fountains): louder the closer the camera is. */
@@ -227,6 +230,8 @@ export interface SceneAtmosphere {
   reflections?: SceneReflections;
   /** Per-pixel lighting: lights and the sun shape the volumes of the sprites. */
   relief?: SceneRelief;
+  /** This scene's own 2D-HD settings, over the game's. */
+  hd?: SceneHd;
 }
 
 /** Per-pixel lighting of a scene. */
@@ -362,6 +367,8 @@ export interface GameProject {
   tilesets?: Record<string, TilesetRules>;
   /** Android export settings. */
   android?: AndroidSettings;
+  /** Auto 2D-HD: how the whole game looks with it on, and whether it starts on. */
+  hd?: GameHd;
   rev: string;
   updatedBy?: string;
 }
@@ -491,6 +498,7 @@ export function normalizeObject(v: unknown): ObjectType {
   const light = normalizeLight(o.light);
   if (light) obj.light = light;
   if (typeof o.shadow === 'number' && Number.isFinite(o.shadow)) obj.shadow = Math.max(0, Math.round(o.shadow));
+  if (o.hdPose === 'flat' || o.hdPose === 'stand') obj.hdPose = o.hdPose;
   const sway = normalizeSway(o.sway);
   if (sway) obj.sway = sway;
   const ambientSound = normalizeAmbientSound(o.ambientSound);
@@ -514,6 +522,7 @@ export function normalizeGame(v: unknown): GameProject {
     startScene: str(o.startScene, ''),
     gravity: num(o.gravity, 900),
     touchControls: bool(o.touchControls, true),
+    ...(normalizeHd(o.hd) ? { hd: normalizeHd(o.hd) } : {}),
     variables: vars(o.variables),
     objects: Array.isArray(o.objects) ? o.objects.map(normalizeObject) : [],
     ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
@@ -625,6 +634,7 @@ export function normalizeAtmosphere(v: unknown): SceneAtmosphere | undefined {
     motes: moteLayer(A.motes as Record<string, unknown> | undefined),
     motes2: moteLayer(A.motes2 as Record<string, unknown> | undefined),
     relief: normalizeRelief(A.relief),
+    hd: normalizeHd(A.hd),
     rain: normalizeRain(A.rain),
     shafts: normalizeShafts(A.shafts),
     reflections: normalizeReflections(A.reflections),

@@ -36,6 +36,7 @@ import {
   resizeScene,
 } from '../core/game/types.js';
 import { exportAndroid } from './android.js';
+import { HD_FIELDS, normalizeHd } from '../core/game/hd.js';
 import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePreview, renderVfxStrip, renderViewport } from './game.js';
 import { type VfxEdge, type VfxGraph, VFX_NAME_RE, VFX_REFERENCE, VFX_TEMPLATES, VFX_TEMPLATE_IDS, VFX_NODE_TYPES, checkVfx, normalizeVfx, vfxEdgePort, vfxHasCycle, vfxInputErrors } from '../core/game/vfxGraph.js';
 import { encodePng } from './png.js';
@@ -167,6 +168,9 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
   x: z.number().optional().describe('Offset from the sprite center'),
   y: z.number().optional(),
 });
+const hdFields = Object.fromEntries(HD_FIELDS.map((f) => [f.mcp, z.number().min(f.min).max(f.max).optional().describe(`${f.hint} (default ${f.dflt})`)]));
+const hdValues = (a: Record<string, unknown>) => ({ ...Object.fromEntries(HD_FIELDS.map((f) => [f.key, a[f.mcp]])), hazeColor: a.haze_color });
+const HAZE_COLOR = z.string().optional().describe('"#rrggbb". Absent: derived from the ambient light of the scene');
 const atmosphereSchema = z.object({
   ambient: z.string().optional().describe('Multiplied over the world. "#ffffff" plain day, "#fff0dc" warm day, "#c8d0ff" overcast, "#8a7ab8" dusk, "#3a3c70" night, "#2a2440" dark cave. Lights cut through it.'),
   glow: z.number().min(0).max(2).optional().describe('Bloom added by lights (default 0.6)'),
@@ -197,9 +201,10 @@ const atmosphereSchema = z.object({
       shade: z.string().optional().describe('Color of the side away from the sun (default soft blue-violet)'),
     }).optional().describe('Directional light for the whole scene, with shadows cast on the ground. Omit for none'),
   }).nullable().optional().describe('Per-pixel lighting: lights and the sun shape the volumes of the sprites, from a normal map computed automatically. Pass {} to enable with defaults. See set_relief for a single sprite'),
+  hd: z.object({ ...hdFields, haze_color: HAZE_COLOR, off: z.boolean().optional().describe('Keep this scene flat even with 2D-HD on (title screens)') }).nullable().optional().describe('This scene\'s own auto 2D-HD settings, over the game\'s (set_game hd). Omit to follow the game'),
 });
 const toAtmosphere = (a: z.infer<typeof atmosphereSchema>) =>
-  normalizeAtmosphere({ ambient: a.ambient, glow: a.glow, shadows: a.shadows, shadowColor: a.shadow_color, shadowOpacity: a.shadow_opacity, vignette: a.vignette, vignetteColor: a.vignette_color, clouds: a.clouds ? { sprite: a.clouds.sprite, opacity: a.clouds.opacity, speedX: a.clouds.speed_x, speedY: a.clouds.speed_y } : undefined, tint: a.tint, tintAmount: a.tint_amount, motes: a.motes ?? undefined, motes2: a.motes2 ?? undefined, rain: a.rain ? { ...a.rain, flashColor: a.rain.flash_color } : undefined, shafts: a.shafts ?? undefined, reflections: a.reflections ?? undefined, relief: a.relief ? { strength: a.relief.strength, bands: a.relief.bands, rim: a.relief.rim, lightHeight: a.relief.light_height, tiles: a.relief.tiles, sun: a.relief.sun } : undefined });
+  normalizeAtmosphere({ ambient: a.ambient, glow: a.glow, shadows: a.shadows, shadowColor: a.shadow_color, shadowOpacity: a.shadow_opacity, vignette: a.vignette, vignetteColor: a.vignette_color, clouds: a.clouds ? { sprite: a.clouds.sprite, opacity: a.clouds.opacity, speedX: a.clouds.speed_x, speedY: a.clouds.speed_y } : undefined, tint: a.tint, tintAmount: a.tint_amount, motes: a.motes ?? undefined, motes2: a.motes2 ?? undefined, rain: a.rain ? { ...a.rain, flashColor: a.rain.flash_color } : undefined, shafts: a.shafts ?? undefined, reflections: a.reflections ?? undefined, relief: a.relief ? { strength: a.relief.strength, bands: a.relief.bands, rim: a.relief.rim, lightHeight: a.relief.light_height, tiles: a.relief.tiles, sun: a.relief.sun } : undefined, hd: a.hd ? { ...hdValues(a.hd), off: a.hd.off } : undefined });
 
 const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
   const stepSchema = z.record(z.string(), valueSchema).describe('{ type: "...", ...params }');
@@ -246,6 +251,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       start_scene: z.string().optional(),
       gravity: z.number().optional().describe('px/s² for platformer/patrol (default 900)'),
       touch_controls: z.boolean().optional(),
+      hd: z.object({ ...hdFields, haze_color: HAZE_COLOR, enabled: z.boolean().optional().describe('On when the game starts, for a player who never chose. Players switch it with F6 or game.hd') }).nullable().optional().describe('Auto 2D-HD: bloom, depth of field, haze and halos over the picture, maps and sprites untouched (replaces the settings; null removes them). Scenes can override it with atmosphere.hd'),
       variables: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       components: z.array(stepSchema).optional().describe('Global components alive for the whole game across scenes (replace the list): [{ type: "script", name: "GameManager" }]'),
       android_package: z.string().regex(/^$|^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/).optional().describe('Android application id ("com.yourname.game"). Keep it once published: another id is another app. Empty = derived from the title'),
@@ -283,6 +289,8 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         }
         if (a.gravity !== undefined) g.gravity = a.gravity;
         if (a.touch_controls !== undefined) g.touchControls = a.touch_controls;
+        if (a.hd === null) delete g.hd;
+        else if (a.hd) g.hd = normalizeHd({ ...hdValues(a.hd), enabled: a.hd.enabled });
         if (a.android_package !== undefined || a.android_version !== undefined || a.android_icon !== undefined) {
           if (a.android_icon && !ws.exists(a.android_icon)) throw new Error(`No sprite "${a.android_icon}"`);
           const given = { package: a.android_package, version: a.android_version, icon: a.android_icon };
@@ -378,6 +386,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       hud: z.boolean().optional().describe('Draw in screen space (ignores the camera)'),
       light: lightSchema.nullable().optional().describe('Light it gives off (seen in scenes with an atmosphere: darker ambient + glow). null removes'),
       shadow: z.number().min(0).nullable().optional().describe('Contact shadow width in px (0 = none, null = automatic: hitbox width). Flat things (rugs, doormats, flowerbeds) want 0'),
+      hd_pose: z.enum(['flat', 'stand']).nullable().optional().describe('In the 2D-HD perspective: lies on the ground or stands up. null = automatic (flat when z is below 0)'),
       sway: z.object({ amount: z.number().min(0).max(24).describe('Pixels the top of the sprite travels; the foot stays still. Trees want 2-4'), speed: z.number().min(0.1).max(5).optional().describe('1 = normal'), react: z.number().min(0).max(24).optional().describe('Pixels a character walking through pushes the top aside, springing back after. Grass and ferns want 2-4') }).nullable().optional().describe('Wind: bends the sprite when drawn, without new art or frames, with gusts travelling across the map. The hitbox does not move. null = off'),
       extends: z.string().nullable().optional().describe('Make it a VARIANT of another object type (like a Unity prefab variant): it inherits sprite, hitbox, properties, tags, components (params can be overridden by listing the same component with only the changed params) and events, and stores only what differs. null = standalone again. Queries and events on the parent type (find("slime"), "collides with slime", count) include its variants.'),
       ambient_sound: z.object({ sound: z.string(), volume: z.number().min(0).max(1).optional().describe('Next to it, default 0.4'), radius: z.number().min(8).max(4096).optional().describe('Heard up to this many px from the middle of the screen, default 160') }).nullable().optional().describe('A sound looping around every instance (fire, fountain): louder the closer the camera is. null = off'),
@@ -443,6 +452,10 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
           const l = a.light === null ? undefined : normalizeLight(a.light);
           if (l) o.light = l;
           else delete o.light;
+        }
+        if (a.hd_pose !== undefined) {
+          if (a.hd_pose === null) delete o.hdPose;
+          else o.hdPose = a.hd_pose;
         }
         if (a.shadow !== undefined) {
           if (a.shadow === null) delete o.shadow;
@@ -981,6 +994,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       inputs: z.array(z.object({ at: z.number().min(0), key: z.string().optional(), duration: z.number().min(0).optional().describe('Hold time in seconds (default 0.1 = tap)'), click: z.tuple([z.number(), z.number()]).optional() })).optional(),
       sample_at: z.array(z.number()).optional().describe('Times (s) to snapshot the state'),
       screenshots: z.boolean().optional().describe('Also screenshot every sample time'),
+      hd: z.boolean().optional().describe('Screenshots with auto 2D-HD on'),
       scale: z.number().int().min(1).max(4).optional(),
       seed: z.number().int().optional(),
       choices: z.array(z.number().int().min(0)).optional().describe('Menu answers for choose() dialogs, in order (default: first entry)'),
@@ -1004,7 +1018,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         seed: a.seed,
         vars: a.vars as Record<string, Value> | undefined,
         playerAt: a.player_at,
-        onSample: a.screenshots ? (w) => shots.push(renderViewport(w, loaded.sheets, scale)) : undefined,
+        onSample: a.screenshots ? (w) => shots.push(renderViewport(w, loaded.sheets, scale, a.hd)) : undefined,
       });
       const fmtState = (s: (typeof r)['final']) =>
         [
@@ -1020,7 +1034,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         ...r.samples.map((s) => `Sample:\n${fmtState(s)}`),
         `Final:\n${fmtState(r.final)}`,
       ].filter(Boolean);
-      return [...text(lines.join('\n')), ...shots.map(image), image(renderViewport(r.world, loaded.sheets, scale))];
+      return [...text(lines.join('\n')), ...shots.map(image), image(renderViewport(r.world, loaded.sheets, scale, a.hd))];
     },
     { readOnlyHint: true },
   );

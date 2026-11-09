@@ -147,6 +147,10 @@ export async function openPlay(scene?: string, opts: { record?: boolean } = {}):
       fpsOn = !!d.on;
       fpsBtn.classList.toggle('on', fpsOn);
     }
+    if (d.type === 'hd') {
+      hdOn = !!d.on;
+      hdBtn.classList.toggle('on', hdOn);
+    }
   };
   window.addEventListener('message', onMsg);
   let wantRecord = !!opts.record;
@@ -232,6 +236,8 @@ export async function openPlay(scene?: string, opts: { record?: boolean } = {}):
   document.addEventListener('fullscreenchange', onFullscreen);
   let fpsOn = false;
   const fpsBtn = h('button', { class: 'small', title: 'Show frame rate and frame time on the game (F4 in game); remembered for the next Play', onclick: () => { sendToGame({ type: 'fps', on: !fpsOn }); frame.focus(); } }, 'FPS');
+  let hdOn = false;
+  const hdBtn = h('button', { class: 'small', title: 'Auto 2D-HD: bloom, depth of field and haze over the game, maps and sprites untouched (F6 in game); remembered for the next Play', onclick: () => { sendToGame({ type: 'hd', on: !hdOn }); frame.focus(); } }, '2D-HD');
   const overlay = h('div', { class: 'play-overlay' },
     h('header', { class: 'play-head' },
       h('span', { class: 'play-title' }, icon('play', 14), ` ${state.game?.title ?? 'Game'}`, scene ? h('span', { class: 'muted' }, ` · ${scene}`) : null),
@@ -242,6 +248,7 @@ export async function openPlay(scene?: string, opts: { record?: boolean } = {}):
       hotBtn,
       h('span', { class: 'play-volume play-keep-fullscreen' }, musicBtn, volumeSlider),
       fpsBtn,
+      hdBtn,
       hitBtn,
       h('button', { class: 'small', onclick: reload }, 'Restart'),
       fullscreenBtn,

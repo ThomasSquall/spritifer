@@ -64,7 +64,7 @@ describe('2D-HD walls', () => {
     expect(cells[3 * 3 + 1]).toEqual({ face: 0 });
     expect(cells[1 * 3 + 1]).toEqual({ face: 2 });
     expect(cells[0 * 3 + 1]).toEqual({ cap: 3, left: false, right: false });
-    expect(cells[0]).toEqual({ cap: 3, left: true, right: false });
+    expect(cells[0]).toMatchObject({ cap: 3, left: true, right: false });
     expect(cells[4 * 3]).toBeNull();
   });
 
@@ -90,7 +90,7 @@ describe('2D-HD walls', () => {
     expect(cells[2 * 3 + 1]).toEqual({ face: 0 });
     // A height set low in a column sets it for the column.
     expect(cells[3 * 3 + 2]).toEqual({ face: 0 });
-    expect(cells[2 * 3 + 2]).toEqual({ cap: 1, left: false, right: true });
+    expect(cells[2 * 3 + 2]).toMatchObject({ cap: 1, left: true, right: true });
   });
 
   it('raises what the automatic detection left flat', () => {
@@ -107,6 +107,34 @@ describe('2D-HD walls', () => {
 
   it('ignores corrections left outside a map that was made smaller', () => {
     expect(findWalls(map(['...']), 3, 1, resolver, 3, { '9,9': 2 }).every((c) => c === null)).toBe(true);
+  });
+
+  it('dresses the side of a wall with the nearest front, unrolled along its depth', () => {
+    const wide = ['####', '####', '####', '####', '....'];
+    const cells = findWalls(map(wide), 4, 5, resolver, 2);
+    // Fronts are rows 2 and 3 (foot on row 3). Column 0's top cells borrow them, one column on per row of depth.
+    expect(cells[1 * 4]).toMatchObject({ cap: 2, left: true, sides: [3 * 4 + 2, 2 * 4 + 2] });
+    expect(cells[0]).toMatchObject({ cap: 2, left: true, sides: [3 * 4 + 1, 2 * 4 + 1] });
+    expect(cells[1]).not.toHaveProperty('sides');
+  });
+
+  it('closes the corner where a side wall meets a back wall', () => {
+    // A room: back wall on rows 0-2, side wall on column 0, floor from row 3.
+    const room = ['####', '####', '####', '#...', '#...', '#...', '#...', '#...'];
+    const cells = findWalls(map(room), 4, 8, resolver, 3);
+    // The tops painted next to the back wall stand next to the floor, so their side shows.
+    for (const y of [0, 1, 2, 3]) expect(cells[y * 4]).toMatchObject({ cap: 3, right: true });
+  });
+
+  it('hides the side between two tops standing next to each other', () => {
+    const block = ['####', '####', '####', '####', '####', '....'];
+    const cells = findWalls(map(block), 4, 6, resolver, 3);
+    expect(cells[0 * 4 + 1]).toMatchObject({ left: false, right: false });
+    expect(cells[1 * 4 + 3]).toMatchObject({ left: false, right: true });
+  });
+
+  it('leaves sides undressed when the map has no front to borrow', () => {
+    expect(findWalls(map(['...', '###']), 3, 2, resolver, 3)[3]).not.toHaveProperty('sides');
   });
 
   it('does nothing with no rows asked for', () => {

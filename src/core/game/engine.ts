@@ -2601,7 +2601,8 @@ export interface Renderer {
   overscan?: { left: number; top: number; right: number; bottom: number };
   /** Rows of a wall's front (0: no walls), and one map tile standing up. */
   wallRows?: number;
-  tileWall?(sprite: string, sx: number, sy: number, sw: number, sh: number, x: number, y: number, size: number, cell: WallCell): void;
+  /** `sides`: where on the sheet the art of each row of the wall's side is; null = this tile adds no side. */
+  tileWall?(sprite: string, sx: number, sy: number, sw: number, sh: number, x: number, y: number, size: number, cell: WallCell, sides: ([number, number] | null)[] | null): void;
   /** The world is finished, the interface comes next. Present only while 2D-HD is on; null = this scene stays flat. */
   endWorld?(frame: HdFrame | null): void;
   /** Soft-light color grade over the frame. */
@@ -2690,18 +2691,32 @@ export function renderWorld(w: World, r: Renderer): void {
         // The ground stays clean: only walls and other solid layers take the light as relief.
         const opts = { ...img((ts / grid.width) || 1), flat: !layer.solid };
         const draw: number[] = [];
+        const sideDraw: number[] = [];
         for (let ty = y0; ty <= y1; ty++) {
           for (let tx = x0; tx <= x1; tx++) {
             const t = layer.tiles[ty * scene.cols + tx];
             if (t < 0) continue;
             resolver.resolve(layer, scene.cols, scene.rows, tx, ty, draw, w.clock);
+            let sidesDone = false;
             for (const d of draw) {
               const sx = f0.x + (d % tcols) * grid.width;
               const sy = f0.y + Math.floor(d / tcols) * grid.height;
               const wall = walls?.[ty * scene.cols + tx];
               // A wall also stays on the floor: where the view looks past its edge, the floor is what shows.
               if (!wall || !layer.solid) r.image(tileset.name, sx, sy, grid.width, grid.height, zx(tx * ts - lx), zx(ty * ts - ly), opts);
-              if (wall) r.tileWall!(tileset.name, sx, sy, grid.width, grid.height, zx(tx * ts - lx), zx(ty * ts - ly), ts * zoom, wall);
+              if (wall) {
+                let sides: ([number, number] | null)[] | null = null;
+                if (!sidesDone) {
+                  sides = wall && 'sides' in wall && wall.sides ? wall.sides.map((cell) => {
+                    if (layer.tiles[cell]! < 0) return null;
+                    resolver.resolve(layer, scene.cols, scene.rows, cell % scene.cols, Math.floor(cell / scene.cols), sideDraw, w.clock);
+                    const t = sideDraw[0];
+                    return t === undefined ? null : [f0.x + (t % tcols) * grid.width, f0.y + Math.floor(t / tcols) * grid.height];
+                  }) : [];
+                  sidesDone = true;
+                }
+                r.tileWall!(tileset.name, sx, sy, grid.width, grid.height, zx(tx * ts - lx), zx(ty * ts - ly), ts * zoom, wall, sides);
+              }
             }
           }
         }

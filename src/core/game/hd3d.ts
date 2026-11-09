@@ -76,8 +76,12 @@ export function overscanOf(cam: Camera3d): { left: number; top: number; right: n
   return { left: side, right: side, top, bottom: 0 };
 }
 
-/** A wall cell: part of the vertical front, or part of the top. `stretch` makes a front taller than the rows it has. */
-export type WallCell = { face: number; stretch?: number } | { cap: number; left: boolean; right: boolean };
+/**
+ * A wall cell: part of the vertical front, or part of the top. `stretch` makes a front taller than the rows it has.
+ * `sides` are the map cells whose art covers the side of a top cell, from the foot up: nobody paints the side of a wall
+ * in a map seen from the south, so it borrows a stretch of the fronts.
+ */
+export type WallCell = { face: number; stretch?: number } | { cap: number; left: boolean; right: boolean; sides?: number[] };
 
 /**
  * Which cells stand up, read from the map as it is. A solid cell is a wall when the ground art under it is used only under
@@ -148,5 +152,91 @@ export function findWalls(layers: readonly TileLayer[], cols: number, rows: numb
       y = top;
     }
   }
+  exposeSides(out, cols, rows);
+  dressSides(out, cols, rows);
   return out;
+}
+
+/**
+ * Which sides of a wall top show. A top stands as many rows south of where it is painted as the wall is high, so what
+ * counts is what is next to it down there: next to where it is painted there may be another wall, and the side still shows.
+ */
+function exposeSides(cells: (WallCell | null)[], cols: number, rows: number): void {
+  const standing = new Uint8Array(cols * rows);
+  cells.forEach((c, i) => {
+    if (!c) return;
+    const x = i % cols;
+    const y = Math.floor(i / cols);
+    if ('cap' in c) {
+      // Past the bottom of the map, the last row stands for it: two walls running off the edge still touch.
+      standing[Math.min(y + c.cap, rows - 1) * cols + x] = 1;
+    } else if (c.face === 0) standing[i] = 1;
+  });
+  const standsAt = (x: number, y: number) => x >= 0 && x < cols && !!standing[Math.min(y, rows - 1) * cols + x];
+  cells.forEach((c, i) => {
+    if (!c || !('cap' in c)) return;
+    const x = i % cols;
+    const ground = Math.floor(i / cols) + c.cap;
+    c.left = !standsAt(x - 1, ground);
+    c.right = !standsAt(x + 1, ground);
+  });
+}
+
+/** A row of neighbouring wall fronts with their foot on the same line, `rows` tiles high. */
+interface FrontStrip {
+  foot: number;
+  x0: number;
+  x1: number;
+  rows: number;
+}
+
+function frontStrips(cells: readonly (WallCell | null)[], cols: number, rows: number): FrontStrip[] {
+  const height = (x: number, foot: number) => {
+    let n = 0;
+    for (let y = foot; y >= 0; y--) {
+      const c = cells[y * cols + x];
+      if (!c || !('face' in c) || c.face !== foot - y) break;
+      n++;
+    }
+    return n;
+  };
+  const strips: FrontStrip[] = [];
+  for (let foot = 0; foot < rows; foot++) {
+    let open: FrontStrip | null = null;
+    for (let x = 0; x < cols; x++) {
+      const n = height(x, foot);
+      if (n && open && open.rows === n) open.x1 = x;
+      else if (n) strips.push((open = { foot, x0: x, x1: x, rows: n }));
+      else open = null;
+    }
+  }
+  return strips;
+}
+
+/**
+ * Gives each exposed side of a wall top the nearest front of the same height, one column further along it for each row of
+ * depth: the masonry unrolls along the side as it does along the front, joints and piers included.
+ */
+function dressSides(cells: (WallCell | null)[], cols: number, rows: number): void {
+  const strips = frontStrips(cells, cols, rows);
+  if (!strips.length) return;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const c = cells[y * cols + x];
+      if (!c || !('cap' in c) || (!c.left && !c.right)) continue;
+      let best = strips[0]!;
+      let bestScore = Infinity;
+      for (const s of strips) {
+        const dx = x < s.x0 ? s.x0 - x : x > s.x1 ? x - s.x1 : 0;
+        const score = dx + Math.abs(y - s.foot) + (s.rows === c.cap ? 0 : 1000);
+        if (score < bestScore) {
+          bestScore = score;
+          best = s;
+        }
+      }
+      const length = best.x1 - best.x0 + 1;
+      const column = best.x0 + (((y - best.foot) % length) + length) % length;
+      c.sides = Array.from({ length: Math.min(best.rows, c.cap) }, (_, r) => (best.foot - r) * cols + column);
+    }
+  }
 }

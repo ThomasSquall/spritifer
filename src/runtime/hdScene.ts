@@ -469,7 +469,7 @@ export class HdScene implements Renderer {
   }
 
   /** One map tile standing up, per its place in the wall. `x` and `y` are where it is in the flat picture. */
-  tileWall(sprite: string, sx: number, sy: number, sw: number, sh: number, x: number, y: number, size: number, cell: WallCell): void {
+  tileWall(sprite: string, sx: number, sy: number, sw: number, sh: number, x: number, y: number, size: number, cell: WallCell, sides: ([number, number] | null)[] | null): void {
     if (!this.inWorld) return;
     const sheet = this.sheet(sprite);
     if (!sheet) return;
@@ -494,11 +494,23 @@ export class HdScene implements Renderer {
     const top = height * raise;
     const near = y + height;
     this.push(this.stand, { ...base, src, flat, depth: near + size - cy, at: [P(x, near, top), P(x + size, near, top), P(x + size, near + size, top), P(x, near + size, top)] });
-    // The art has no side of the wall: its edge column is stretched down, darker.
-    const side = (at: number, u: number) => this.push(this.stand, {
-      ...base, flat, depth: near + size - cy, color: [0.62, 0.62, 0.66, 1], src: [u, sy, u + 1, sy + sh],
-      at: [P(at, near, top), P(at, near + size, top), P(at, near + size, 0), P(at, near, 0)],
-    });
+    if (!sides) return;
+    const shaded = { ...base, flat, depth: near + size - cy };
+    const side = (at: number, u: number) => {
+      if (sides.length && sides.every(Boolean)) {
+        // The masonry of a front, turned to run along the side, a little in shade.
+        const rowHeight = top / sides.length;
+        sides.forEach((from, row) => {
+          const [fx, fy] = from!;
+          const h0 = row * rowHeight;
+          const h1 = h0 + rowHeight;
+          this.push(this.stand, { ...shaded, color: [0.8, 0.8, 0.84, 1], src: [fx, fy, fx + sw, fy + sh], at: [P(at, near, h1), P(at, near + size, h1), P(at, near + size, h0), P(at, near, h0)] });
+        });
+        return;
+      }
+      // No front anywhere on this map to borrow from: the edge of the top is stretched down, darker.
+      this.push(this.stand, { ...shaded, color: [0.62, 0.62, 0.66, 1], src: [u, sy, u + 1, sy + sh], at: [P(at, near, top), P(at, near + size, top), P(at, near + size, 0), P(at, near, 0)] });
+    };
     if (cell.left) side(x, sx);
     if (cell.right) side(x + size, sx + sw - 1);
   }

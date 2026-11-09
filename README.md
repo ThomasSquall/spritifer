@@ -165,7 +165,7 @@ export default class Patrol extends Behaviour {
 - `stopMusic()` e `setVolume('music' | 'sfx', v)`;
 - ogni scena può avere la sua musica (scheda *Scene*), e negli eventi ci sono **Play music** e **Stop music**.
 
-I file finiscono dentro l'HTML esportato.
+I file finiscono dentro l'HTML esportato e nell'APK.
 
 **Azioni di input.** Nella pagina Game, **Input actions** assegna un nome ai comandi (`jump`, `attack`, `menu`) e li collega a tasti e pulsanti del gamepad (`pad:a`, `pad:b`, `pad:start`…). Script ed eventi usano il nome come un tasto: `pressed('attack')`, trigger *Key pressed attack*. Un'azione con il nome di un tasto predefinito (`action`, `up`…) lo rimappa.
 
@@ -274,6 +274,17 @@ Con **Remember instances when leaving** la scena ricorda posizioni, proprietà e
 - **Export** scrive `<workspace>/export/web/<titolo>/index.html`: **un solo file** con motore, scene e immagini incorporate. Funziona offline, su qualsiasi hosting statico e si carica su itch.io come gioco HTML5. Lo stesso file si scarica dal pulsante *Download HTML*.
 - Il runtime (~17 KB gzip) scala il gioco a pixel interi quando possibile, supporta tastiera (frecce/WASD, Spazio/Z/J, X/K, Invio), mouse, **controlli touch** su telefono e **gamepad**.
 
+### Export per Android
+
+**Export → Export for Android** (o `export_android` via MCP) costruisce `<workspace>/export/android/<titolo>/<titolo>.apk`: un'app a schermo intero, firmata, che si installa su Android 7 o successivi e gira offline. I salvataggi restano sul telefono.
+
+Serve l'Android SDK (basta aver installato Android Studio) e un JDK 17 o più recente; Gradle e la rete non servono. Nella pagina Game, sezione **Android**, si impostano package, versione e icona (`android_package`, `android_version`, `android_icon` in `set_game`). Senza icona scelta si usa uno sprite chiamato `icon`, altrimenti quello del primo oggetto.
+
+- Tieni fisso il **package** una volta pubblicato il gioco: un package diverso è un'altra app.
+- La chiave di firma viene creata alla prima build in `~/.spritifer/android-keys/`, fuori dalla cartella del gioco così non finisce su git. **Fanne una copia**: gli aggiornamenti dell'app richiedono la stessa chiave.
+- I controlli su schermo sono una levetta che compare dove appoggi il pollice sulla metà sinistra dello schermo, A (`action`) e B (`action2`), più un interruttore per correre se il personaggio ha una velocità di corsa: un gioco che usa altri tasti deve accettare anche uno di questi.
+- Il Play Store richiede un Android App Bundle (`.aab`), che questo export non produce: l'APK serve per installare il gioco direttamente o distribuirlo fuori dallo store.
+
 ### Lavorare su un gioco grande
 
 Queste funzioni ci sono uguali nell'editor e via MCP.
@@ -346,7 +357,7 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Audio e input | `list_audio`, `import_audio` (da un file sul computer), `delete_audio`; `update_scene` con `music`; `set_game` con `actions`; `set_frame_events` (eventi sui frame) |
 | Script | `set_object` / `place_instances` / `update_instances` con `tags`; `component_library` / `add_library_component` (componenti pronti), `script_reference` (componenti, ciclo di vita, API completa con esempio), `list_scripts` (cartelle, componenti con parametri/hook/metodi), `read_script`, `write_script` (percorsi con cartelle, controllo della sintassi), `edit_script`, `move_script` (sposta/rinomina file e cartelle aggiornando i riferimenti), `delete_script`; `place_instances`/`update_instances` (`components`), `update_scene` e `set_game` (`components`) attaccano i componenti |
 | Progetti | `list_projects`, `open_project`, `forget_project`, `create_project` (vuoto, platformer, rpg) |
-| Verifica ed export del gioco | `validate_game`, `preview_scene`, `playtest` (gioco headless con input scriptati e risposte ai menu: log, dialoghi, stato, screenshot), `export_game` (HTML unico per il web), `undo_game_change` |
+| Verifica ed export del gioco | `validate_game`, `preview_scene`, `playtest` (gioco headless con input scriptati e risposte ai menu: log, dialoghi, stato, screenshot), `export_game` (HTML unico per il web), `export_android` (APK installabile), `undo_game_change` |
 | Gioco grande | `find_usages`, `get_editor_context`, `set_note`, `get_world_map`, `list_tests`, `read_test`, `write_test`, `delete_test`, `run_tests`, `history`, `scatter_instances`, `scene_group`, `copy_scene_region` |
 | Altro | `undo`, `editor_url` |
 

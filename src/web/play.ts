@@ -6,7 +6,7 @@ import type { Recording } from '../runtime/player.js';
 import { normalizeTest } from '../core/game/gameTests.js';
 import { reportPlayLog, resetPlayLog, updateContext } from './editorContext.js';
 import { state } from './gameState.js';
-import { h, icon, iconButton, linkScriptRefs, modal, toast } from './dom.js';
+import { clear, h, icon, iconButton, linkScriptRefs, modal, toast } from './dom.js';
 
 const flushers = new Set<() => Promise<void>>();
 
@@ -275,6 +275,44 @@ export async function openExport(): Promise<void> {
       h('div', { class: 'actions' },
         h('a', { class: 'btn', href: gameApi.downloadUrl(), download: '' }, icon('export', 16), 'Download HTML'),
         h('button', { class: 'primary', onclick: () => void openPlay() }, icon('play', 14), 'Play'),
+      ),
+    ),
+  );
+}
+
+/** Builds the APK; the dialog stays open on "building" because it can take a while with big games. */
+export async function openAndroidExport(): Promise<void> {
+  await flushAll();
+  await modal('Export for Android', (close) => {
+    const body = h('div', { class: 'form' }, h('p', {}, 'Building the Android app…'));
+    gameApi.exportAndroid().then((r) => {
+      clear(body);
+      body.append(
+        h('p', {}, `An APK that installs on Android 7 or newer and plays offline (${(r.bytes / 1048576).toFixed(1)} MB, ${r.scenes} scene${r.scenes === 1 ? '' : 's'}, ${r.sprites} sprite${r.sprites === 1 ? '' : 's'}). Package ${r.package}, version ${r.version}.`),
+        h('code', { class: 'path' }, r.file),
+        h('p', { class: 'muted small' }, 'Keep a copy of the signing key: updates to the app need the same one.'),
+        h('code', { class: 'path' }, r.keystore),
+        ...r.warnings.map((w) => h('p', { class: 'small' }, w)),
+        ...(r.problems.length
+          ? [h('div', { class: 'problems' }, h('strong', {}, `${r.problems.length} problem${r.problems.length === 1 ? '' : 's'}:`), ...r.problems.slice(0, 12).map((p) => h('div', { class: 'small' }, `${p.where}: ${p.message}`)))]
+          : []),
+        h('div', { class: 'actions' }, h('a', { class: 'btn primary', href: gameApi.apkUrl(), download: '' }, icon('export', 16), 'Download APK')),
+      );
+    }).catch((err: Error) => {
+      close();
+      toast(err.message, 'error');
+    });
+    return body;
+  });
+}
+
+export async function openExportMenu(): Promise<void> {
+  await modal('Export', (close) =>
+    h('div', { class: 'form' },
+      h('p', {}, 'Where will the game run?'),
+      h('div', { class: 'actions' },
+        h('button', { onclick: () => { close(); void openExport(); } }, icon('export', 16), 'Export for web'),
+        h('button', { class: 'primary', onclick: () => { close(); void openAndroidExport(); } }, icon('export', 16), 'Export for Android'),
       ),
     ),
   );

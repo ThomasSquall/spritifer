@@ -1,14 +1,14 @@
 /** Game page: settings, global variables, validation and export. */
 
 import type { GameProject, Value } from '../core/game/types.js';
-import { GAME_NAME_RE, normalizeActions } from '../core/game/types.js';
+import { GAME_NAME_RE, androidPackage, normalizeActions } from '../core/game/types.js';
 import { BUILTIN_FONT, FONTS } from '../core/game/font.js';
 import { previewSound } from './eventSheet.js';
 import { gameApi } from './gameApi.js';
 import { state } from './gameState.js';
 import { appNav } from './nav.js';
 import { openUsages } from './usagesView.js';
-import { openExport, openPlay } from './play.js';
+import { openAndroidExport, openExport, openPlay } from './play.js';
 import { clear, h, icon, iconButton, linkScriptRefs, promptText, toast } from './dom.js';
 import { componentListCard } from './componentsUi.js';
 import { sheetContext } from './objectsView.js';
@@ -142,6 +142,20 @@ export function renderGameSettings(root: HTMLElement): () => void {
     const startSel = h('select', { onchange: () => { g.startScene = startSel.value; changed(); } }, ...state.scenes.map((s) => h('option', { value: s.name, selected: s.name === g.startScene }, s.name)));
     const touchIn = h('input', { type: 'checkbox', checked: g.touchControls, onchange: () => { g.touchControls = touchIn.checked; changed(); } });
 
+    const setAndroid = (key: 'package' | 'version' | 'icon', value: string) => {
+      const next = { ...g.android, [key]: value.trim() };
+      if (!next[key]) delete next[key];
+      if (Object.keys(next).length) g.android = next;
+      else delete g.android;
+      changed();
+    };
+    const packageIn = h('input', { type: 'text', value: g.android?.package ?? '', placeholder: androidPackage({ title: g.title }), title: 'Application id. Keep it once the game is published: another id is another app.', spellcheck: false, oninput: () => setAndroid('package', packageIn.value) });
+    const versionIn = h('input', { type: 'text', value: g.android?.version ?? '', placeholder: '1.0', oninput: () => setAndroid('version', versionIn.value) });
+    const iconSel = h('select', { onchange: () => setAndroid('icon', iconSel.value) },
+      h('option', { value: '', selected: !g.android?.icon }, 'Automatic'),
+      ...state.sprites.map((s) => h('option', { value: s.name, selected: s.name === g.android?.icon }, s.name)),
+    );
+
     const vars = h('div', { class: 'props' });
     const parse = parseValue;
     for (const [k, v] of Object.entries(g.variables)) {
@@ -162,6 +176,7 @@ export function renderGameSettings(root: HTMLElement): () => void {
         h('h1', {}, g.title),
         h('span', { class: 'spacer' }),
         h('button', { onclick: () => void openExport() }, icon('export', 16), 'Export for web'),
+        h('button', { onclick: () => void openAndroidExport() }, icon('export', 16), 'Export for Android'),
         h('button', { class: 'primary', onclick: () => void openPlay() }, icon('play', 14), 'Play'),
       ),
       h('div', { class: 'settings-grid' },
@@ -174,6 +189,9 @@ export function renderGameSettings(root: HTMLElement): () => void {
           h('div', { class: 'row2' }, h('label', {}, 'Font', fontSel), h('label', {}, 'Background', bgIn)),
           h('div', { class: 'row2' }, h('label', {}, 'Gravity (px/s²)', gravIn), h('label', {}, 'Start scene', startSel)),
           h('label', { class: 'inline' }, touchIn, 'On-screen controls on phones and tablets'),
+          h('h3', {}, 'Android'),
+          h('label', {}, 'Package', packageIn),
+          h('div', { class: 'row2' }, h('label', {}, 'Version', versionIn), h('label', {}, 'App icon', iconSel)),
         ),
         h('div', { class: 'card' },
           h('h3', {}, 'Global variables'),

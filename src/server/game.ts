@@ -12,7 +12,7 @@ import { type Renderer, World, renderWorld } from '../core/game/engine.js';
 import type { ScreenLight } from '../core/game/atmosphere.js';
 import { type ResolvedRelief, buildNormalSheet, frameMask, normalSheetFor, reliefKind, resolveRelief, shadeRelief } from '../core/game/relief.js';
 import { type Problem, validateGame } from '../core/game/catalog.js';
-import { type GameBundle, type GameProject, type Scene, type SpriteAsset, type Value, interfaceSize } from '../core/game/types.js';
+import { type GameBundle, type GameProject, type Scene, type SpriteAsset, type Value, gameSlug, interfaceSize } from '../core/game/types.js';
 import { encodePng } from './png.js';
 import { inspectScripts } from './scripts.js';
 import type { ScriptInfo } from '../core/game/script.js';
@@ -170,8 +170,7 @@ export function exportGame(ws: Workspace, opts: { outDir?: string } = {}): Expor
   const { bundle, problems } = loadGameBundle(ws, { images: true });
   if (!Object.keys(bundle.scenes).length) throw new Error('The game has no scenes yet: create one first.');
   const html = buildGameHtml(bundle, loadRuntime());
-  const slug = bundle.game.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'game';
-  const dir = opts.outDir ? path.resolve(opts.outDir) : path.join(ws.exportDir, 'web', slug);
+  const dir = opts.outDir ? path.resolve(opts.outDir) : path.join(ws.exportDir, 'web', gameSlug(bundle.game.title));
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'index.html');
   fs.writeFileSync(file, html);

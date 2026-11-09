@@ -13,6 +13,7 @@ import { spriteFromArt } from '../core/artImport.js';
 import type { Workspace } from './store.js';
 import { ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
 import { type Value, assertIdentifier, createScene, normalizeGame, normalizeScene, normalizeTable } from '../core/game/types.js';
+import { androidApkPath, exportAndroid } from './android.js';
 import { buildGameHtml, exportGame, loadGameBundle, loadRuntime, renderScenePreview } from './game.js';
 import { renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
 import { addLibraryComponents, checkScriptSyntax, inspectScripts, refreshScriptTypes, scriptTemplate } from './scripts.js';
@@ -457,6 +458,14 @@ async function handleGame(ws: Workspace, req: http.IncomingMessage, res: http.Se
     return;
   }
   if (sub === 'export' && method === 'POST') return sendJson(res, 200, exportGame(ws));
+  if (sub === 'export-android' && method === 'POST') return sendJson(res, 200, await exportAndroid(ws));
+  if (sub === 'export.apk' && method === 'GET') {
+    const file = androidApkPath(ws, ws.loadGame().title);
+    if (!fs.existsSync(file)) throw new HttpError(404, 'Export the game for Android first');
+    res.writeHead(200, { 'content-type': 'application/vnd.android.package-archive', 'content-length': fs.statSync(file).size, 'content-disposition': `attachment; filename="${path.basename(file)}"`, 'cache-control': 'no-store' });
+    fs.createReadStream(file).pipe(res);
+    return;
+  }
   if (sub === 'objects' && parts[2] === 'rename' && method === 'POST') {
     const body = (await readJson(req)) as { to: string };
     const game = ws.loadGame();

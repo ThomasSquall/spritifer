@@ -119,6 +119,7 @@ export const gameApi = {
   saveGame: (g: GameProject) => req<{ rev: string }>('PUT', `${apiBase()}/game`, g),
   problems: () => req<Problem[]>('GET', `${apiBase()}/game/problems`),
   exportGame: () => req<{ file: string; bytes: number; sprites: number; scenes: number; problems: Problem[] }>('POST', `${apiBase()}/game/export`),
+  exportAndroid: () => req<{ file: string; bytes: number; package: string; version: string; sprites: number; scenes: number; keystore: string; problems: Problem[]; warnings: string[] }>('POST', `${apiBase()}/game/export-android`),
   renameObject: (from: string, to: string) => req<{ ok: true }>('POST', `${apiBase()}/game/objects/${enc(from)}/rename`, { to }),
   listScenes: () => req<SceneSummary[]>('GET', `${apiBase()}/scenes`),
   getScene: (name: string) => req<Scene>('GET', `${apiBase()}/scenes/${enc(name)}`),
@@ -185,6 +186,7 @@ export const gameApi = {
   forgetProject: (id: string) => req<{ ok: true }>('DELETE', `/api/projects/${enc(id)}`),
   playUrl: (scene?: string, debug = false) => `${apiBase()}/game/play.html?${scene ? `scene=${enc(scene)}&` : ''}${debug ? 'debug=1&' : ''}${new URLSearchParams(location.search).has('nomusic') ? 'nomusic=1&' : ''}t=${Date.now()}`,
   downloadUrl: () => `${apiBase()}/game/export.html?download=1`,
+  apkUrl: () => `${apiBase()}/game/export.apk`,
 };
 
 export interface LoadedAsset extends SpriteAsset {

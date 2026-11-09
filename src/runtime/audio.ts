@@ -244,6 +244,12 @@ export class SoundBoard {
     }
   }
 
+  /** Stops or restarts everything that is sounding. */
+  suspend(hidden: boolean): void {
+    if (!this.ctx) return;
+    void (hidden ? this.ctx.suspend() : this.ctx.resume());
+  }
+
   play(name: string, volume = 0.5): void {
     const ctx = this.ctx;
     if (!ctx || this.muted) return;

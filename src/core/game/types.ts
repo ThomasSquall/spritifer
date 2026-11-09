@@ -360,8 +360,32 @@ export interface GameProject {
   actions?: Record<string, string[]>;
   /** Tileset rules by tileset sprite name: autotiling, big seamless textures, random variants, edge overlays. */
   tilesets?: Record<string, TilesetRules>;
+  /** Android export settings. */
+  android?: AndroidSettings;
   rev: string;
   updatedBy?: string;
+}
+
+export interface AndroidSettings {
+  /** Application id ("com.yourname.game"). Absent = derived from the title. */
+  package?: string;
+  /** Version shown to players. Absent = "1.0". */
+  version?: string;
+  /** Sprite used as app icon. Absent = a sprite named "icon", else the first object's. */
+  icon?: string;
+}
+
+export const ANDROID_PACKAGE_RE = /^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/;
+
+/** The title as a file name: lowercase letters, digits and dashes. */
+export function gameSlug(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'game';
+}
+
+/** The Android application id of a game. */
+export function androidPackage(game: Pick<GameProject, 'title' | 'android'>): string {
+  const name = gameSlug(game.title).replace(/-/g, '');
+  return game.android?.package ?? `com.spritifer.${/^[a-z]/.test(name) ? name : `g${name}`}`;
 }
 
 export const GAME_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -495,9 +519,21 @@ export function normalizeGame(v: unknown): GameProject {
     ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
     ...(normalizeActions(o.actions) ? { actions: normalizeActions(o.actions) } : {}),
     ...(normalizeTilesets(o.tilesets) ? { tilesets: normalizeTilesets(o.tilesets) } : {}),
+    ...(normalizeAndroid(o.android) ? { android: normalizeAndroid(o.android) } : {}),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
   };
+}
+
+function normalizeAndroid(v: unknown): AndroidSettings | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const out: AndroidSettings = {};
+  for (const k of ['package', 'version', 'icon'] as const) {
+    const s = o[k];
+    if (typeof s === 'string' && s.trim()) out[k] = s.trim();
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function normalizeTilesets(v: unknown): Record<string, TilesetRules> | undefined {

@@ -35,6 +35,7 @@ import {
   normalizeTable,
   resizeScene,
 } from '../core/game/types.js';
+import { exportAndroid } from './android.js';
 import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePreview, renderVfxStrip, renderViewport } from './game.js';
 import { type VfxEdge, type VfxGraph, VFX_NAME_RE, VFX_REFERENCE, VFX_TEMPLATES, VFX_TEMPLATE_IDS, VFX_NODE_TYPES, checkVfx, normalizeVfx, vfxEdgePort, vfxHasCycle, vfxInputErrors } from '../core/game/vfxGraph.js';
 import { encodePng } from './png.js';
@@ -96,7 +97,7 @@ Workflow that works:
 3. create_scene, paint_tiles (rows + legend like draw_pixels, chars → tile indices; set solid on collision layers with set_tile_layer), place_instances.
 4. Events: collisions (collect coins: add score, destroy other, sound coin), hazards (restartScene), goals (gotoScene), HUD text objects.
 5. ALWAYS verify: validate_game, preview_scene, then playtest with scripted inputs (vars: {...} starts at a later stage, player_at: [x, y] puts the player next to what you test) (e.g. hold right 2s, tap up) and read the final state, logs and screenshot. Fix and re-test until it plays as intended.
-6. export_game and tell the user where index.html is (it runs offline and can be uploaded to itch.io as an HTML game).
+6. export_game and tell the user where index.html is (it runs offline and can be uploaded to itch.io as an HTML game), or export_android for an installable APK.
 `;
 
 export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
@@ -247,6 +248,9 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       touch_controls: z.boolean().optional(),
       variables: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       components: z.array(stepSchema).optional().describe('Global components alive for the whole game across scenes (replace the list): [{ type: "script", name: "GameManager" }]'),
+      android_package: z.string().regex(/^$|^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/).optional().describe('Android application id ("com.yourname.game"). Keep it once published: another id is another app. Empty = derived from the title'),
+      android_version: z.string().optional().describe('Version shown to Android players (default "1.0"). Empty = default'),
+      android_icon: z.string().optional().describe('Sprite used as Android app icon. Empty = a sprite named "icon", else the first object\'s'),
       actions: z.record(z.string(), z.union([z.array(z.string()), z.null()])).optional().describe('Input actions: name → keys/gamepad buttons, merged (null deletes): { jump: ["space", "w", "pad:a"], attack: ["x", "pad:b"] }. Events and scripts use the name like a key; a name like "action" or "up" remaps that built-in key. Keys: a-z, 0-9, space, enter, escape, shift, arrowleft/right/up/down, left/right/up/down, action, action2, pad:a/b/x/y/lb/rb/lt/rt/start/select/up/down/left/right.'),
     },
     (a) => {
@@ -279,6 +283,18 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         }
         if (a.gravity !== undefined) g.gravity = a.gravity;
         if (a.touch_controls !== undefined) g.touchControls = a.touch_controls;
+        if (a.android_package !== undefined || a.android_version !== undefined || a.android_icon !== undefined) {
+          if (a.android_icon && !ws.exists(a.android_icon)) throw new Error(`No sprite "${a.android_icon}"`);
+          const given = { package: a.android_package, version: a.android_version, icon: a.android_icon };
+          const next = { ...g.android };
+          for (const k of ['package', 'version', 'icon'] as const) {
+            const v = given[k];
+            if (v) next[k] = v;
+            else if (v === '') delete next[k];
+          }
+          if (Object.keys(next).length) g.android = next;
+          else delete g.android;
+        }
         for (const [k, v] of Object.entries(a.variables ?? {})) {
           assertIdentifier('variable', k);
           if (v === null) delete g.variables[k];
@@ -1588,6 +1604,12 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
   tool('export_game', 'Export the game as a single self-contained index.html (plays offline, on any static host, or uploaded to itch.io as an HTML5 game). Default folder: <workspace>/export/web/<title>/.', { out_dir: z.string().optional() }, (a) => {
     const r = exportGame(ws, { outDir: a.out_dir });
     return text(`Exported ${r.file} (${(r.bytes / 1024).toFixed(1)} KB, ${r.scenes} scene(s), ${r.sprites} sprite(s)).${r.problems.length ? `\nProblems:\n${r.problems.map((p) => `- ${p.where}: ${p.message}`).join('\n')}` : ''}`);
+  });
+
+  tool('export_android', 'Build a signed Android APK of the game: it plays offline and installs on Android 7 or newer. Needs the Android SDK and a JDK on this computer. On-screen controls offer only a stick (arrows), A (action), B (action2) and a run switch (shift) when an object has a run speed, so a game that needs another key must also accept one of those. Set the package, version and icon with set_game. Default folder: <workspace>/export/android/<title>/.', { out_dir: z.string().optional() }, async (a) => {
+    const r = await exportAndroid(ws, { outDir: a.out_dir });
+    const notes = [...r.warnings.map((w) => `Warning: ${w}`), ...r.problems.map((p) => `- ${p.where}: ${p.message}`)];
+    return text(`Exported ${r.file} (${(r.bytes / 1048576).toFixed(1)} MB, package ${r.package}, version ${r.version}, ${r.scenes} scene(s), ${r.sprites} sprite(s)).\nSigning key: ${r.keystore} — back it up: updates to the app need the same key.${notes.length ? `\n${notes.join('\n')}` : ''}`);
   });
 
   tool('history', 'The shared history of the game: every change to settings, object types, scenes, data tables, effects, scripts and dialogues, made by you or by the person in the editor, newest first. Sprites have their own versions (versions, restore_version).', {

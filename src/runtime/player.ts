@@ -96,9 +96,11 @@ const STYLE = `
 .spf-root{position:relative;width:100%;height:100%;display:grid;place-items:center;overflow:hidden;background:#000;touch-action:none;user-select:none;-webkit-user-select:none}
 .spf-root canvas{image-rendering:pixelated;image-rendering:crisp-edges;outline:none;display:block}
 .spf-touch{position:absolute;inset:0;pointer-events:none}
-.spf-pad,.spf-btns{position:absolute;bottom:18px;display:grid;gap:6px;pointer-events:auto}
-.spf-pad{left:18px;grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,52px)}
-.spf-btns{right:18px;grid-template-columns:repeat(2,64px);align-items:end}
+.spf-btns{position:absolute;bottom:18px;right:18px;display:grid;gap:6px;pointer-events:auto;grid-template-columns:repeat(2,64px);align-items:end}
+.spf-stick{position:absolute;width:104px;height:104px;margin:-52px 0 0 -52px;border-radius:50%;border:2px solid #ffffff55;background:#ffffff18;box-sizing:border-box;display:none}
+.spf-stick i{position:absolute;left:50%;top:50%;width:48px;height:48px;margin:-24px 0 0 -24px;border-radius:50%;background:#ffffff77}
+.spf-touch button.spf-run{position:absolute;top:48px;right:8px;width:52px;height:52px;border-radius:50%;font-size:26px;line-height:1;pointer-events:auto}
+.spf-touch button.spf-run.on{background:#ffd76a99;border-color:#ffd76a}
 .spf-touch button{border:2px solid #ffffff55;background:#ffffff22;color:#fff;border-radius:12px;font:600 18px system-ui;touch-action:none;padding:0}
 .spf-touch button.on{background:#ffffff66}
 .spf-btns button{width:64px;height:64px;border-radius:50%}
@@ -350,10 +352,12 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     const r = canvas.getBoundingClientRect();
     return [((e.clientX - r.left) / r.width) * game.width, ((e.clientY - r.top) / r.height) * game.height];
   };
+  /** Touches on the stick's half of the screen count as clicks only if they turn out to be taps. */
+  let onStickSide = (_e: PointerEvent) => false;
   const onPointerDown = (e: PointerEvent) => {
     sound.unlock();
     canvas.focus();
-    clicks.push(toGame(e));
+    if (!onStickSide(e)) clicks.push(toGame(e));
   };
   const onPointerMove = (e: PointerEvent) => {
     pointer = toGame(e);
@@ -361,6 +365,9 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
   window.addEventListener('blur', onBlur);
+  // In the Android app the game stops drawing in the background, and the music must stop with it.
+  const onVisibility = () => sound.suspend(document.hidden);
+  if (location.href.startsWith('file:///android_asset/')) document.addEventListener('visibilitychange', onVisibility);
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointermove', onPointerMove);
 
@@ -369,14 +376,11 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
   if (touch) {
     const layer = document.createElement('div');
     layer.className = 'spf-touch';
-    const pad = document.createElement('div');
-    pad.className = 'spf-pad';
     const btns = document.createElement('div');
     btns.className = 'spf-btns';
-    const mk = (label: string, key: string, parent: HTMLElement, area?: string) => {
+    const mk = (label: string, key: string, parent: HTMLElement) => {
       const b = document.createElement('button');
       b.textContent = label;
-      if (area) b.style.gridArea = area;
       const on = (e: PointerEvent) => {
         e.preventDefault();
         sound.unlock();
@@ -395,13 +399,90 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       b.addEventListener('lostpointercapture', off);
       parent.append(b);
     };
-    mk('▲', 'up', pad, '1 / 2');
-    mk('◀', 'left', pad, '2 / 1');
-    mk('▶', 'right', pad, '2 / 3');
-    mk('▼', 'down', pad, '3 / 2');
     mk('B', 'action2', btns);
     mk('A', 'action', btns);
-    layer.append(pad, btns);
+
+    // The left half of the screen is a stick that appears under the thumb, so nothing covers the game until it is used.
+    const STICK_REACH = 40;
+    const STICK_DEAD = 14;
+    const stick = document.createElement('div');
+    stick.className = 'spf-stick';
+    const knob = document.createElement('i');
+    stick.append(knob);
+    let held: { id: number; down: PointerEvent; x: number; y: number; moved: boolean } | null = null;
+    onStickSide = (e) => {
+      const r = root.getBoundingClientRect();
+      return e.clientX - r.left < r.width / 2;
+    };
+    const setDirections = (dx: number, dy: number) => {
+      const d = Math.hypot(dx, dy);
+      // sin(22.5°): splits the circle in eight equal directions.
+      const lean = d < STICK_DEAD ? Infinity : d * 0.383;
+      const wanted: Record<string, boolean> = { left: dx < -lean, right: dx > lean, up: dy < -lean, down: dy > lean };
+      for (const [key, on] of Object.entries(wanted)) {
+        if (on && !virtual.has(key)) queuedPress.add(key);
+        if (on) virtual.add(key);
+        else virtual.delete(key);
+      }
+    };
+    root.addEventListener('pointerdown', (e) => {
+      if (held || !onStickSide(e) || (e.target as HTMLElement).closest('button,input')) return;
+      sound.unlock();
+      const r = root.getBoundingClientRect();
+      held = { id: e.pointerId, down: e, x: e.clientX, y: e.clientY, moved: false };
+      stick.style.display = 'block';
+      stick.style.left = `${e.clientX - r.left}px`;
+      stick.style.top = `${e.clientY - r.top}px`;
+      knob.style.transform = '';
+      root.setPointerCapture?.(e.pointerId);
+    });
+    root.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== held?.id) return;
+      let dx = e.clientX - held.x;
+      let dy = e.clientY - held.y;
+      const d = Math.hypot(dx, dy);
+      if (d >= STICK_DEAD) held.moved = true;
+      if (d > STICK_REACH) {
+        // The base follows the thumb: going the other way answers at once.
+        held.x += (dx * (d - STICK_REACH)) / d;
+        held.y += (dy * (d - STICK_REACH)) / d;
+        dx = e.clientX - held.x;
+        dy = e.clientY - held.y;
+        const r = root.getBoundingClientRect();
+        stick.style.left = `${held.x - r.left}px`;
+        stick.style.top = `${held.y - r.top}px`;
+      }
+      knob.style.transform = `translate(${dx}px,${dy}px)`;
+      setDirections(dx, dy);
+    });
+    const release = (e: PointerEvent) => {
+      if (e.pointerId !== held?.id) return;
+      if (e.type === 'pointerup' && !held.moved && e.timeStamp - held.down.timeStamp < 300 && held.down.target === canvas) clicks.push(toGame(held.down));
+      held = null;
+      stick.style.display = 'none';
+      setDirections(0, 0);
+    };
+    root.addEventListener('pointerup', release);
+    root.addEventListener('pointercancel', release);
+
+    layer.append(stick);
+    // A switch rather than a button to hold: the left thumb is on the stick and the right one on A and B.
+    if (game.objects.some((o) => o.behaviors.some((b) => Number((b as { runSpeed?: unknown }).runSpeed) > 0))) {
+      const run = document.createElement('button');
+      run.className = 'spf-run';
+      run.textContent = '»';
+      run.setAttribute('aria-label', 'Run');
+      run.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        sound.unlock();
+        const on = !virtual.has('shift');
+        if (on) virtual.add('shift');
+        else virtual.delete('shift');
+        run.classList.toggle('on', on);
+      });
+      layer.append(run);
+    }
+    layer.append(btns);
     root.append(layer);
   }
 
@@ -599,6 +680,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
+      document.removeEventListener('visibilitychange', onVisibility);
       root.remove();
     },
   };

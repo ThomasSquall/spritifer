@@ -159,15 +159,19 @@ export class CanvasRenderer implements Renderer {
     this.ctx.drawImage(picture, 0, 0);
   }
 
-  private offWaterLayer: HTMLCanvasElement | null = null;
+  private offWaterLayers: { layer: HTMLCanvasElement; mask: HTMLCanvasElement } | null = null;
 
-  offWater(water: WaterPiece[], zoom: number, draw: () => void): void {
-    if (!this.offWaterLayer) {
-      this.offWaterLayer = document.createElement('canvas');
-      this.offWaterLayer.width = this.w;
-      this.offWaterLayer.height = this.h;
+  offWater(water: WaterPiece[], dry: WaterPiece[], zoom: number, draw: () => void): void {
+    if (!this.offWaterLayers) {
+      const make = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = this.w;
+        canvas.height = this.h;
+        return canvas;
+      };
+      this.offWaterLayers = { layer: make(), mask: make() };
     }
-    const layer = this.offWaterLayer;
+    const { layer, mask } = this.offWaterLayers;
     const g = layer.getContext('2d')!;
     g.imageSmoothingEnabled = false;
     g.clearRect(0, 0, this.w, this.h);
@@ -178,12 +182,24 @@ export class CanvasRenderer implements Renderer {
     } finally {
       this.ctx = main;
     }
+    // The water, less whatever lies across it.
+    const m = mask.getContext('2d')!;
+    m.imageSmoothingEnabled = false;
+    m.globalCompositeOperation = 'source-over';
+    m.clearRect(0, 0, this.w, this.h);
+    const stamp = (list: WaterPiece[]) => {
+      for (const p of list) {
+        const tile = this.waterMask(p);
+        if (tile) m.drawImage(tile, p.x, p.y, p.sw * zoom, p.sh * zoom);
+      }
+    };
+    stamp(water);
+    m.globalCompositeOperation = 'destination-out';
+    stamp(dry);
+    m.globalCompositeOperation = 'source-over';
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'destination-out';
-    for (const p of water) {
-      const tile = this.waterMask(p);
-      if (tile) g.drawImage(tile, p.x, p.y, p.sw * zoom, p.sh * zoom);
-    }
+    g.drawImage(mask, 0, 0);
     g.globalCompositeOperation = 'source-over';
     main.globalAlpha = 1;
     main.drawImage(layer, 0, 0);

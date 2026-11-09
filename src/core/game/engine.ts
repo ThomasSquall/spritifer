@@ -18,7 +18,7 @@ import { type CastShape, MoteField, type ScreenLight, collectLights, drawClouds,
 import { type HdFrame, type HdJut, resolveHd } from './hd.js';
 import { type HdShape, type WallCell, findWalls } from './hd3d.js';
 import { RainField, drawShafts } from './weather.js';
-import { type ReflectionBand, type WaterMap, type WaterPiece, type WaterSheet, addWaterActors, drawReflections, findWater, reflectionZ, waterPieces } from './reflections.js';
+import { type ReflectionBand, type WaterMap, type WaterPiece, type WaterSheet, addWaterActors, drawReflections, findWater, reflectionZ, waterDecals, waterPieces } from './reflections.js';
 import { type Walker, pushTarget, stepPush, swayBands, swayBase } from './wind.js';
 import type { ResolvedRelief } from './relief.js';
 
@@ -2653,8 +2653,8 @@ export interface Renderer {
   /** Draws a whole cast shadow in one go, or only some of its rows; `shape` is the same object for as long as the shadow doesn't change, so it can be kept ready. */
   /** Mirrored strips, showing only over the water pieces. */
   reflections?(water: WaterPiece[], bands: ReflectionBand[], zoom: number): void;
-  /** Whatever `draw` paints doesn't show over the water pieces (water takes no shadows). */
-  offWater?(water: WaterPiece[], zoom: number, draw: () => void): void;
+  /** Whatever `draw` paints doesn't show over the water pieces (water takes no shadows), except where `dry` lies across them. */
+  offWater?(water: WaterPiece[], dry: WaterPiece[], zoom: number, draw: () => void): void;
   stamp?(shape: CastShape, x: number, y: number, zoom: number, color: string, alpha: number, slice?: { row: number; rows: number }): void;
 }
 
@@ -2788,8 +2788,9 @@ export function renderWorld(w: World, r: Renderer): void {
     r.mark?.({ kind: 'ground' });
     const shadows = () => drawShadows(w, r, atm, camX, camY, zoom);
     const map = reflect && r.offWater ? w.waterMap() : null;
-    const water = map && reflect ? waterPieces(reflect, map, w.actors, waterSheet(), ts, camX, camY, zoom, vw, vh, r.overscan ?? { left: 0, top: 0, right: 0, bottom: 0 }) : [];
-    if (water.length) r.offWater!(water, zoom, shadows);
+    const over = r.overscan ?? { left: 0, top: 0, right: 0, bottom: 0 };
+    const water = map && reflect ? waterPieces(reflect, map, w.actors, waterSheet(), ts, camX, camY, zoom, vw, vh, over) : [];
+    if (map && reflect && water.length) r.offWater!(water, waterDecals(reflect, map, w.actors, ts, camX, camY, zoom, vw, vh, over), zoom, shadows);
     else shadows();
   } });
   // Particles: behind the instances (above tiles), and in front of them.

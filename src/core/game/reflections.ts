@@ -158,6 +158,28 @@ export function waterPieces(cfg: SceneReflections, map: WaterMap, actors: readon
   return water;
 }
 
+/** Bridges: what lies across the water, at least this many tiles wide and just below the shadows, is dry ground for them. Lily pads and canal art aren't. */
+const BRIDGE_TILES = 2;
+const BRIDGE_LOWEST_Z = -2.5;
+
+/** What lies across the water, drawn between it and the shadows (a bridge is a decal): dry ground for the shadows. */
+export function waterDecals(cfg: SceneReflections, map: WaterMap, actors: readonly AtmosphereActor[], ts: number, camX: number, camY: number, zoom: number, vw: number, vh: number, over: { left: number; top: number; right: number; bottom: number }): WaterPiece[] {
+  const overlays = cfg.sprites ?? [];
+  const bottom = Math.max(reflectionZ(map), BRIDGE_LOWEST_Z);
+  const out: WaterPiece[] = [];
+  for (const a of actors) {
+    if (a.destroyed || !a.visible || !a.asset?.name || a.type.hud || a.opacity <= 0 || a.z <= bottom || a.z >= -1.5 || overlays.includes(a.asset.name)) continue;
+    const f = a.asset.frames?.[a.frameIndex?.() ?? 0] ?? a.asset.frames?.[0];
+    if (!f || f.w < ts * BRIDGE_TILES || a.x + f.w < camX - over.left / zoom || a.x > camX + (vw + over.right) / zoom || a.y + f.h < camY - over.top / zoom || a.y > camY + (vh + over.bottom) / zoom) continue;
+    let wet = false;
+    const y1 = Math.min(map.rows - 1, Math.floor((a.y + f.h - 1) / ts));
+    const x1 = Math.min(map.cols - 1, Math.floor((a.x + f.w - 1) / ts));
+    for (let y = Math.max(0, Math.floor(a.y / ts)); y <= y1 && !wet; y++) for (let x = Math.max(0, Math.floor(a.x / ts)); x <= x1 && !wet; x++) wet = !!map.grid[y * map.cols + x];
+    if (wet) out.push({ sprite: a.asset.name, sources: [f.x, f.y], sw: f.w, sh: f.h, x: Math.round((a.x - camX) * zoom), y: Math.round((a.y - camY) * zoom) });
+  }
+  return out;
+}
+
 export function drawReflections(r: Renderer, cfg: SceneReflections, map: WaterMap, actors: readonly AtmosphereActor[], tileset: WaterSheet | null, ts: number, clock: number, camX: number, camY: number, zoom: number, vw: number, vh: number): void {
   if (!r.reflections) return;
   const over = r.overscan ?? { left: 0, top: 0, right: 0, bottom: 0 };

@@ -152,7 +152,7 @@ interface Batch {
   normals: WebGLTexture | null;
   size: [number, number];
   blend: 0 | 1 | 2;
-  stencil: 0 | 1 | 2 | 3;
+  stencil: 0 | 1 | 2 | 3 | 4;
   first: number;
   count: number;
 }
@@ -177,7 +177,7 @@ class DrawList {
     return this.vertices * FLOATS;
   }
 
-  batch(tex: WebGLTexture, normals: WebGLTexture | null, size: [number, number], blend: 0 | 1 | 2, stencil: 0 | 1 | 2 | 3): void {
+  batch(tex: WebGLTexture, normals: WebGLTexture | null, size: [number, number], blend: 0 | 1 | 2, stencil: 0 | 1 | 2 | 3 | 4): void {
     const last = this.batches[this.batches.length - 1];
     if (last && last.tex === tex && last.normals === normals && last.blend === blend && last.stencil === stencil) last.count += VERTICES_PER_QUAD;
     else this.batches.push({ tex, normals, size, blend, stencil, first: this.vertices, count: VERTICES_PER_QUAD });
@@ -204,7 +204,7 @@ type Quad = {
   /** Draw order of what this belongs to. */
   z?: number;
   /** 1: only marks where water is. 2: shows only over what was marked. */
-  stencil?: 0 | 1 | 2 | 3;
+  stencil?: 0 | 1 | 2 | 3 | 4;
   /** Upside down. */
   flipV?: boolean;
   /** The side of a wall, facing east (1) or west (-1). */
@@ -596,8 +596,8 @@ export class HdScene implements Renderer {
 
   private keepOffWater = false;
 
-  /** Writes the pixels of the water into the stencil. */
-  private markWater(water: WaterPiece[], zoom: number): void {
+  /** Writes the pixels of the water into the stencil, or (mode 4) takes those of what lies across it out again. */
+  private markWater(water: WaterPiece[], zoom: number, stencil: 1 | 4 = 1): void {
     const { list, point, depthOf } = this.placed();
     for (const piece of water) {
       const mask = this.base.waterMask(piece);
@@ -610,12 +610,13 @@ export class HdScene implements Renderer {
       const w = piece.sw * zoom;
       const h = piece.sh * zoom;
       const corners: [number, number][] = [[piece.x, piece.y], [piece.x + w, piece.y], [piece.x + w, piece.y + h], [piece.x, piece.y + h]];
-      this.push(list, { at: corners.map(([x, y]) => point(x, y)), flat: corners, depth: depthOf(piece.y), sheet, src: [0, 0, piece.sw, piece.sh], mirror: false, color: [1, 1, 1, 1], lit: false, shaped: false, white: 0, blend: 0, stencil: 1 });
+      this.push(list, { at: corners.map(([x, y]) => point(x, y)), flat: corners, depth: depthOf(piece.y), sheet, src: [0, 0, piece.sw, piece.sh], mirror: false, color: [1, 1, 1, 1], lit: false, shaped: false, white: 0, blend: 0, stencil });
     }
   }
 
-  offWater(water: WaterPiece[], zoom: number, draw: () => void): void {
+  offWater(water: WaterPiece[], dry: WaterPiece[], zoom: number, draw: () => void): void {
     this.markWater(water, zoom);
+    this.markWater(dry, zoom, 4);
     this.keepOffWater = true;
     try {
       draw();
@@ -785,8 +786,8 @@ export class HdScene implements Renderer {
       }
       if (b.stencil) {
         gl.enable(gl.STENCIL_TEST);
-        if (b.stencil === 1) {
-          gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+        if (b.stencil === 1 || b.stencil === 4) {
+          gl.stencilFunc(gl.ALWAYS, b.stencil === 1 ? 1 : 0, 0xff);
           gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
           gl.colorMask(false, false, false, false);
         } else {

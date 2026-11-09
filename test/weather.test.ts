@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeAtmosphere } from '../src/core/game/types.js';
 import { TileResolver } from '../src/core/game/tilerules.js';
-import { addWaterActors, findWater, reflectionBands, reflectionZ, waterPieces } from '../src/core/game/reflections.js';
+import { addWaterActors, findWater, reflectionBands, reflectionZ, waterDecals, waterPieces } from '../src/core/game/reflections.js';
 import { RainField, drawShafts } from '../src/core/game/weather.js';
 import type { Renderer } from '../src/core/game/engine.js';
 import type { TileLayer } from '../src/core/game/types.js';
@@ -66,6 +66,17 @@ describe('water', () => {
     const sheet = { name: 'tiles', tile: (t: number): [number, number] => [t * 16, 0], w: 16, h: 16 };
     const pieces = waterPieces({}, map, [], sheet, 16, 0, 0, 1, 48, 16, { left: 0, top: 0, right: 0, bottom: 0 });
     expect(pieces).toEqual([{ sprite: 'tiles', sources: [80, 0, 96, 0], sw: 16, sh: 16, x: 16, y: 0 }]);
+  });
+
+  it('counts what lies across the water as dry ground, and nothing else', () => {
+    const grid = new Uint8Array(8);
+    grid[1] = 1;
+    const map = { cols: 8, rows: 1, grid, cells: [] };
+    const over = { left: 0, top: 0, right: 0, bottom: 0 };
+    const deck = (x: number, z: number, w = 32) => ({ ...actor(x, 0, 16), z, asset: { ...actor(0, 0, 16).asset!, name: 'deck', frames: [{ x: 0, y: 0, w, h: 16 }] } });
+    // A bridge counts; not one on dry land, nor one above the shadows, nor a lily pad, nor canal art far below.
+    const found = waterDecals({}, map, [deck(16, -1.6), deck(64, -1.6), deck(16, 0), deck(16, -2, 16), deck(16, -6)], 16, 0, 0, 1, 128, 16, over);
+    expect(found.map((p) => p.x)).toEqual([16]);
   });
 
   it('never draws reflections above the shadows', () => {

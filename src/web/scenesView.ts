@@ -69,7 +69,7 @@ export function renderScenes(root: HTMLElement, open: (name: string) => void): (
     for (const s of state.scenes) {
       const isStart = g.startScene === s.name || (!g.startScene && s === state.scenes[0]);
       grid.append(h('article', { class: 'sprite-card scene-card', onclick: () => open(s.name) },
-        h('div', { class: 'thumb' }, h('img', { src: gameApi.scenePreviewUrl(s.name, s.rev, 1), alt: s.name, draggable: false })),
+        h('div', { class: 'thumb' }, h('img', { loading: 'lazy', src: gameApi.scenePreviewUrl(s.name, s.rev, 1), alt: s.name, draggable: false })),
         h('div', { class: 'meta' },
           h('strong', {}, isStart ? '★ ' : '', s.name),
           h('span', { class: 'muted' }, `${s.cols}×${s.rows} tiles · ${s.instances} instance${s.instances === 1 ? '' : 's'}`),

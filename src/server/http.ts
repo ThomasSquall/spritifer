@@ -14,7 +14,7 @@ import type { Workspace } from './store.js';
 import { ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
 import { type Value, assertIdentifier, createScene, normalizeGame, normalizeScene, normalizeTable } from '../core/game/types.js';
 import { androidApkPath, exportAndroid } from './android.js';
-import { buildGameHtml, exportGame, loadGameBundle, loadRuntime, renderScenePreview } from './game.js';
+import { buildGameHtml, cachedScenePreview, exportGame, loadGameBundle, loadRuntime, renderScenePreview, sharedGameBundle } from './game.js';
 import { renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
 import { addLibraryComponents, checkScriptSyntax, inspectScripts, refreshScriptTypes, scriptTemplate } from './scripts.js';
 import { scriptBaseName } from '../core/game/modules.js';
@@ -840,13 +840,12 @@ async function handleScenes(ws: Workspace, req: http.IncomingMessage, res: http.
     return sendJson(res, 201, { name: body.to });
   }
   if (sub === 'preview.png' && method === 'GET') {
-    const { png } = renderScenePreview(loadGameBundle(ws), name, { scale: num(url.searchParams.get('scale')), grid: url.searchParams.has('grid') });
-    return sendBuffer(res, png, 'image/png');
+    return sendBuffer(res, cachedScenePreview(ws, name, { scale: num(url.searchParams.get('scale')), grid: url.searchParams.has('grid') }), 'image/png');
   }
   // The scene as it looks with these global variables: what the conditional instances (activeIf) do.
   if (sub === 'preview-state' && method === 'POST') {
     const body = (await readJson(req)) as { vars?: Record<string, Value>; scale?: number };
-    const { png, hidden } = renderScenePreview(loadGameBundle(ws), name, { scale: body.scale, vars: body.vars ?? {} });
+    const { png, hidden } = renderScenePreview(sharedGameBundle(ws), name, { scale: body.scale, vars: body.vars ?? {} });
     return sendJson(res, 200, { png: png.toString('base64'), hidden });
   }
   throw new HttpError(404, 'Not found');

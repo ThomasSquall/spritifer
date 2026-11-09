@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -82,6 +83,44 @@ export class Workspace {
 
   exists(name: string): boolean {
     return fs.existsSync(this.file(name));
+  }
+
+  /** Time and size of a file: enough to tell that it changed, whoever wrote it. "none" when it does not exist. */
+  fileStamp(file: string): string {
+    try {
+      const st = fs.statSync(file);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return 'none';
+    }
+  }
+
+  /**
+   * Changes when any file the game is made of changes. It looks at the files because the MCP server
+   * and the generator scripts write them from other processes.
+   */
+  contentStamp(): string {
+    const hash = crypto.createHash('sha1');
+    const walk = (dir: string, wanted: (name: string) => boolean, deep: boolean) => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return; // This game has no such folder.
+      }
+      entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (deep) walk(full, wanted, deep);
+        } else if (wanted(e.name)) hash.update(`${full}\0${this.fileStamp(full)}\n`);
+      }
+    };
+    walk(this.dir, (n) => n === GAME_FILE || n.endsWith(SUFFIX) || n.endsWith(SCENE_SUFFIX), false);
+    // Only the scripts: the editor support files next to them are rewritten by tools and change nothing in the game.
+    walk(this.scriptsDir, (n) => n.endsWith('.js'), true);
+    for (const dir of [this.dialoguesDir, this.dataDir, this.vfxDir, this.audioDir]) walk(dir, () => true, true);
+    return hash.digest('hex');
   }
 
   list(): SpriteSummary[] {

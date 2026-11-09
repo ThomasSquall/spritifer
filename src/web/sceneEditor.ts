@@ -183,20 +183,29 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   };
 
   // ---------------------------------------------------------------- assets
+  // Each call replaces the one before it, and leaving the editor ends the last one.
+  let assetsRun = 0;
+  const fetchedAssets = new Set<string>();
   const loadAssets = async () => {
+    const run = ++assetsRun;
     tileset = scene.tileset ? await state.asset(scene.tileset) : undefined;
+    if (run !== assetsRun) return;
     assets.clear();
-    const names = new Set<string>();
-    for (const o of state.game!.objects) if (o.sprite) names.add(o.sprite);
-    for (const i of scene.instances) if (i.sprite) names.add(i.sprite);
-    for (const b of scene.backgrounds) names.add(b.sprite);
-    if (scene.atmosphere?.clouds) names.add(scene.atmosphere.clouds.sprite);
-    await Promise.all(
-      [...names].map(async (n) => {
-        const a = await state.asset(n);
-        if (a) assets.set(n, a);
-      }),
-    );
+    const bring = (names: Iterable<string>) => Promise.all([...names].map(async (n) => {
+      const a = await state.asset(n);
+      if (a && run === assetsRun) assets.set(n, a);
+      fetchedAssets.add(n);
+    }));
+    // The scene opens as soon as what it shows is here.
+    const shown = new Set<string>(fetchedAssets);
+    for (const i of scene.instances) { const s = spriteOf(i); if (s) shown.add(s); }
+    for (const b of scene.backgrounds) shown.add(b.sprite);
+    if (scene.atmosphere?.clouds) shown.add(scene.atmosphere.clouds.sprite);
+    // The other objects can be placed at any moment, so their sprites follow right after.
+    const others = new Set<string>();
+    for (const o of state.game!.objects) if (o.sprite && !shown.has(o.sprite)) others.add(o.sprite);
+    await bring(shown);
+    if (run !== assetsRun) return;
     atmRenderer = null;
     reliefRenderer = null;
     reliefCache.clear();
@@ -204,6 +213,13 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     draw();
     renderPalette();
     renderRight();
+    if (!others.size) return;
+    await bring(others);
+    if (run !== assetsRun) return;
+    atmRenderer = null;
+    reliefRenderer = null;
+    hdPreview.reload();
+    draw();
   };
 
   // ---------------------------------------------------------------- layout
@@ -2141,6 +2157,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
 
   return {
     destroy() {
+      assetsRun++;
       void flush();
       unregister();
       unsub();

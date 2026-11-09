@@ -1,5 +1,6 @@
 /** Server-side game operations: bundling assets, exporting a standalone web build, rendering previews. */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +42,8 @@ interface BuiltAsset {
 }
 
 const assetCache = new Map<string, BuiltAsset>();
+/** Well above what one game uses: a game that needs more sprites than this would empty the cache on every load. */
+const MAX_CACHED_ASSETS = 2000;
 
 /** Builds the runtime asset (grid spritesheet + metadata) for a sprite. Cached by revision. */
 export function buildAsset(sprite: Sprite, withImage: boolean): BuiltAsset {
@@ -63,7 +66,7 @@ export function buildAsset(sprite: Sprite, withImage: boolean): BuiltAsset {
         ...(sprite.relief ? { relief: sprite.relief } : {}),
       },
     };
-    if (assetCache.size > 200) assetCache.clear();
+    if (assetCache.size >= MAX_CACHED_ASSETS) assetCache.clear();
     assetCache.set(key, built);
   }
   if (withImage && !built.asset.image) built.asset.image = 'data:image/png;base64,' + encodePng(built.sheet).toString('base64');
@@ -579,6 +582,80 @@ export function renderViewport(world: World, sheets: Map<string, Bitmap>, scale 
 }
 
 export const encodeBitmap = (b: Bitmap): Buffer => encodePng(b);
+
+/** Changes whenever the code that draws previews is rebuilt, so previews drawn by older code are not reused. */
+const RENDERER_STAMP = (() => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const hash = crypto.createHash('sha1');
+  for (const dir of [here, path.join(here, '..', 'core')]) {
+    for (const f of fs.readdirSync(dir, { recursive: true, encoding: 'utf8' }).sort()) hash.update(`${f}\0${fs.statSync(path.join(dir, f)).mtimeMs}\n`);
+  }
+  return hash.digest('hex');
+})();
+
+let sharedBundle: { dir: string; stamp: string; loaded: LoadedGame } | null = null;
+
+/**
+ * The headless bundle, reused until a file of the game changes. Loading it reads hundreds of sprites,
+ * which is far too slow to repeat for each of a list of previews. Callers must only read it.
+ */
+export function sharedGameBundle(ws: Workspace): LoadedGame {
+  const stamp = ws.contentStamp();
+  if (sharedBundle?.dir !== ws.dir || sharedBundle.stamp !== stamp) sharedBundle = { dir: ws.dir, stamp, loaded: loadGameBundle(ws) };
+  return sharedBundle.loaded;
+}
+
+/** The sprite sheets of a game, noting which ones a render asks for. */
+class WatchedSheets extends Map<string, Bitmap> {
+  readonly asked = new Set<string>();
+  override get(name: string): Bitmap | undefined {
+    this.asked.add(name);
+    return super.get(name);
+  }
+}
+
+interface KeptPreview {
+  /** Stamps of the renderer, the game and the scene. */
+  base: string;
+  /** Stamp of each sprite the image asked for: editing any other sprite leaves it valid. */
+  sprites: Record<string, string>;
+  png: string;
+}
+
+/** The image of a scene, kept in .spritifer/previews until the scene or something it draws changes. */
+export function cachedScenePreview(ws: Workspace, sceneName: string, opts: { scale?: number; grid?: boolean } = {}): Buffer {
+  const base = [RENDERER_STAMP, ws.fileStamp(ws.gameFile()), ws.fileStamp(ws.sceneFile(sceneName))].join('|');
+  const spriteStamp = (name: string) => {
+    try {
+      return ws.fileStamp(ws.file(name));
+    } catch {
+      return 'none'; // An instance can name something that could never be a sprite file.
+    }
+  };
+  const file = path.join(ws.metaDir, 'previews', `${sceneName}.${opts.scale ?? 'auto'}${opts.grid ? '.grid' : ''}.json`);
+  try {
+    const kept = JSON.parse(fs.readFileSync(file, 'utf8')) as KeptPreview;
+    if (kept.base === base && Object.entries(kept.sprites).every(([n, st]) => spriteStamp(n) === st)) return Buffer.from(kept.png, 'base64');
+  } catch {
+    // Not drawn yet, or a copy that cannot be read: draw it again.
+  }
+  const before = ws.contentStamp();
+  const loaded = sharedGameBundle(ws);
+  const sheets = new WatchedSheets(loaded.sheets);
+  const { png } = renderScenePreview({ ...loaded, sheets }, sceneName, opts);
+  // A file that changed during the render could be drawn old but stamped new: such an image is shown but not kept.
+  if (ws.contentStamp() === before) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const kept: KeptPreview = { base, sprites: Object.fromEntries([...sheets.asked].map((n) => [n, spriteStamp(n)])), png: png.toString('base64') };
+      fs.writeFileSync(`${file}.tmp`, JSON.stringify(kept));
+      fs.renameSync(`${file}.tmp`, file);
+    } catch {
+      // The copy is only a saving: the image is still good without it.
+    }
+  }
+  return png;
+}
 
 /**
  * A scene through the 2D-HD camera, as the player will see it from there: `at` is the tile in the middle of the view, `size` the

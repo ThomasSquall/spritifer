@@ -1620,7 +1620,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     return text(`Kit "${a.name}" saved.`);
   });
 
-  tool('validate_game', 'Check the game for problems: unknown triggers/actions/behaviors, bad expressions, missing sprites, objects and scenes, and the map checks: scenes nothing leads to, one-way doors, instances stuck on solid tiles or where the player cannot walk, and the architecture of each map: walls too thin to stand, blocks of wall alone in a floor, big sprites across a passage.', {}, () => {
+  tool('validate_game', 'Check the game for problems: unknown triggers/actions/behaviors, bad expressions, missing sprites, objects and scenes, and the map checks: scenes nothing leads to, one-way doors, doors that drop the player outside the map, instances stuck on solid tiles or where the player cannot walk, and the architecture of each map: walls too thin to stand, blocks of wall alone in a floor, big sprites across a passage.', {}, () => {
     const maps = mapReport(ws).problems;
     const arch = architectureReport(ws);
     return text(`${problemsText()}${maps.length ? `\n\nMap checks (${maps.length}), worth a look but sometimes intended:\n${maps.slice(0, 60).map((p) => `- ${p.where}: ${p.message}`).join('\n')}${maps.length > 60 ? `\n... ${maps.length - 60} more` : ''}` : ''}${arch.length ? `\n\nArchitecture (${arch.length}):\n${arch.slice(0, 80).map((p) => `- ${p.where} [${p.code}]: ${p.message}`).join('\n')}${arch.length > 80 ? `\n... ${arch.length - 80} more` : ''}` : ''}`);

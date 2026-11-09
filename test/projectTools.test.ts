@@ -93,6 +93,27 @@ describe('world map and map checks', () => {
     expect(checks).toMatch(/Stuck.*stands on a solid tile/);
     expect(checks).toMatch(/npc .*cannot walk to/);
   });
+
+  it('reports doors whose arrival point is off the map, whichever edge they are on', async () => {
+    await game();
+    await call('write_script', { name: 'Warp', code: 'export default class Warp extends Behaviour {\n  to = ""\n  dx = 0\n  dy = 0\n}\n' });
+    await call('set_object', { name: 'exit', hitbox: { x: 0, y: 0, w: 16, h: 16 }, behaviors: [{ type: 'script', name: 'Warp' }] });
+    const door = (name: string, x: number, y: number, dx: number, dy: number) => ({ object: 'exit', name, x, y, components: { Warp: { to: 'cave', dx, dy } } });
+    await call('place_instances', {
+      scene: 'town',
+      instances: [
+        door('BadWest', 0, 48, -1, 0), door('BadEast', 144, 48, 1, 0), door('BadSouth', 48, 144, 0, 1), door('BadNorth', 48, 0, 0, -1),
+        door('GoodWest', 0, 80, 1, 0), door('GoodEast', 144, 80, -1, 0), door('GoodSouth', 80, 144, 0, -1), door('GoodNorth', 80, 0, 0, 1),
+        door('Fractional', 80, 144, 0.375, -1.1875),
+      ],
+    });
+    const checks = await call('validate_game');
+    expect(checks).toMatch(/BadWest.*arrival is outside the map: tile \(-1, 3\) of 10x10/);
+    expect(checks).toMatch(/BadEast.*arrival is outside the map: tile \(10, 3\)/);
+    expect(checks).toMatch(/BadSouth.*arrival is outside the map: tile \(3, 10\)/);
+    expect(checks).toMatch(/BadNorth.*arrival is outside the map: tile \(3, -1\)/);
+    expect(checks).not.toMatch(/(Good\w+|Fractional).*arrival is outside/);
+  });
 });
 
 describe('editor context and notes', () => {

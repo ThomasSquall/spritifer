@@ -126,6 +126,19 @@ export function checkMaps(p: ProjectSources, world: WorldMap, sizeOf: SizeOf): P
     const inside = (x: number, y: number) => x >= 0 && y >= 0 && x < s.cols && y < s.rows;
     const here = (i: Instance) => `scene ${s.name} instance ${i.name ?? i.object} #${i.id}`;
 
+    // A door whose arrival point is off the map: whoever comes through it can't walk back in.
+    for (const i of s.instances) {
+      const o = types.get(i.object);
+      const base = o?.behaviors.find((b) => b.type === 'script' && (b as { name?: string }).name === 'Warp');
+      if (!o || !(base || i.components?.Warp)) continue;
+      const { dx, dy } = { ...base, ...i.components?.Warp } as { dx?: unknown; dy?: unknown };
+      const offset = (v: unknown) => (typeof v === 'number' ? v * s.tileSize : 0);
+      const f = foot(i, o, sizeOf, s.tileSize);
+      const x = Math.floor((f.x + offset(dx)) / s.tileSize);
+      const y = Math.floor((f.y + offset(dy)) / s.tileSize);
+      if (!inside(x, y)) out.push({ where: here(i), message: `arrival is outside the map: tile (${x}, ${y}) of ${s.cols}x${s.rows}. dx and dy must point inward` });
+    }
+
     // Stuck in a wall: anything with a body and a sprite. Invisible triggers are often placed on purpose over walls.
     for (const i of s.instances) {
       const o = types.get(i.object);

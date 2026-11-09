@@ -7,6 +7,7 @@ import { type TilesetRules, normalizeTilesetRules } from './tilerules.js';
 import type { SpriteRelief } from '../sprite.js';
 import type { VfxGraph } from './vfxGraph.js';
 import { BUILTIN_FONT, FONTS } from './font.js';
+import type { ScatterRecipe, SceneGroup } from './sceneOps.js';
 
 export type Value = number | string | boolean;
 
@@ -281,6 +282,8 @@ export interface Instance {
   activeIf?: string;
   /** Light of this instance (overrides the object type's; null-like radius 0 = no light). */
   light?: LightDef;
+  /** Named group inside the scene, for working on many instances at once (trees, decor); the game ignores it. */
+  group?: string;
 }
 
 export interface SceneBackground {
@@ -320,6 +323,8 @@ export interface Scene {
   components?: Behavior[];
   /** Lighting, shadows, clouds, color grade and ambient particles. */
   atmosphere?: SceneAtmosphere;
+  /** How groups of instances were made, so they can be redone. */
+  groups?: Record<string, SceneGroup>;
   rev: string;
   updatedBy?: string;
 }
@@ -661,6 +666,7 @@ export function normalizeScene(v: unknown): Scene {
     if (typeof I.activeIf === 'string' && I.activeIf.trim()) inst.activeIf = I.activeIf.trim();
     const light = normalizeLight(I.light, true);
     if (light) inst.light = light;
+    if (typeof I.group === 'string' && I.group) inst.group = I.group;
     return inst;
   });
   const backgrounds: SceneBackground[] = (Array.isArray(o.backgrounds) ? o.backgrounds : []).map((b: unknown) => {
@@ -687,9 +693,22 @@ export function normalizeScene(v: unknown): Scene {
     variables: vars(o.variables),
     ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
     ...(normalizeAtmosphere(o.atmosphere) ? { atmosphere: normalizeAtmosphere(o.atmosphere) } : {}),
+    ...(normalizeGroups(o.groups) ? { groups: normalizeGroups(o.groups) } : {}),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
   };
+}
+
+function normalizeGroups(v: unknown): Record<string, SceneGroup> | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const out: Record<string, SceneGroup> = {};
+  for (const [name, g] of Object.entries(v)) {
+    if (!name || !g || typeof g !== 'object') continue;
+    const list = (g as { scatters?: unknown }).scatters;
+    const scatters = Array.isArray(list) ? (list as ScatterRecipe[]).filter((r) => Array.isArray(r?.items) && r.items.length && typeof r.seed === 'number') : [];
+    out[name] = scatters.length ? { scatters } : {};
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** Resizes a scene's tile layers, keeping the top-left content. */

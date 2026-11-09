@@ -2529,6 +2529,11 @@ export class World {
   // ------------------------------------------------------------------ inspection
 
   /** Compact description of the running state, for playtest reports. */
+  /** Is this expression true right now? For the end of a saved test. */
+  test(src: string): boolean {
+    return truthy(this.eval(src, {}));
+  }
+
   snapshot(): { scene: string; time: number; globals: Record<string, Value>; sceneVars: Record<string, Value>; actors: { id: number; object: string; name?: string; x: number; y: number; vx: number; vy: number; onGround: boolean; animation: string; vars: Record<string, Value> }[] } {
     return {
       scene: this.scene.name,
@@ -2930,12 +2935,13 @@ export async function runPlaytest(bundle: GameBundle, opts: PlaytestOptions): Pr
   const sampleFrames = new Set((opts.sampleAt ?? []).map((s) => Math.round(s / STEP)));
   let prev = new Set<string>();
   for (let f = 0; f < frames; f++) {
-    const t = f * STEP;
     const down = new Set<string>();
     const clicks: [number, number][] = [];
     for (const i of inputs) {
-      if (i.key && t >= i.at && t < i.at + (i.duration ?? 0.1)) down.add(i.key);
-      if (i.click && Math.round(i.at / STEP) === f) clicks.push(i.click);
+      // Counted in whole frames: a recorded key must last exactly the frames it was held.
+      const first = Math.round(i.at / STEP);
+      if (i.key && f >= first && f < first + Math.max(1, Math.round((i.duration ?? 0.1) / STEP))) down.add(i.key);
+      if (i.click && first === f) clicks.push(i.click);
     }
     const pressed = new Set([...down].filter((k) => !prev.has(k)));
     const released = new Set([...prev].filter((k) => !down.has(k)));

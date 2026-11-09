@@ -22,6 +22,11 @@ import { SCRIPT_REFERENCE } from '../core/game/script.js';
 import { DIALOGUE_REFERENCE, buildDialogueBook } from '../core/game/dialogue.js';
 import { DIALOGUE_TEMPLATE } from './scripts.js';
 import { VFX_TEMPLATES, normalizeVfx } from '../core/game/vfxGraph.js';
+import { USAGE_KINDS, type UsageKind, findUsages } from '../core/game/usages.js';
+import { normalizeTest } from '../core/game/gameTests.js';
+import { type EditorContext, appendPlayLog, listNotes, saveEditorContext, setNote } from './context.js';
+import { type HistoryKind, undoChange } from './history.js';
+import { loadSources, mapReport, runTests } from './projectTools.js';
 import { enableGit, gitCommit, gitCommitFiles, gitDiff, gitFileAt, gitLog, gitPull, gitPush, gitRestore, gitSetRemote, gitStatus } from './projectGit.js';
 
 const WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
@@ -92,6 +97,8 @@ export function startEditorServer(ws: Workspace, port: number, host = '127.0.0.1
           const t = pws.loadTable(name);
           rev = t.rev;
           updatedBy = t.updatedBy;
+        } else if (kind === 'notes' || kind === 'test') {
+          rev = String(Date.now());
         } else if (kind === 'vfx') {
           refreshScriptTypes(pws);
           const g = pws.loadVfx(name);
@@ -270,6 +277,25 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
   if (parts[1] === 'data') return handleData(ws, req, res, parts.slice(2));
   if (parts[1] === 'vfx') return handleVfx(ws, req, res, parts.slice(2));
   if (parts[1] === 'audio') return handleAudio(ws, req, res, parts.slice(2));
+  if (parts[1] === 'tests') return handleTests(ws, req, res, parts.slice(2));
+  if (parts[1] === 'notes') return handleNotes(ws, req, res, parts.slice(2));
+  if (parts[1] === 'history') return handleHistory(ws, res, parts.slice(2), url, method);
+
+  if (parts[1] === 'usages' && method === 'GET') {
+    const kind = url.searchParams.get('kind') as UsageKind;
+    if (!USAGE_KINDS.includes(kind)) throw new HttpError(400, 'Unknown kind');
+    return sendJson(res, 200, findUsages(loadSources(ws), kind, url.searchParams.get('name') ?? ''));
+  }
+  if (parts[1] === 'world' && method === 'GET') return sendJson(res, 200, mapReport(ws));
+  if (parts[1] === 'context' && method === 'POST') {
+    saveEditorContext(ws, (await readJson(req, 512 * 1024)) as Omit<EditorContext, 'updatedAt'>);
+    return sendJson(res, 200, { ok: true });
+  }
+  if (parts[1] === 'play-log' && method === 'POST') {
+    const body = (await readJson(req, 512 * 1024)) as { lines?: unknown[]; reset?: boolean };
+    appendPlayLog(ws, Array.isArray(body.lines) ? body.lines.map(String) : [], !!body.reset);
+    return sendJson(res, 200, { ok: true });
+  }
 
   if (parts[1] !== 'sprites') throw new HttpError(404, 'Not found');
   const name = parts[2];
@@ -461,7 +487,7 @@ function moveScriptAndRefs(ws: Workspace, from: string, to: string): void {
     // Keep the class name in sync with the file name (Unity-style).
     const code = ws.readScript(now);
     const renamed = code.replace(new RegExp(`(export\\s+default\\s+class\\s+)${a}\\b`), `$1${b}`);
-    if (renamed !== code) ws.writeScript(now, renamed);
+    if (renamed !== code) ws.writeScript(now, renamed, 'editor');
     const game = ws.loadGame();
     const scenes = ws.listScenes().map((s) => ws.loadScene(s.name));
     const changed = renameComponentRefs(game, scenes, a, b);
@@ -478,7 +504,7 @@ async function handleScripts(ws: Workspace, req: http.IncomingMessage, res: http
     if (method === 'POST') {
       const body = (await readJson(req)) as { name: string; code?: string; kind?: 'component' | 'script' };
       if (ws.scriptExists(body.name)) throw new HttpError(409, `Script "${body.name}" already exists`);
-      ws.writeScript(body.name, body.code ?? scriptTemplate(body.name, body.kind ?? 'script'));
+      ws.writeScript(body.name, body.code ?? scriptTemplate(body.name, body.kind ?? 'script'), 'editor');
       scriptsChanged(ws);
       return sendJson(res, 201, { name: body.name });
     }
@@ -488,7 +514,7 @@ async function handleScripts(ws: Workspace, req: http.IncomingMessage, res: http
   if (name === '_reference' && method === 'GET') return sendJson(res, 200, { reference: SCRIPT_REFERENCE });
   if (name === '_library' && method === 'POST') {
     const body = (await readJson(req)) as { names: string[] };
-    return sendJson(res, 200, addLibraryComponents(ws, Array.isArray(body.names) ? body.names.map(String) : []));
+    return sendJson(res, 200, addLibraryComponents(ws, Array.isArray(body.names) ? body.names.map(String) : [], 'editor'));
   }
   if (name === '_sources' && method === 'GET') return sendJson(res, 200, ws.loadScripts());
   if (name === '_tree' && method === 'GET') return sendJson(res, 200, { files: ws.listScripts(), folders: ws.listScriptFolders() });
@@ -511,12 +537,12 @@ async function handleScripts(ws: Workspace, req: http.IncomingMessage, res: http
     if (method === 'PUT') {
       const body = (await readJson(req)) as { code: string };
       if (typeof body.code !== 'string') throw new HttpError(400, 'Missing code');
-      ws.writeScript(name, body.code);
+      ws.writeScript(name, body.code, 'editor');
       scriptsChanged(ws);
       return sendJson(res, 200, { ok: true, syntaxError: checkScriptSyntax(body.code, `scripts/${name}.js`) });
     }
     if (method === 'DELETE') {
-      ws.removeScript(name);
+      ws.removeScript(name, 'editor');
       scriptsChanged(ws);
       return sendJson(res, 200, { ok: true });
     }
@@ -532,6 +558,50 @@ async function handleScripts(ws: Workspace, req: http.IncomingMessage, res: http
 }
 
 /** Audio files of the project (audio/): list, play, upload (base64 JSON), delete. */
+async function handleTests(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {
+  const method = req.method ?? 'GET';
+  const name = parts[0];
+  if (!name) {
+    if (method === 'GET') return sendJson(res, 200, ws.listTests());
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (name === '_run' && method === 'POST') {
+    const body = (await readJson(req)) as { names?: string[] };
+    return sendJson(res, 200, (await runTests(ws, body.names)).outcomes);
+  }
+  if (method === 'GET') return sendJson(res, 200, ws.loadTest(name));
+  if (method === 'PUT') return sendJson(res, 200, ws.saveTest(normalizeTest(await readJson(req), name), 'editor'));
+  if (method === 'DELETE') {
+    ws.removeTest(name);
+    return sendJson(res, 200, { ok: true });
+  }
+  throw new HttpError(405, 'Method not allowed');
+}
+
+async function handleNotes(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {
+  const method = req.method ?? 'GET';
+  if (!parts[0]) {
+    if (method === 'GET') return sendJson(res, 200, listNotes(ws));
+    if (method === 'POST') return sendJson(res, 201, setNote(ws, (await readJson(req)) as Parameters<typeof setNote>[1], 'user'));
+    throw new HttpError(405, 'Method not allowed');
+  }
+  if (method === 'PUT') return sendJson(res, 200, setNote(ws, { ...((await readJson(req)) as Parameters<typeof setNote>[1]), id: parts[0] }, 'user'));
+  if (method === 'DELETE') {
+    setNote(ws, { id: parts[0], remove: true }, 'user');
+    return sendJson(res, 200, { ok: true });
+  }
+  throw new HttpError(405, 'Method not allowed');
+}
+
+function handleHistory(ws: Workspace, res: http.ServerResponse, parts: string[], url: URL, method: string): void {
+  if (!parts[0] && method === 'GET') {
+    const q = url.searchParams;
+    return sendJson(res, 200, ws.history.list({ author: q.get('author') || undefined, kind: (q.get('kind') as HistoryKind) || undefined, name: q.get('name') || undefined, limit: num(q.get('limit')) ?? 200 }));
+  }
+  if (parts[1] === 'undo' && method === 'POST') return sendJson(res, 200, undoChange(ws, parts[0], 'editor'));
+  throw new HttpError(404, 'Not found');
+}
+
 async function handleAudio(ws: Workspace, req: http.IncomingMessage, res: http.ServerResponse, parts: string[]): Promise<void> {
   const method = req.method ?? 'GET';
   const name = parts[0];
@@ -565,7 +635,7 @@ async function handleDialogues(ws: Workspace, req: http.IncomingMessage, res: ht
     if (method === 'POST') {
       const body = (await readJson(req)) as { name: string; code?: string };
       if (ws.dialogueExists(body.name)) throw new HttpError(409, `Dialogue file "${body.name}" already exists`);
-      ws.writeDialogue(body.name, body.code ?? DIALOGUE_TEMPLATE);
+      ws.writeDialogue(body.name, body.code ?? DIALOGUE_TEMPLATE, 'editor');
       return sendJson(res, 201, { name: body.name });
     }
     throw new HttpError(405, 'Method not allowed');
@@ -581,11 +651,11 @@ async function handleDialogues(ws: Workspace, req: http.IncomingMessage, res: ht
     if (method === 'PUT') {
       const body = (await readJson(req)) as { code: string };
       if (typeof body.code !== 'string') throw new HttpError(400, 'Missing code');
-      ws.writeDialogue(name, body.code);
+      ws.writeDialogue(name, body.code, 'editor');
       return sendJson(res, 200, { ok: true });
     }
     if (method === 'DELETE') {
-      ws.removeDialogue(name);
+      ws.removeDialogue(name, 'editor');
       return sendJson(res, 200, { ok: true });
     }
     throw new HttpError(405, 'Method not allowed');
@@ -593,8 +663,8 @@ async function handleDialogues(ws: Workspace, req: http.IncomingMessage, res: ht
   if (sub === 'rename' && method === 'POST') {
     const body = (await readJson(req)) as { to: string };
     if (ws.dialogueExists(body.to)) throw new HttpError(409, `Dialogue file "${body.to}" already exists`);
-    ws.writeDialogue(body.to, ws.readDialogue(name));
-    ws.removeDialogue(name);
+    ws.writeDialogue(body.to, ws.readDialogue(name), 'editor');
+    ws.removeDialogue(name, 'editor');
     return sendJson(res, 200, { name: body.to });
   }
   throw new HttpError(404, 'Not found');
@@ -624,7 +694,7 @@ async function handleData(ws: Workspace, req: http.IncomingMessage, res: http.Se
       return sendJson(res, 200, { rev: t.rev, table: t });
     }
     if (method === 'DELETE') {
-      ws.removeTable(name);
+      ws.removeTable(name, 'editor');
       return sendJson(res, 200, { ok: true });
     }
     throw new HttpError(405, 'Method not allowed');
@@ -636,7 +706,7 @@ async function handleData(ws: Workspace, req: http.IncomingMessage, res: http.Se
     const t = ws.loadTable(name);
     t.name = body.to;
     ws.saveTable(t, 'editor');
-    ws.removeTable(name);
+    ws.removeTable(name, 'editor');
     return sendJson(res, 200, { name: body.to });
   }
   throw new HttpError(404, 'Not found');
@@ -666,7 +736,7 @@ async function handleVfx(ws: Workspace, req: http.IncomingMessage, res: http.Ser
       return sendJson(res, 200, { rev: g.rev, graph: g });
     }
     if (method === 'DELETE') {
-      ws.removeVfx(name);
+      ws.removeVfx(name, 'editor');
       return sendJson(res, 200, { ok: true });
     }
     throw new HttpError(405, 'Method not allowed');
@@ -677,7 +747,7 @@ async function handleVfx(ws: Workspace, req: http.IncomingMessage, res: http.Ser
     const g = ws.loadVfx(name);
     g.name = body.to;
     ws.saveVfx(g, 'editor');
-    ws.removeVfx(name);
+    ws.removeVfx(name, 'editor');
     return sendJson(res, 200, { name: body.to });
   }
   throw new HttpError(404, 'Not found');
@@ -714,7 +784,7 @@ async function handleScenes(ws: Workspace, req: http.IncomingMessage, res: http.
       return sendJson(res, 200, { rev });
     }
     if (method === 'DELETE') {
-      ws.removeScene(name);
+      ws.removeScene(name, 'editor');
       return sendJson(res, 200, { ok: true });
     }
     throw new HttpError(405, 'Method not allowed');
@@ -728,7 +798,7 @@ async function handleScenes(ws: Workspace, req: http.IncomingMessage, res: http.
     scene.name = body.to;
     const changed = renameSceneRefs(game, [scene, ...others], name, body.to);
     ws.saveScene(scene, 'editor');
-    ws.removeScene(name);
+    ws.removeScene(name, 'editor');
     for (const s of changed) if (s !== scene) ws.saveScene(s, 'editor');
     if (ws.hasGame() || game.startScene === body.to) ws.saveGame(game, 'editor');
     return sendJson(res, 200, { name: body.to });

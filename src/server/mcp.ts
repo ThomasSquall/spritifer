@@ -1844,7 +1844,7 @@ Use it to stamp tiles into an environment, copy a body part between frames, or a
       return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(ws) : v;
     },
   });
-  const game = registerGameTools(currentWs, { tool, text, image });
+  registerGameTools(currentWs, { tool, text, image });
 
   const describeProject = (p: ProjectInfo) => `${p.id === projectId ? '* ' : '  '}${p.id}: "${p.name}" — ${p.sprites} sprites, ${p.scenes} scenes, ${p.scripts} scripts — ${p.dir}`;
 
@@ -1856,7 +1856,6 @@ Use it to stamp tiles into an environment, copy a body part between frames, or a
     ws = registry.get(p.id);
     projectId = p.id;
     history.clear();
-    game.reset();
     const url = projectUrl();
     return text(`Current project: ${p.id} "${p.name}" — ${p.sprites} sprites, ${p.scenes} scenes, ${p.scripts} scripts — ${p.dir}${url ? `\nEditor: ${url}` : ''}\nAll tools now work on this project.`);
   };

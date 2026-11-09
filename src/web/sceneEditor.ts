@@ -21,8 +21,15 @@ import { api } from './api.js';
 import { drawPixelText, previewText, textSize } from './textPreview.js';
 import { VALUE_HINT, formatValue, parseValue } from './values.js';
 import { colorInput } from './colorInput.js';
+import { type SceneStamp, type ScatterRecipe, type TileRect, deleteGroup, extractRegion, listGroups, pasteRegion, regenerateGroup, renameGroup, scatter, scatterIntoGroup } from '../core/game/sceneOps.js';
+import { updateContext } from './editorContext.js';
+import { type MapNote } from './gameApi.js';
+import { openUsages } from './usagesView.js';
 
-type Tool = 'paint' | 'rect' | 'fill' | 'erase' | 'place' | 'select';
+type Tool = 'paint' | 'rect' | 'fill' | 'erase' | 'place' | 'select' | 'scatter' | 'note';
+
+/** The copied part of a map; it stays while moving to another scene. */
+let clipboard: SceneStamp | null = null;
 
 const TOOLS: { id: Tool; label: string; icon: string; key: string }[] = [
   { id: 'paint', label: 'Paint tiles', icon: 'pencil', key: 'B' },
@@ -30,7 +37,9 @@ const TOOLS: { id: Tool; label: string; icon: string; key: string }[] = [
   { id: 'fill', label: 'Bucket fill', icon: 'fill', key: 'G' },
   { id: 'erase', label: 'Erase tiles', icon: 'eraser', key: 'E' },
   { id: 'place', label: 'Place objects', icon: 'plus', key: 'P' },
-  { id: 'select', label: 'Select / move objects', icon: 'move', key: 'V' },
+  { id: 'select', label: 'Select / move objects (Shift+click adds one, Shift+drag or drag on empty space selects an area)', icon: 'move', key: 'V' },
+  { id: 'scatter', label: 'Scatter objects (settings in the Groups tab)', icon: 'onion', key: 'S' },
+  { id: 'note', label: 'Note on the map (Claude reads these)', icon: 'tag', key: 'N' },
 ];
 
 interface Brush {
@@ -43,9 +52,10 @@ export interface SceneEditorHandle {
   destroy(): void;
   remote(rev: string | null): Promise<void>;
   refreshAssets(): void;
+  notesChanged(): void;
 }
 
-export async function mountSceneEditor(root: HTMLElement, name: string, onBack: () => void): Promise<SceneEditorHandle> {
+export async function mountSceneEditor(root: HTMLElement, name: string, onBack: () => void, focusId?: string): Promise<SceneEditorHandle> {
   await state.ensure();
   let scene = await gameApi.getScene(name);
   clear(root);
@@ -56,7 +66,15 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   let activeLayer = Math.max(0, scene.layers.findIndex((l) => l.solid));
   let brush: Brush = { w: 1, h: 1, tiles: [0] };
   let placeObject: string | null = state.game!.objects[0]?.name ?? null;
+  /** The one selected instance, shown in the inspector; null when none or several are selected. */
   let selectedId: string | null = null;
+  const selected = new Set<string>();
+  /** Selected rectangle of tiles (drag on empty space with the select tool). */
+  let region: TileRect | null = null;
+  let notes: MapNote[] = [];
+  /** Groups hidden in the editor only. */
+  const hiddenGroups = new Set<string>();
+  const scatterForm = { group: 'decor', objects: [] as string[], density: 8, minDistance: 0, flip: true, avoidSolid: true, mode: 'brush' as 'brush' | 'area', radius: 2 };
   let zoom = 2;
   let panX = 20;
   let panY = 20;
@@ -76,6 +94,26 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
 
   const ts = () => scene.tileSize;
   const layer = (): TileLayer | undefined => scene.layers[activeLayer];
+  const selectedInstances = () => scene.instances.filter((i) => selected.has(i.id));
+  const reportContext = () => {
+    updateContext({
+      tool,
+      tile: hover ?? undefined,
+      region: region ?? undefined,
+      selection: selected.size ? selectedInstances().slice(0, 200).map((i) => ({ id: i.id, object: i.object, name: i.name, x: i.x, y: i.y, group: i.group })) : undefined,
+    });
+  };
+  const setSelection = (ids: string[]) => {
+    selected.clear();
+    for (const id of ids) selected.add(id);
+    selectedId = ids.length === 1 ? ids[0] : null;
+    reportContext();
+  };
+  const sizeOf = (item: { object: string; sprite?: string }) => {
+    const sp = state.sprite(item.sprite ?? state.effective(item.object)?.sprite);
+    return sp ? { w: sp.width, h: sp.height } : { w: ts(), h: ts() };
+  };
+  const isHidden = (i: Instance) => !!i.group && hiddenGroups.has(i.group);
 
   // ---------------------------------------------------------------- persistence
   const saveLabel = h('span', { class: 'save-label' }, 'Saved');
@@ -225,6 +263,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       lookBtn,
       h('span', { class: 'sep' }),
       h('button', { class: 'small', onclick: () => void openEvents() }, icon('tag', 14), 'Scene events'),
+      h('button', { class: 'small', title: 'Find what uses this scene', onclick: () => void openUsages('scene', scene.name) }, icon('target', 14), 'Usages'),
       h('button', { class: 'small', 'data-k': 'scene-state', title: 'See the scene with some global variables: what the conditional instances (Active if) do at a later stage of the game', onclick: () => void previewState() }, icon('eye', 14), 'Preview state'),
       h('span', { class: 'spacer' }),
       h('span', { class: 'status-pill' }, saveLabel),
@@ -476,6 +515,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     }
     const hudItems: Item[] = [];
     scene.instances.forEach((inst, k) => {
+      if (isHidden(inst)) return;
       const obj = state.effective(inst.object);
       const sortKey = scene.ySort ? 1000 + (() => { const b = instanceBox(inst); return b.y + b.h; })() + k / 10000 : 1000 + k;
       (atm && obj?.hud ? hudItems : items).push({ z: obj?.z ?? 0, o: sortKey, d: () => {
@@ -600,6 +640,33 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     ctx.strokeRect(sx(0), sy(Math.max(0, H - state.game!.height)), state.game!.width * zoom, state.game!.height * zoom);
     ctx.setLineDash([]);
 
+    // Selected tiles.
+    if (region) {
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = '#feae34';
+      ctx.strokeRect(sx(region.x * ts()), sy(region.y * ts()), region.w * ts() * zoom, region.h * ts() * zoom);
+      ctx.setLineDash([]);
+    }
+    if (marquee) {
+      ctx.fillStyle = '#feae3422';
+      ctx.strokeStyle = '#feae34';
+      const mx = Math.min(marquee.x0, marquee.x1);
+      const my = Math.min(marquee.y0, marquee.y1);
+      const mw = Math.abs(marquee.x1 - marquee.x0);
+      const mh = Math.abs(marquee.y1 - marquee.y0);
+      ctx.fillRect(sx(mx), sy(my), mw * zoom, mh * zoom);
+      ctx.strokeRect(sx(mx), sy(my), mw * zoom, mh * zoom);
+    }
+    // Several selected: an outline each.
+    if (selected.size > 1) {
+      ctx.strokeStyle = '#feae34';
+      ctx.lineWidth = 2;
+      for (const i of selectedInstances()) {
+        const b = instanceBox(i);
+        ctx.strokeRect(sx(b.x) - 1, sy(b.y) - 1, b.w * zoom + 1, b.h * zoom + 1);
+      }
+      ctx.lineWidth = 1;
+    }
     // Selection.
     const sel = scene.instances.find((i) => i.id === selectedId);
     if (sel) {
@@ -623,8 +690,29 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         ctx.setLineDash([]);
       }
     }
+    // Notes on the map.
+    ctx.font = 'bold 11px system-ui';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    openNotes().forEach((n, i) => {
+      const nx = panX + n.x * zoom;
+      const ny = panY + n.y * zoom;
+      ctx.fillStyle = n.author === 'claude' ? '#d97757' : '#feae34';
+      ctx.beginPath();
+      ctx.arc(nx, ny, NOTE_RADIUS, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#181425';
+      ctx.fillText(String(i + 1), nx, ny + 0.5);
+    });
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
     // Hover / brush ghost.
     if (hover) {
+      if (tool === 'scatter' && scatterForm.mode === 'brush') {
+        ctx.strokeStyle = '#feae34';
+        const d = (scatterForm.radius * 2 + 1) * ts() * zoom;
+        ctx.strokeRect(sx((hover.x - scatterForm.radius) * ts()), sy((hover.y - scatterForm.radius) * ts()), d, d);
+      }
       if (tool === 'paint' || tool === 'rect' || tool === 'fill' || tool === 'erase') {
         const bw = tool === 'paint' ? brush.w : 1;
         const bh = tool === 'paint' ? brush.h : 1;
@@ -691,6 +779,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     tool = t;
     for (const [id, b] of toolBtns) b.classList.toggle('active', id === t);
     canvas.style.cursor = t === 'select' ? 'default' : t === 'place' ? 'copy' : 'crosshair';
+    reportContext();
     draw();
   };
 
@@ -730,6 +819,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const hitInstance = (wx: number, wy: number): Instance | undefined => {
     for (let i = scene.instances.length - 1; i >= 0; i--) {
       const inst = scene.instances[i];
+      if (isHidden(inst)) continue;
       const b = instanceBox(inst);
       if (wx >= b.x && wx < b.x + b.w && wy >= b.y && wy < b.y + b.h) return inst;
     }
@@ -755,9 +845,127 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     snapshot();
     const inst: Instance = { id: newGameId(), object: placeObject, x, y };
     scene.instances.push(inst);
-    selectedId = inst.id;
+    setSelection([inst.id]);
     changed();
     renderInspector();
+  };
+
+  // ---------------------------------------------------------------- whole parts of the map
+  const scatterRecipe = (area: TileRect, count?: number): ScatterRecipe | null => {
+    const objects = scatterForm.objects.length ? scatterForm.objects : placeObject ? [placeObject] : [];
+    if (!objects.length) {
+      toast('Pick the objects to scatter in the Groups tab', 'error');
+      return null;
+    }
+    return {
+      items: objects.map((object) => ({ object })), region: area, seed: Math.floor(Math.random() * 1e9), flip: scatterForm.flip,
+      ...(count !== undefined ? { count } : { density: scatterForm.density }),
+      ...(scatterForm.minDistance > 0 ? { minDistance: scatterForm.minDistance } : {}),
+      ...(scatterForm.avoidSolid ? {} : { avoidSolid: false }),
+    };
+  };
+  /** One dab of the scatter brush. */
+  const dabAt = (t: { x: number; y: number }): boolean => {
+    const r = scatterForm.radius;
+    const recipe = scatterRecipe({ x: t.x - r, y: t.y - r, w: r * 2 + 1, h: r * 2 + 1 }, Math.max(1, Math.round(((r * 2 + 1) ** 2 * scatterForm.density) / 100)));
+    return !!recipe && scatter(scene, recipe, sizeOf, scatterForm.group).length > 0;
+  };
+  const copySelection = () => {
+    const ids = selected.size ? new Set(selected) : undefined;
+    let area = region;
+    if (!area && ids) {
+      const list = selectedInstances();
+      const x = Math.floor(Math.min(...list.map((i) => i.x)) / ts());
+      const y = Math.floor(Math.min(...list.map((i) => i.y)) / ts());
+      area = { x, y, w: 1, h: 1 };
+    }
+    if (!area) return toast('Select something first: drag on empty space with the select tool (V)', 'error');
+    clipboard = extractRegion(scene, area, { ids: ids ?? new Set(), tiles: !!region });
+    toast(`Copied ${clipboard.layers.length ? `${clipboard.w}×${clipboard.h} tiles and ` : ''}${clipboard.instances.length} instance${clipboard.instances.length === 1 ? '' : 's'}`);
+  };
+  const pasteClipboard = () => {
+    if (!clipboard) return;
+    const at = hover ?? (region ? { x: region.x + 1, y: region.y + 1 } : { x: 0, y: 0 });
+    try {
+      snapshot();
+      const { instances } = pasteRegion(scene, clipboard, at.x, at.y);
+      region = null;
+      setSelection(instances.map((i) => i.id));
+      setTool('select');
+      changed();
+      renderSide();
+      void loadAssets();
+    } catch (err) {
+      undoStack.pop();
+      toast((err as Error).message, 'error');
+    }
+  };
+  const duplicateSelection = () => {
+    const list = selectedInstances();
+    if (!list.length) return;
+    snapshot();
+    const copies = list.map((i): Instance => ({ ...JSON.parse(JSON.stringify(i)) as Instance, id: newGameId(), x: i.x + ts() }));
+    scene.instances.push(...copies);
+    setSelection(copies.map((i) => i.id));
+    changed();
+    renderRight();
+    renderInspector();
+  };
+  const deleteSelection = () => {
+    if (!selected.size) return;
+    snapshot();
+    scene.instances = scene.instances.filter((i) => !selected.has(i.id));
+    setSelection([]);
+    changed();
+    renderRight();
+    renderInspector();
+  };
+
+  // ---------------------------------------------------------------- notes
+  const NOTE_RADIUS = 9;
+  const openNotes = () => notes.filter((n) => n.scene === scene.name && !n.resolved);
+  const loadNotes = async () => {
+    try {
+      notes = await gameApi.notes();
+    } catch {
+      notes = [];
+    }
+    if (rightTab === 'notes') renderRight();
+    draw();
+  };
+  const noteAt = (cx: number, cy: number) => openNotes().find((n) => Math.hypot(panX + n.x * zoom - cx, panY + n.y * zoom - cy) <= NOTE_RADIUS + 2);
+  const openNote = (n: MapNote) => {
+    void modal('Note on the map', (close) => {
+      const text = h('textarea', { rows: 3, value: n.text });
+      const act = (fn: () => Promise<unknown>) => async () => {
+        try {
+          await fn();
+          close();
+          await loadNotes();
+        } catch (err) {
+          toast((err as Error).message, 'error');
+        }
+      };
+      return h('div', { class: 'form' },
+        h('p', { class: 'muted small' }, `By ${n.author === 'claude' ? 'Claude' : 'you'} at ${n.x}, ${n.y}`),
+        text,
+        n.reply ? h('p', { class: 'note-reply' }, `Reply: ${n.reply}`) : null,
+        h('div', { class: 'actions' },
+          h('button', { class: 'small danger', onclick: act(() => gameApi.deleteNote(n.id)) }, 'Delete'),
+          h('span', { class: 'spacer' }),
+          h('button', { class: 'small', onclick: act(() => gameApi.updateNote(n.id, { text: text.value })) }, 'Save'),
+          h('button', { class: 'small primary', onclick: act(() => gameApi.updateNote(n.id, { resolved: true })) }, 'Resolve')));
+    });
+  };
+  const addNote = async (x: number, y: number) => {
+    const text = await promptText('Note on the map', 'What should change here? Claude sees this note and where it is.', '');
+    if (!text?.trim()) return;
+    try {
+      await gameApi.createNote({ scene: scene.name, x: Math.round(x), y: Math.round(y), text });
+      await loadNotes();
+    } catch (err) {
+      toast((err as Error).message, 'error');
+    }
   };
 
   // ---------------------------------------------------------------- pointer
@@ -777,7 +985,10 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     return any;
   };
   let panning: { x: number; y: number; px: number; py: number } | null = null;
-  let dragInst: { inst: Instance; ox: number; oy: number; sx: number; sy: number; moved: boolean } | null = null;
+  let dragInst: { items: { inst: Instance; ox: number; oy: number }[]; sx: number; sy: number; moved: boolean } | null = null;
+  let marquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  let marqueeHit: Instance | null = null;
+  let dabbing: { x: number; y: number } | null = null;
   let rectDrag: { x0: number; y0: number; x1: number; y1: number; erase: boolean } | null = null;
   let spaceDown = false;
 
@@ -786,8 +997,28 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     canvas.setPointerCapture(e.pointerId);
     const p = world(e);
     const t = tileAt(p.x, p.y);
-    if (e.button === 1 || spaceDown || (e.button === 2 && (tool === 'select' || tool === 'place'))) {
+    if (e.button === 1 || spaceDown || (e.button === 2 && (tool === 'select' || tool === 'place' || tool === 'note' || tool === 'scatter'))) {
       panning = { x: e.clientX, y: e.clientY, px: panX, py: panY };
+      return;
+    }
+    if (tool === 'select' || tool === 'note') {
+      const r = canvas.getBoundingClientRect();
+      const pin = noteAt(e.clientX - r.left, e.clientY - r.top);
+      if (pin) return openNote(pin);
+    }
+    if (tool === 'note') {
+      void addNote(p.x, p.y);
+      return;
+    }
+    if (tool === 'scatter') {
+      if (scatterForm.mode === 'area') {
+        rectDrag = { x0: t.x, y0: t.y, x1: t.x, y1: t.y, erase: false };
+        draw();
+        return;
+      }
+      snapshot();
+      dabbing = t;
+      if (dabAt(t)) changed();
       return;
     }
     if (e.altKey && (tool === 'paint' || tool === 'rect' || tool === 'fill')) {
@@ -826,8 +1057,19 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     }
     if (tool === 'select') {
       const hit = hitInstance(p.x, p.y);
-      selectedId = hit?.id ?? null;
-      if (hit) dragInst = { inst: hit, ox: hit.x, oy: hit.y, sx: p.x, sy: p.y, moved: false };
+      region = null;
+      if (e.shiftKey) {
+        // Shift: a click adds or takes away one instance, a drag selects an area even on a crowded map.
+        marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+        marqueeHit = hit ?? null;
+      } else if (hit) {
+        if (!selected.has(hit.id)) setSelection([hit.id]);
+        dragInst = { items: selectedInstances().map((inst) => ({ inst, ox: inst.x, oy: inst.y })), sx: p.x, sy: p.y, moved: false };
+      } else {
+        setSelection([]);
+        marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+        marqueeHit = null;
+      }
       renderInspector();
       draw();
     }
@@ -835,11 +1077,28 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   canvas.addEventListener('pointermove', (e) => {
     const p = world(e);
     const t = tileAt(p.x, p.y);
-    hover = t;
+    if (!hover || hover.x !== t.x || hover.y !== t.y) {
+      hover = t;
+      reportContext();
+    }
     status.textContent = `tile ${t.x}, ${t.y} · px ${Math.floor(p.x)}, ${Math.floor(p.y)}${layer() ? ` · layer ${layer()!.name}${layer()!.solid ? ' (solid)' : ''}` : ''}`;
     if (panning) {
       panX = panning.px + e.clientX - panning.x;
       panY = panning.py + e.clientY - panning.y;
+      draw();
+      return;
+    }
+    if (marquee) {
+      marquee.x1 = p.x;
+      marquee.y1 = p.y;
+      draw();
+      return;
+    }
+    if (dabbing) {
+      if (Math.hypot(t.x - dabbing.x, t.y - dabbing.y) >= Math.max(1, scatterForm.radius)) {
+        dabbing = t;
+        if (dabAt(t)) changed();
+      }
       draw();
       return;
     }
@@ -862,26 +1121,68 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         dx = Math.round(dx / ts()) * ts();
         dy = Math.round(dy / ts()) * ts();
       }
-      const nx = Math.round(dragInst.ox + dx);
-      const ny = Math.round(dragInst.oy + dy);
-      if (nx !== dragInst.inst.x || ny !== dragInst.inst.y) {
+      const first = dragInst.items[0];
+      if (first && (Math.round(first.ox + dx) !== first.inst.x || Math.round(first.oy + dy) !== first.inst.y)) {
         if (!dragInst.moved) snapshot();
         dragInst.moved = true;
-        dragInst.inst.x = nx;
-        dragInst.inst.y = ny;
+        for (const item of dragInst.items) {
+          item.inst.x = Math.round(item.ox + dx);
+          item.inst.y = Math.round(item.oy + dy);
+        }
         changed();
-        renderInspector();
+        if (dragInst.items.length === 1) renderInspector();
+        reportContext();
       }
       return;
     }
     draw();
   });
-  const endPointer = () => {
+  const endPointer = (e?: PointerEvent) => {
+    if (marquee) {
+      const x0 = Math.min(marquee.x0, marquee.x1);
+      const y0 = Math.min(marquee.y0, marquee.y1);
+      const x1 = Math.max(marquee.x0, marquee.x1);
+      const y1 = Math.max(marquee.y0, marquee.y1);
+      marquee = null;
+      if (x1 - x0 >= 2 || y1 - y0 >= 2) {
+        const inside = scene.instances.filter((i) => {
+          if (isHidden(i)) return false;
+          const b = instanceBox(i);
+          return b.x < x1 && b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0;
+        }).map((i) => i.id);
+        region = { x: Math.floor(x0 / ts()), y: Math.floor(y0 / ts()), w: Math.ceil(x1 / ts()) - Math.floor(x0 / ts()), h: Math.ceil(y1 / ts()) - Math.floor(y0 / ts()) };
+        setSelection(e?.shiftKey ? [...new Set([...selected, ...inside])] : inside);
+        renderInspector();
+      } else if (marqueeHit) {
+        const id = marqueeHit.id;
+        setSelection(selected.has(id) ? [...selected].filter((x) => x !== id) : [...selected, id]);
+        renderInspector();
+      }
+      marqueeHit = null;
+      draw();
+    }
+    if (dabbing) {
+      dabbing = null;
+      renderRight();
+    }
     if (rectDrag) {
       const x0 = Math.min(rectDrag.x0, rectDrag.x1);
       const y0 = Math.min(rectDrag.y0, rectDrag.y1);
       const x1 = Math.max(rectDrag.x0, rectDrag.x1);
       const y1 = Math.max(rectDrag.y0, rectDrag.y1);
+      if (tool === 'scatter') {
+        rectDrag = null;
+        const recipe = scatterRecipe({ x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 });
+        if (recipe) {
+          snapshot();
+          const made = scatterIntoGroup(scene, scatterForm.group, recipe, sizeOf);
+          toast(`Placed ${made.length} in group ${scatterForm.group}`);
+          changed();
+          renderRight();
+        }
+        draw();
+        return;
+      }
       for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) setTile(x, y, rectDrag.erase ? -1 : brush.tiles[((y - y0) % brush.h) * brush.w + ((x - x0) % brush.w)]);
       rectDrag = null;
       changed();
@@ -931,36 +1232,47 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       redo();
       return;
     }
-    const sel = scene.instances.find((i) => i.id === selectedId);
-    if (sel && (e.key === 'Delete' || e.key === 'Backspace')) {
+    if (mod && e.key.toLowerCase() === 'c') {
       e.preventDefault();
-      snapshot();
-      scene.instances = scene.instances.filter((i) => i !== sel);
-      selectedId = null;
-      changed();
-      renderInspector();
+      copySelection();
       return;
     }
-    if (sel && mod && e.key.toLowerCase() === 'd') {
+    if (mod && e.key.toLowerCase() === 'v') {
       e.preventDefault();
-      snapshot();
-      const copy: Instance = { ...JSON.parse(JSON.stringify(sel)), id: newGameId(), x: sel.x + ts() };
-      scene.instances.push(copy);
-      selectedId = copy.id;
-      changed();
-      renderInspector();
+      pasteClipboard();
       return;
     }
-    if (sel && e.key.startsWith('Arrow')) {
+    if (mod && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      setTool('select');
+      setSelection(scene.instances.filter((i) => !isHidden(i)).map((i) => i.id));
+      renderInspector();
+      draw();
+      return;
+    }
+    if (selected.size && (e.key === 'Delete' || e.key === 'Backspace')) {
+      e.preventDefault();
+      deleteSelection();
+      return;
+    }
+    if (selected.size && mod && e.key.toLowerCase() === 'd') {
+      e.preventDefault();
+      duplicateSelection();
+      return;
+    }
+    if (selected.size && e.key.startsWith('Arrow')) {
       e.preventDefault();
       const step = e.shiftKey ? ts() : 1;
       snapshot();
-      if (e.key === 'ArrowLeft') sel.x -= step;
-      if (e.key === 'ArrowRight') sel.x += step;
-      if (e.key === 'ArrowUp') sel.y -= step;
-      if (e.key === 'ArrowDown') sel.y += step;
+      for (const sel of selectedInstances()) {
+        if (e.key === 'ArrowLeft') sel.x -= step;
+        if (e.key === 'ArrowRight') sel.x += step;
+        if (e.key === 'ArrowUp') sel.y -= step;
+        if (e.key === 'ArrowDown') sel.y += step;
+      }
       changed();
       renderInspector();
+      reportContext();
       return;
     }
     if (mod) return;
@@ -972,7 +1284,8 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     }
     if (e.key.toLowerCase() === 'l') setGameLook(!showGameLook);
     if (e.key === 'Escape') {
-      selectedId = null;
+      region = null;
+      setSelection([]);
       renderInspector();
       draw();
     }
@@ -1105,7 +1418,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   }
 
   // ---------------------------------------------------------------- right side: hierarchy / objects / scene tabs + inspector
-  type RightTab = 'hierarchy' | 'objects' | 'scene';
+  type RightTab = 'hierarchy' | 'objects' | 'scene' | 'groups' | 'notes';
   let rightTab: RightTab = 'hierarchy';
   let filter = '';
   const tabsBar = h('div', { class: 'right-tabs' });
@@ -1113,12 +1426,15 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const objectsBox = h('div', { class: 'panel' });
   const inspectorBox = h('div', { class: 'panel' });
   const settingsBox = h('div', { class: 'panel' });
+  const groupsBox = h('div', { class: 'panel' });
+  const notesBox = h('div', { class: 'panel' });
   const tabBody = h('div', { class: 'right-tab-body' });
   rightSide.append(tabsBar, tabBody, inspectorBox);
 
   function renderRight(): void {
     clear(tabsBar);
-    const tabs: [RightTab, string][] = [['hierarchy', `Hierarchy (${scene.instances.length})`], ['objects', 'Add'], ['scene', 'Scene']];
+    const noteCount = openNotes().length;
+    const tabs: [RightTab, string][] = [['hierarchy', `Hierarchy (${scene.instances.length})`], ['objects', 'Add'], ['groups', 'Groups'], ['notes', noteCount ? `Notes (${noteCount})` : 'Notes'], ['scene', 'Scene']];
     for (const [id, label] of tabs) tabsBar.append(h('button', { class: `right-tab${rightTab === id ? ' active' : ''}`, onclick: () => { rightTab = id; renderRight(); } }, label));
     clear(tabBody);
     if (rightTab === 'hierarchy') {
@@ -1127,6 +1443,12 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     } else if (rightTab === 'objects') {
       renderObjectList();
       tabBody.append(objectsBox);
+    } else if (rightTab === 'groups') {
+      renderGroups();
+      tabBody.append(groupsBox);
+    } else if (rightTab === 'notes') {
+      renderNotes();
+      tabBody.append(notesBox);
     } else {
       renderSettings();
       tabBody.append(settingsBox);
@@ -1146,7 +1468,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   };
 
   function select(id: string | null, focus = false): void {
-    selectedId = id;
+    setSelection(id ? [id] : []);
     const inst = scene.instances.find((i) => i.id === id);
     if (inst && focus) reveal(inst);
     if (rightTab === 'hierarchy') renderHierarchy();
@@ -1168,9 +1490,15 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         const obj = state.effective(inst.object);
         const talk = inst.props?.dialogue;
         rows.append(h('div', {
-          class: `hier-row${inst.id === selectedId ? ' active' : ''}`,
-          title: `${inst.object} at ${inst.x}, ${inst.y}`,
-          onclick: () => select(inst.id, true),
+          class: `hier-row${selected.has(inst.id) ? ' active' : ''}`,
+          title: `${inst.object} at ${inst.x}, ${inst.y}${inst.group ? ` · group ${inst.group}` : ''}`,
+          onclick: (e: MouseEvent) => {
+            if (!e.shiftKey) return select(inst.id, true);
+            setSelection(selected.has(inst.id) ? [...selected].filter((id) => id !== inst.id) : [...selected, inst.id]);
+            renderHierarchy();
+            renderInspector();
+            draw();
+          },
         },
           h('span', { class: 'hier-thumb' }, spr ? h('img', { src: api.previewUrl(spr.name, spr.rev, 1), alt: '' }) : h('span', { class: 'txt-badge' }, obj?.text !== undefined ? 'Aa' : '?')),
           h('span', { class: 'hier-name' }, inst.name ?? inst.object),
@@ -1222,8 +1550,12 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     clear(inspectorBox);
     const inst = scene.instances.find((i) => i.id === selectedId);
     inspectorBox.append(h('div', { class: 'panel-title' }, 'Inspector'));
+    if (selected.size > 1) {
+      renderBulkInspector();
+      return;
+    }
     if (!inst) {
-      inspectorBox.append(h('p', { class: 'muted small' }, 'Click an instance in the Hierarchy or on the map (move tool, V) to see its properties. Delete removes it, Ctrl+D duplicates, arrows nudge.'));
+      inspectorBox.append(h('p', { class: 'muted small' }, 'Click an instance in the Hierarchy or on the map (move tool, V) to see its properties. Delete removes it, Ctrl+D duplicates, arrows nudge. Shift+click adds one, Shift+drag selects an area; Ctrl+C and Ctrl+V copy them, tiles included, even to another scene.'));
       return;
     }
     const obj = state.effective(inst.object);
@@ -1313,6 +1645,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('label', { title: `Extra group tags for this instance${obj?.tags?.length ? ` (the type has: ${obj.tags.join(', ')})` : ''}` }, 'Tags', h('input', { type: 'text', value: (inst.tags ?? []).join(', '), placeholder: obj?.tags?.length ? `+ ${obj.tags.join(', ')}` : 'boss…', spellcheck: false, onchange: (e: Event) => edit(() => { const t = normalizeTags((e.target as HTMLInputElement).value); if (t) inst.tags = t; else delete inst.tags; }) })),
         dialogueRow,
         activeIfRow(),
+        h('label', { title: 'Named group inside this scene, for working on many instances at once (Groups tab). The game ignores it.' }, 'Group', h('input', { type: 'text', value: inst.group ?? '', placeholder: 'none', spellcheck: false, onchange: (e: Event) => edit(() => { const v = (e.target as HTMLInputElement).value.trim(); if (v) inst.group = v; else delete inst.group; }) })),
         h('div', { class: 'row2' }, num('x', () => inst.x, (v) => (inst.x = v)), num('y', () => inst.y, (v) => (inst.y = v))),
         h('div', {}, h('div', { class: 'muted small' }, keys.size ? 'Properties (empty = default of the type)' : 'Properties'), props,
           h('button', { class: 'small ghost', onclick: async () => {
@@ -1327,6 +1660,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
           inherited: { light: obj?.light, from: `from ${inst.object}` }, allowOff: true }),
         h('div', { class: 'actions' },
           obj ? h('a', { class: 'small', href: `#/objects/${encodeURIComponent(inst.object)}` }, `edit ${inst.object} →`) : h('span', { class: 'danger-text small' }, 'unknown type'),
+          iconButton('target', `Find what uses ${inst.object}`, () => void openUsages('object', inst.object), { class: 'icon-btn tiny' }),
           h('span', { class: 'spacer' }),
           h('button', { class: 'small', title: 'Duplicate (Ctrl+D)', onclick: () => {
             snapshot();
@@ -1340,6 +1674,115 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         ),
       ),
     );
+  }
+
+  function renderBulkInspector(): void {
+    const list = selectedInstances();
+    const kinds = new Map<string, number>();
+    for (const i of list) kinds.set(i.object, (kinds.get(i.object) ?? 0) + 1);
+    const groups = new Set(list.map((i) => i.group ?? ''));
+    const conds = new Set(list.map((i) => i.activeIf ?? ''));
+    const apply = (fn: (i: Instance) => void) => {
+      snapshot();
+      for (const i of selectedInstances()) fn(i);
+      changed();
+      renderRight();
+    };
+    inspectorBox.append(h('div', { class: 'form' },
+      h('p', { class: 'small' }, `${list.length} instances selected`, h('span', { class: 'muted' }, ` · ${[...kinds].slice(0, 4).map(([k, n]) => `${n} ${k}`).join(', ')}${kinds.size > 4 ? '…' : ''}`)),
+      h('label', {}, 'Group', h('input', { type: 'text', value: groups.size === 1 ? [...groups][0] : '', placeholder: groups.size > 1 ? 'several' : 'none', spellcheck: false, onchange: (e: Event) => { const v = (e.target as HTMLInputElement).value.trim(); apply((i) => { if (v) i.group = v; else delete i.group; }); } })),
+      h('label', { title: 'Expression: these instances exist only while it is true' }, 'Active if', h('input', { type: 'text', value: conds.size === 1 ? [...conds][0] : '', placeholder: conds.size > 1 ? 'several' : 'always', spellcheck: false, onchange: (e: Event) => {
+        const v = (e.target as HTMLInputElement).value.trim();
+        const err = v ? checkExpr(v) : null;
+        if (err) return toast(err, 'error');
+        apply((i) => { if (v) i.activeIf = v; else delete i.activeIf; });
+      } })),
+      h('div', { class: 'actions' },
+        h('button', { class: 'small', title: 'Copy (Ctrl+C)', onclick: () => copySelection() }, icon('copy', 13), 'Copy'),
+        h('button', { class: 'small', title: 'Duplicate (Ctrl+D)', onclick: () => duplicateSelection() }, 'Duplicate'),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'small danger', onclick: () => deleteSelection() }, icon('trash', 13), 'Remove')),
+    ));
+  }
+
+  function renderGroups(): void {
+    clear(groupsBox);
+    groupsBox.append(h('div', { class: 'panel-title' }, 'Groups'));
+    const groups = listGroups(scene);
+    if (!groups.length) groupsBox.append(h('p', { class: 'muted small' }, 'A group is a named set of instances: all the trees of a map, the decor of a room. Scatter some below, or set Group in the inspector.'));
+    for (const g of groups) {
+      groupsBox.append(h('div', { class: 'group-row' },
+        iconButton(hiddenGroups.has(g.name) ? 'eyeoff' : 'eye', hiddenGroups.has(g.name) ? 'Show in the editor' : 'Hide in the editor (the game still has them)', () => { if (hiddenGroups.has(g.name)) hiddenGroups.delete(g.name); else hiddenGroups.add(g.name); renderGroups(); draw(); }, { class: 'icon-btn tiny' }),
+        h('button', { class: 'ghost small group-name', title: 'Select the whole group', onclick: () => { setTool('select'); setSelection(scene.instances.filter((i) => i.group === g.name).map((i) => i.id)); renderInspector(); draw(); } }, `${g.name} (${g.count})`),
+        g.scatters ? iconButton('swap', 'Redo: a new random layout in the same areas', () => {
+          snapshot();
+          regenerateGroup(scene, g.name, sizeOf, Math.floor(Math.random() * 1e9));
+          setSelection([]);
+          changed();
+          renderRight();
+          renderInspector();
+        }, { class: 'icon-btn tiny' }) : null,
+        iconButton('pencil', 'Rename', async () => {
+          const to = await promptText('Rename group', 'Name', g.name);
+          if (!to || to === g.name) return;
+          try {
+            snapshot();
+            renameGroup(scene, g.name, to);
+            changed();
+            renderRight();
+          } catch (err) {
+            undoStack.pop();
+            toast((err as Error).message, 'error');
+          }
+        }, { class: 'icon-btn tiny' }),
+        iconButton('trash', 'Delete the group and its instances', () => {
+          snapshot();
+          deleteGroup(scene, g.name);
+          setSelection([]);
+          changed();
+          renderRight();
+          renderInspector();
+        }, { class: 'icon-btn tiny' }),
+      ));
+    }
+    const objectsSel = h('select', { multiple: true, size: 5, 'aria-label': 'Objects to scatter', onchange: () => { scatterForm.objects = [...objectsSel.selectedOptions].map((o) => o.value); } },
+      ...state.game!.objects.filter((o) => !o.hud).map((o) => h('option', { value: o.name, selected: scatterForm.objects.includes(o.name) }, o.name)));
+    const numberField = (label: string, title: string, get: () => number, set: (v: number) => void, attrs: Record<string, string> = {}) => {
+      const inp = h('input', { type: 'number', class: 'num', min: '0', value: String(get()), ...attrs, onchange: () => set(Math.max(0, Number(inp.value) || 0)) });
+      return h('label', { title }, label, inp);
+    };
+    const modeSel = h('select', { onchange: () => { scatterForm.mode = modeSel.value as 'brush' | 'area'; draw(); } },
+      h('option', { value: 'brush', selected: scatterForm.mode === 'brush' }, 'Brush: paint where you drag'),
+      h('option', { value: 'area', selected: scatterForm.mode === 'area' }, 'Area: can be redone later'));
+    const flipIn = h('input', { type: 'checkbox', checked: scatterForm.flip, onchange: () => { scatterForm.flip = flipIn.checked; } });
+    const avoidIn = h('input', { type: 'checkbox', checked: scatterForm.avoidSolid, onchange: () => { scatterForm.avoidSolid = avoidIn.checked; } });
+    const groupIn = h('input', { type: 'text', value: scatterForm.group, spellcheck: false, onchange: () => { scatterForm.group = groupIn.value.trim() || 'decor'; } });
+    groupsBox.append(h('div', { class: 'panel-title', style: 'margin-top:12px' }, 'Scatter', h('span', { class: 'spacer' }), h('button', { class: 'small', onclick: () => setTool('scatter') }, 'Use (S)')),
+      h('div', { class: 'form' },
+        h('label', { title: 'Hold Ctrl or Cmd for several' }, 'Objects', objectsSel),
+        h('label', {}, 'Into group', groupIn),
+        h('label', {}, 'How', modeSel),
+        h('div', { class: 'row3 atm-row3' },
+          numberField('Density', 'How many per 100 tiles', () => scatterForm.density, (v) => { scatterForm.density = v; }),
+          numberField('Min. gap', 'Pixels between bases (0 = one tile)', () => scatterForm.minDistance, (v) => { scatterForm.minDistance = v; }),
+          numberField('Radius', 'Size of the brush, in tiles', () => scatterForm.radius, (v) => { scatterForm.radius = Math.round(v); draw(); })),
+        h('label', { class: 'inline' }, flipIn, 'Mirror about half'),
+        h('label', { class: 'inline' }, avoidIn, 'Not on solid tiles')));
+  }
+
+  function renderNotes(): void {
+    clear(notesBox);
+    notesBox.append(h('div', { class: 'panel-title' }, 'Notes', h('span', { class: 'spacer' }), h('button', { class: 'small', onclick: () => setTool('note') }, 'Add (N)')));
+    const list = openNotes();
+    if (!list.length) notesBox.append(h('p', { class: 'muted small' }, 'Click on the map with the note tool to say what should change there. Claude reads your notes and where they are.'));
+    list.forEach((n, i) => notesBox.append(h('div', { class: 'note-row', role: 'button', tabindex: 0, onclick: () => {
+      panX = Math.round(wrap.clientWidth / 2 - n.x * zoom);
+      panY = Math.round(wrap.clientHeight / 2 - n.y * zoom);
+      draw();
+      openNote(n);
+    } },
+      h('strong', {}, `${i + 1}. `), n.text,
+      n.reply ? h('div', { class: 'note-reply small' }, n.reply) : null)));
   }
 
   function renderSettings(): void {
@@ -1480,6 +1923,12 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   resize();
   requestAnimationFrame(() => fitHeight());
   await loadAssets();
+  await loadNotes();
+  if (focusId && scene.instances.some((i) => i.id === focusId)) {
+    setTool('select');
+    rightTab = 'hierarchy';
+    requestAnimationFrame(() => select(focusId, true));
+  }
   const unsub = state.subscribe(() => {
     renderRight();
     void loadAssets();
@@ -1508,6 +1957,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       snapshot();
       scene = next;
       lastRev = next.rev;
+      setSelection([...selected].filter((id) => scene.instances.some((i) => i.id === id)));
       activeLayer = Math.min(activeLayer, scene.layers.length - 1);
       toast(`Scene updated${next.updatedBy === 'claude' ? ' by Claude' : ''}`, next.updatedBy === 'claude' ? 'claude' : 'info');
       renderSide();
@@ -1515,6 +1965,9 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     },
     refreshAssets() {
       void loadAssets();
+    },
+    notesChanged() {
+      void loadNotes();
     },
   };
 }

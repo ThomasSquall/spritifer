@@ -66,6 +66,10 @@ if (!bundle) {
           case 'fps':
             player.fps = !!d.on;
             return;
+          case 'record':
+            if (d.on) player.startRecording();
+            else window.parent.postMessage({ source: 'spritifer-game', type: 'recording', data: player.stopRecording() }, '*');
+            return;
           case 'pause':
             player.paused = !!d.on;
             break;

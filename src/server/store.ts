@@ -13,11 +13,14 @@ import {
 import { type VfxGraph, normalizeVfx } from '../core/game/vfxGraph.js';
 import { type DataTable, type GameProject, type Scene, assertIdentifier, createGame, newGameId, normalizeGame, normalizeScene, normalizeTable } from '../core/game/types.js';
 
+import { type GameTest, assertTestName, normalizeTest } from '../core/game/gameTests.js';
+import { type HistoryKind, ProjectHistory } from './history.js';
+
 const SUFFIX = '.sprite.json';
 const SCENE_SUFFIX = '.scene.json';
 export const GAME_FILE = 'game.json';
 
-export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data' | 'vfx';
+export type ChangeKind = 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data' | 'vfx' | 'notes' | 'test';
 const SCRIPT_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
 const AUDIO_MIME: Record<string, string> = { mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4' };
 /** Script names are paths in scripts/ without .js: "enemies/Patrol". */
@@ -40,11 +43,36 @@ export interface SpriteSummary {
 export class Workspace {
   readonly dir: string;
   readonly exportDir: string;
+  /** Every change to the game, by anyone working through Spritifer. */
+  readonly history: ProjectHistory;
 
   constructor(dir: string) {
     this.dir = path.resolve(dir);
     this.exportDir = path.join(this.dir, 'export');
     fs.mkdirSync(this.dir, { recursive: true });
+    this.history = new ProjectHistory(path.join(this.dir, '.spritifer', 'history'));
+  }
+
+  /** Working files of the tools (history, what the editor shows): stays out of git by itself. */
+  get metaDir(): string {
+    const dir = path.join(this.dir, '.spritifer');
+    if (!fs.existsSync(path.join(dir, '.gitignore'))) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, '.gitignore'), '*\n');
+    }
+    return dir;
+  }
+
+  private textIfAny(file: string): string | null {
+    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+  }
+
+  /** Writes through `write` and adds the change to the history. */
+  private tracked(kind: HistoryKind, name: string, file: string, author: string, write: () => void): void {
+    void this.metaDir;
+    const before = this.textIfAny(file);
+    write();
+    this.history.record(kind, name, author, before, this.textIfAny(file));
   }
 
   file(name: string): string {
@@ -162,7 +190,7 @@ export class Workspace {
   saveGame(game: GameProject, updatedBy = 'unknown'): string {
     game.rev = newGameId();
     game.updatedBy = updatedBy;
-    this.atomicWrite(this.gameFile(), JSON.stringify(game, null, 1));
+    this.tracked('game', 'game', this.gameFile(), updatedBy, () => this.atomicWrite(this.gameFile(), JSON.stringify(game, null, 1)));
     return game.rev;
   }
 
@@ -205,12 +233,13 @@ export class Workspace {
     scene.rev = newGameId();
     scene.updatedBy = updatedBy;
     // Tile arrays are long: keep them on one line each so the file stays diff-friendly.
-    this.atomicWrite(this.sceneFile(scene.name), JSON.stringify(scene));
+    this.tracked('scene', scene.name, this.sceneFile(scene.name), updatedBy, () => this.atomicWrite(this.sceneFile(scene.name), JSON.stringify(scene)));
     return scene.rev;
   }
 
-  removeScene(name: string): void {
-    fs.rmSync(this.sceneFile(name));
+  removeScene(name: string, updatedBy = 'unknown'): void {
+    const file = this.sceneFile(name);
+    this.tracked('scene', name, file, updatedBy, () => fs.rmSync(file));
   }
 
   // ------------------------------------------------------------------ scripts
@@ -305,16 +334,19 @@ export class Workspace {
     return Object.fromEntries(this.listScripts().map((s) => [s.name, this.readScript(s.name)]));
   }
 
-  writeScript(name: string, code: string): void {
+  writeScript(name: string, code: string, updatedBy = 'unknown'): void {
     const f = this.scriptFile(name);
     fs.mkdirSync(path.dirname(f), { recursive: true });
     const tmp = path.join(path.dirname(f), `.${path.basename(f)}.${process.pid}.tmp`);
-    fs.writeFileSync(tmp, code);
-    fs.renameSync(tmp, f);
+    this.tracked('script', name, f, updatedBy, () => {
+      fs.writeFileSync(tmp, code);
+      fs.renameSync(tmp, f);
+    });
   }
 
-  removeScript(name: string): void {
-    fs.rmSync(this.scriptFile(name));
+  removeScript(name: string, updatedBy = 'unknown'): void {
+    const f = this.scriptFile(name);
+    this.tracked('script', name, f, updatedBy, () => fs.rmSync(f));
   }
 
   /** Writes a file next to the scripts (IDE support: jsconfig.json, spritifer.d.ts) if its content changed. */
@@ -406,16 +438,19 @@ export class Workspace {
     return Object.fromEntries(this.listDialogues().map((s) => [s.name, this.readDialogue(s.name)]));
   }
 
-  writeDialogue(name: string, code: string): void {
+  writeDialogue(name: string, code: string, updatedBy = 'unknown'): void {
     const f = this.dialogueFile(name);
     fs.mkdirSync(this.dialoguesDir, { recursive: true });
     const tmp = path.join(this.dialoguesDir, `.${name}.${process.pid}.tmp`);
-    fs.writeFileSync(tmp, code);
-    fs.renameSync(tmp, f);
+    this.tracked('dialogue', name, f, updatedBy, () => {
+      fs.writeFileSync(tmp, code);
+      fs.renameSync(tmp, f);
+    });
   }
 
-  removeDialogue(name: string): void {
-    fs.rmSync(this.dialogueFile(name));
+  removeDialogue(name: string, updatedBy = 'unknown'): void {
+    const f = this.dialogueFile(name);
+    this.tracked('dialogue', name, f, updatedBy, () => fs.rmSync(f));
   }
 
   // ------------------------------------------------------------------ data tables
@@ -469,13 +504,16 @@ export class Workspace {
     const f = this.tableFile(t.name);
     fs.mkdirSync(this.dataDir, { recursive: true });
     const tmp = path.join(this.dataDir, `.${t.name}.${process.pid}.tmp`);
-    fs.writeFileSync(tmp, JSON.stringify(t, null, 1));
-    fs.renameSync(tmp, f);
+    this.tracked('data', t.name, f, updatedBy ?? 'unknown', () => {
+      fs.writeFileSync(tmp, JSON.stringify(t, null, 1));
+      fs.renameSync(tmp, f);
+    });
     return t;
   }
 
-  removeTable(name: string): void {
-    fs.rmSync(this.tableFile(name));
+  removeTable(name: string, updatedBy = 'unknown'): void {
+    const f = this.tableFile(name);
+    this.tracked('data', name, f, updatedBy, () => fs.rmSync(f));
   }
 
   // ------------------------------------------------------------------ visual effects
@@ -525,12 +563,61 @@ export class Workspace {
     const g = normalizeVfx({ ...graph, rev: newGameId(), ...(updatedBy ? { updatedBy } : {}) }, graph.name);
     const f = this.vfxFile(g.name);
     fs.mkdirSync(this.vfxDir, { recursive: true });
-    this.atomicWrite(f, JSON.stringify(g, null, 2));
+    this.tracked('vfx', g.name, f, updatedBy ?? 'unknown', () => this.atomicWrite(f, JSON.stringify(g, null, 2)));
     return g;
   }
 
-  removeVfx(name: string): void {
-    fs.rmSync(this.vfxFile(name));
+  removeVfx(name: string, updatedBy = 'unknown'): void {
+    const f = this.vfxFile(name);
+    this.tracked('vfx', name, f, updatedBy, () => fs.rmSync(f));
+  }
+
+  // ------------------------------------------------------------------ saved playtests
+
+  get testsDir(): string {
+    return path.join(this.dir, 'tests');
+  }
+
+  testFile(name: string): string {
+    assertTestName(name);
+    return path.join(this.testsDir, `${name}.test.json`);
+  }
+
+  testExists(name: string): boolean {
+    return fs.existsSync(this.testFile(name));
+  }
+
+  listTests(): GameTest[] {
+    if (!fs.existsSync(this.testsDir)) return [];
+    const out: GameTest[] = [];
+    for (const f of fs.readdirSync(this.testsDir).sort()) {
+      if (!f.endsWith('.test.json') || f.startsWith('.')) continue;
+      try {
+        out.push(this.loadTest(f.slice(0, -10)));
+      } catch {
+        // A broken file shouldn't hide the others.
+      }
+    }
+    return out;
+  }
+
+  loadTest(name: string): GameTest {
+    const f = this.testFile(name);
+    if (!fs.existsSync(f)) throw new Error(`Test "${name}" not found. Tests: ${this.listTests().map((t) => t.name).join(', ') || 'none yet'}`);
+    return normalizeTest(JSON.parse(fs.readFileSync(f, 'utf8')), name);
+  }
+
+  saveTest(test: GameTest, updatedBy: string): GameTest {
+    const t = normalizeTest({ ...test, updatedBy }, test.name);
+    fs.mkdirSync(this.testsDir, { recursive: true });
+    const tmp = path.join(this.testsDir, `.${t.name}.${process.pid}.tmp`);
+    fs.writeFileSync(tmp, JSON.stringify(t, null, 1));
+    fs.renameSync(tmp, this.testFile(t.name));
+    return t;
+  }
+
+  removeTest(name: string): void {
+    fs.rmSync(this.testFile(name));
   }
 
   private atomicWrite(target: string, data: string): void {
@@ -555,6 +642,9 @@ export class Workspace {
       } else if (filename === GAME_FILE) {
         kind = 'game';
         name = 'game';
+      } else if (filename === 'notes.json') {
+        kind = 'notes';
+        name = 'notes';
       } else return;
       const key = kind + ':' + name;
       clearTimeout(timers.get(key));
@@ -624,7 +714,19 @@ export class Workspace {
         onChange(name, 'vfx');
       }, 40));
     });
+    fs.mkdirSync(this.testsDir, { recursive: true });
+    const testWatcher = fs.watch(this.testsDir, (_event, filename) => {
+      if (!filename || !filename.endsWith('.test.json') || filename.startsWith('.')) return;
+      const name = filename.slice(0, -10);
+      const key = 'test:' + name;
+      clearTimeout(timers.get(key));
+      timers.set(key, setTimeout(() => {
+        timers.delete(key);
+        onChange(name, 'test');
+      }, 40));
+    });
     return () => {
+      testWatcher.close();
       watcher.close();
       scriptWatcher.close();
       dialogueWatcher.close();

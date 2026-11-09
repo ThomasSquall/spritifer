@@ -3,9 +3,9 @@
  * Used by exported games and by the editor's Play button.
  */
 
-import { type InputFrame, type Renderer, STEP, World, renderWorld } from '../core/game/engine.js';
+import { type InputFrame, type PlaytestInput, type Renderer, STEP, World, renderWorld } from '../core/game/engine.js';
 import { CanvasRenderer } from './canvasRenderer.js';
-import { type GameBundle, interfaceSize } from '../core/game/types.js';
+import { type GameBundle, type Value, interfaceSize } from '../core/game/types.js';
 import { SoundBoard } from './audio.js';
 
 export interface PlayerOptions {
@@ -30,6 +30,16 @@ export interface PlayerOptions {
   onFpsChange?: (on: boolean) => void;
 }
 
+/** A run of the game played by hand, ready to be replayed headless. */
+export interface Recording {
+  seed: number;
+  seconds: number;
+  inputs: PlaytestInput[];
+  finalScene: string;
+  /** Global variables that ended with another value than they started with. */
+  changed: Record<string, Value>;
+}
+
 export interface Player {
   world: World;
   destroy(): void;
@@ -44,6 +54,9 @@ export interface Player {
   musicVolume: number;
   /** Frame-rate readout on or off (F4). */
   fps: boolean;
+  /** Restarts the game with a known seed and no saved data, and records the input from the first frame. */
+  startRecording(): void;
+  stopRecording(): Recording;
 }
 
 /** Physical key code → logical keys. Letters keep their own name and WASD also act as arrows. */
@@ -152,7 +165,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       try { localStorage.setItem(storagePrefix + k, v); } catch { /* storage unavailable */ }
     },
   };
-  const makeWorld = (scene?: string) => new World(bundle, { scene, storage, sound: (n, v) => sound.play(n, v), music: (cmd) => sound.music(cmd), log: opts.onLog, seed: (Math.random() * 2 ** 31) | 0 });
+  const makeWorld = (scene?: string, seed = (Math.random() * 2 ** 31) | 0, store: typeof storage = storage) => new World(bundle, { scene, storage: store, sound: (n, v) => sound.play(n, v), music: (cmd) => sound.music(cmd), log: opts.onLog, seed });
   let world: World;
   try {
     world = makeWorld(opts.scene);
@@ -436,6 +449,20 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     return f;
   };
 
+  // ---------------------------------------------------------------- recording
+  let recording: { seed: number; frame: number; held: Map<string, number>; inputs: PlaytestInput[]; start: Record<string, Value> } | null = null;
+  const recordFrame = (input: InputFrame) => {
+    const r = recording!;
+    for (const k of input.down) if (!r.held.has(k)) r.held.set(k, r.frame);
+    for (const [k, from] of r.held) {
+      if (input.down.has(k)) continue;
+      r.inputs.push({ at: from * STEP, key: k, duration: (r.frame - from) * STEP });
+      r.held.delete(k);
+    }
+    for (const click of input.clicks) r.inputs.push({ at: r.frame * STEP, click });
+    r.frame++;
+  };
+
   // ---------------------------------------------------------------- loop
   let raf = 0;
   let last = performance.now();
@@ -464,7 +491,9 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     }
     let steps = 0;
     while (acc >= STEP && steps < 5) {
-      world.step(readInput());
+      const input = readInput();
+      if (recording) recordFrame(input);
+      world.step(input);
       // Let dialogue and script continuations (await say / choose / wait) run before the next step.
       await world.settle();
       acc -= STEP;
@@ -539,6 +568,29 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     },
     set fps(on: boolean) {
       setFps(on);
+    },
+    startRecording() {
+      const seed = (Math.random() * 2 ** 31) | 0;
+      // Headless replays have no saved data: neither does a recording.
+      const memory = new Map<string, string>();
+      world = makeWorld(opts.scene, seed, { get: (k) => memory.get(k) ?? null, set: (k, v) => void memory.set(k, v) });
+      codes.clear();
+      virtual.clear();
+      queuedPress.clear();
+      prevDown = new Set();
+      clicks = [];
+      acc = 0;
+      recording = { seed, frame: 0, held: new Map(), inputs: [], start: world.snapshot().globals };
+    },
+    stopRecording() {
+      const r = recording;
+      if (!r) throw new Error('Not recording');
+      recording = null;
+      for (const [k, from] of r.held) r.inputs.push({ at: from * STEP, key: k, duration: (r.frame - from) * STEP });
+      r.inputs.sort((a, b) => a.at - b.at);
+      const end = world.snapshot();
+      const changed = Object.fromEntries(Object.entries(end.globals).filter(([k, v]) => r.start[k] !== v));
+      return { seed: r.seed, seconds: r.frame * STEP, inputs: r.inputs, finalScene: end.scene, changed };
     },
     destroy() {
       sound.music({ type: 'ambience', layers: [], fade: 0.1 });

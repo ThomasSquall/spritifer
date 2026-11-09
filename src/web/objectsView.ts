@@ -9,6 +9,7 @@ import { gameApi } from './gameApi.js';
 import { looksLikePlainText, previewText } from './textPreview.js';
 import { state } from './gameState.js';
 import { appNav } from './nav.js';
+import { openUsages } from './usagesView.js';
 import { clear, confirmDialog, h, icon, iconButton, promptText, toast } from './dom.js';
 import { componentCard, componentPicker } from './componentsUi.js';
 import { lightEditor } from './atmosphereUi.js';
@@ -170,6 +171,7 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
   el.append(h('header', { class: 'obj-head' },
     nameIn,
     usage,
+    iconButton('target', `Find what uses ${obj.name}`, () => void openUsages('object', obj.name), { class: 'icon-btn tiny' }),
     h('span', { class: 'spacer' }),
     obj.extends ? h('a', { class: 'small variant-link', href: `#/objects/${encodeURIComponent(obj.extends)}` }, `↳ variant of ${obj.extends}`) : null,
     h('button', { class: 'small', title: 'A new type based on this one: it inherits everything and keeps only what you change (like a Unity prefab variant)', onclick: async () => {

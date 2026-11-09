@@ -2,6 +2,9 @@
 
 import { gameApi } from './gameApi.js';
 import { createPlayInspector } from './playInspector.js';
+import type { Recording } from '../runtime/player.js';
+import { normalizeTest } from '../core/game/gameTests.js';
+import { reportPlayLog, resetPlayLog, updateContext } from './editorContext.js';
 import { state } from './gameState.js';
 import { h, icon, iconButton, linkScriptRefs, modal, toast } from './dom.js';
 
@@ -32,6 +35,7 @@ export function onPlayChange(fn: () => void): () => void {
 
 function setOpen(on: boolean): void {
   open = on;
+  updateContext({ playing: on ? true : undefined });
   for (const fn of playWatchers) fn();
 }
 
@@ -51,7 +55,37 @@ export async function pushScriptsToPlay(): Promise<void> {
   }
 }
 
-export async function openPlay(scene?: string): Promise<void> {
+/** Saves what was just played as a test, after asking what must be true at the end. */
+async function saveRecording(r: Recording, scene: string | undefined): Promise<void> {
+  const taken = new Set((await gameApi.listTests().catch(() => [])).map((t) => t.name));
+  let suggested = 'playthrough';
+  for (let i = 2; taken.has(suggested); i++) suggested = `playthrough_${i}`;
+  await modal('Save this run as a test', (close) => {
+    const name = h('input', { type: 'text', value: suggested, spellcheck: false });
+    const description = h('input', { type: 'text', placeholder: 'What this run covers (optional)' });
+    const endScene = h('input', { type: 'text', value: r.finalScene, spellcheck: false });
+    const lines = Object.entries(r.changed).map(([k, v]) => `${k} == ${JSON.stringify(v)}`);
+    const exprs = h('textarea', { rows: Math.min(10, Math.max(3, lines.length)), spellcheck: false, value: lines.join('\n') });
+    const save = async () => {
+      try {
+        await gameApi.saveTest(normalizeTest({ name: name.value.trim(), description: description.value.trim(), scene, seed: r.seed, seconds: r.seconds, inputs: r.inputs, autoDialog: false, expect: { scene: endScene.value.trim(), exprs: exprs.value.split('\n'), noErrors: true } }, name.value.trim()));
+        toast(`Test saved: ${name.value.trim()}`);
+        close();
+      } catch (err) {
+        toast((err as Error).message, 'error');
+      }
+    };
+    return h('div', { class: 'form' },
+      h('p', { class: 'muted small' }, `${r.seconds.toFixed(1)} seconds, ${r.inputs.length} inputs. Keep the lines that matter and remove the rest.`),
+      h('label', {}, 'Name', name),
+      h('label', {}, 'Description', description),
+      h('label', {}, 'Ends in scene', endScene),
+      h('label', {}, 'True at the end (one expression per line)', exprs),
+      h('div', { class: 'actions' }, h('span', { class: 'spacer' }), h('button', { onclick: close }, 'Discard'), h('button', { class: 'primary', onclick: () => void save() }, 'Save test')));
+  });
+}
+
+export async function openPlay(scene?: string, opts: { record?: boolean } = {}): Promise<void> {
   if (open) return;
   await flushAll();
   const scenes = await gameApi.listScenes();
@@ -78,6 +112,7 @@ export async function openPlay(scene?: string): Promise<void> {
   const errCount = h('span', { class: 'play-errcount' });
   let errors = 0;
   const addLog = (msg: string) => {
+    reportPlayLog(msg);
     const isErr = msg.startsWith('ERROR');
     if (isErr) {
       errors++;
@@ -92,7 +127,17 @@ export async function openPlay(scene?: string): Promise<void> {
     if (e.source === frame.contentWindow && d?.source === 'spritifer-game' && d.type === 'inspect' && d.data) inspector.update(d.data as Parameters<typeof inspector.update>[0]);
     if (e.source !== frame.contentWindow || d?.source !== 'spritifer-game') return;
     if (d.type === 'log' && d.message) addLog(d.message);
-    if (d.type === 'ready') frame.focus();
+    if (d.type === 'ready') {
+      frame.focus();
+      if (wantRecord) {
+        wantRecord = false;
+        toggleRecord();
+      }
+    }
+    if (d.type === 'recording' && d.data) {
+      close();
+      void saveRecording(d.data as Recording, scene);
+    }
     if (d.type === 'music') {
       musicOn = !!d.on;
       musicBtn.classList.toggle('on', musicOn);
@@ -104,7 +149,26 @@ export async function openPlay(scene?: string): Promise<void> {
     }
   };
   window.addEventListener('message', onMsg);
+  let wantRecord = !!opts.record;
+  let recording = false;
+  const toggleRecord = () => {
+    recording = !recording;
+    recBtn.classList.toggle('rec', recording);
+    recBtn.textContent = recording ? 'Stop and save' : 'Record';
+    if (recording) {
+      logs.textContent = '';
+      errors = 0;
+      errCount.textContent = '';
+      resetPlayLog();
+    }
+    sendToGame({ type: 'record', on: recording });
+    frame.focus();
+  };
   const reload = () => {
+    resetPlayLog();
+    recording = false;
+    recBtn.classList.remove('rec');
+    recBtn.textContent = 'Record';
     logs.textContent = '';
     errors = 0;
     errCount.textContent = '';
@@ -129,6 +193,7 @@ export async function openPlay(scene?: string): Promise<void> {
   };
   document.addEventListener('keydown', onKey, true);
   const hotBtn = h('button', { class: `small${hotReload ? ' on' : ''}`, title: 'Apply script changes to the running game without restarting (components keep their state)', onclick: () => { hotReload = !hotReload; hotBtn.classList.toggle('on', hotReload); } }, 'Hot reload');
+  const recBtn = h('button', { class: 'small', title: 'Restart the game and record what you press, to save it as a test', onclick: () => toggleRecord() }, 'Record');
   const hitBtn = h('button', { class: 'small', title: 'Show collision boxes (F2 in game)', onclick: () => { debug = !debug; hitBtn.classList.toggle('on', debug); reload(); } }, 'Hitboxes');
   let musicOn = true;
   const musicBtn = h('button', { class: 'small on', title: 'Sound on or off while the game runs: music and effects (F3 in game); remembered for the next Play', onclick: () => { sendToGame({ type: 'music', on: !musicOn }); frame.focus(); } }, 'Sound');
@@ -173,6 +238,7 @@ export async function openPlay(scene?: string): Promise<void> {
       h('span', { class: 'muted small' }, 'Arrows/WASD move · Space/Z jump & action · X action 2 · Esc closes'),
       h('span', { class: 'spacer' }),
       errCount,
+      recBtn,
       hotBtn,
       h('span', { class: 'play-volume play-keep-fullscreen' }, musicBtn, volumeSlider),
       fpsBtn,
@@ -185,6 +251,7 @@ export async function openPlay(scene?: string): Promise<void> {
     h('div', { class: 'play-body' }, frame, side),
   );
   document.body.append(overlay);
+  resetPlayLog();
   playFrame = frame;
   frame.addEventListener('load', () => frame.focus());
 }

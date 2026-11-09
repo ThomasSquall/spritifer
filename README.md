@@ -274,6 +274,17 @@ Con **Remember instances when leaving** la scena ricorda posizioni, proprietà e
 - **Export** scrive `<workspace>/export/web/<titolo>/index.html`: **un solo file** con motore, scene e immagini incorporate. Funziona offline, su qualsiasi hosting statico e si carica su itch.io come gioco HTML5. Lo stesso file si scarica dal pulsante *Download HTML*.
 - Il runtime (~17 KB gzip) scala il gioco a pixel interi quando possibile, supporta tastiera (frecce/WASD, Spazio/Z/J, X/K, Invio), mouse, **controlli touch** su telefono e **gamepad**.
 
+### Lavorare su un gioco grande
+
+Queste funzioni ci sono uguali nell'editor e via MCP.
+
+- **Find usages** (pulsante in alto): dove si usa una variabile, un oggetto, uno sprite, una scena, un dialogo, un componente, un suono, una tabella o un effetto, con letture e scritture e un link a ogni punto. Via MCP: `find_usages`.
+- **Contesto condiviso**: Claude legge con `get_editor_context` la pagina aperta, la selezione, le note sulla mappa e gli errori dell'ultimo Play. Le **note** si mettono sulla mappa con lo strumento N; Claude le legge, risponde e le chiude con `set_note`.
+- **World**: le scene come mappa con i loro collegamenti, e i controlli: scene a cui non porta niente, porte senza ritorno, istanze dentro un muro o dove il giocatore non può arrivare. Via MCP: `get_world_map` e `validate_game`.
+- **Tests**: nel Play, **Record** riavvia il gioco e registra ciò che premi; alla fine scrivi cosa deve essere vero. La pagina Tests li rilancia dopo ogni modifica, senza browser (`tests/*.test.json`). Via MCP: `list_tests`, `read_test`, `write_test`, `delete_test`, `run_tests`.
+- **History**: ogni modifica a impostazioni, oggetti, scene, tabelle, effetti, script e dialoghi, con chi l'ha fatta. **Undo** annulla quella modifica e tiene ciò che è venuto dopo; le parti modificate di nuovo restano come sono e vengono segnalate. Vale per quello che passa da Spritifer: le modifiche fatte da script esterni ai file non compaiono, e per gli sprite restano le loro versioni. Via MCP: `history`, `undo_game_change`.
+- **Mappe**: nell'editor di scena, con lo strumento V, Maiusc+clic aggiunge un'istanza e Maiusc+trascinamento seleziona un'area; Ctrl+C e Ctrl+V copiano istanze e tile, anche in un'altra scena. Lo strumento S sparge oggetti a pennello o su un'area, in **gruppi** con un nome (scheda Groups): un gruppo si nasconde, si sposta, si cancella, e quello fatto per aree si rifà con un altro seme lasciando intatto il resto. Via MCP: `scatter_instances`, `scene_group`, `copy_scene_region`, `group` in `place_instances` e `update_instances`.
+
 ### Con Claude
 
 Chiedi per esempio:
@@ -336,6 +347,7 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Script | `set_object` / `place_instances` / `update_instances` con `tags`; `component_library` / `add_library_component` (componenti pronti), `script_reference` (componenti, ciclo di vita, API completa con esempio), `list_scripts` (cartelle, componenti con parametri/hook/metodi), `read_script`, `write_script` (percorsi con cartelle, controllo della sintassi), `edit_script`, `move_script` (sposta/rinomina file e cartelle aggiornando i riferimenti), `delete_script`; `place_instances`/`update_instances` (`components`), `update_scene` e `set_game` (`components`) attaccano i componenti |
 | Progetti | `list_projects`, `open_project`, `forget_project`, `create_project` (vuoto, platformer, rpg) |
 | Verifica ed export del gioco | `validate_game`, `preview_scene`, `playtest` (gioco headless con input scriptati e risposte ai menu: log, dialoghi, stato, screenshot), `export_game` (HTML unico per il web), `undo_game_change` |
+| Gioco grande | `find_usages`, `get_editor_context`, `set_note`, `get_world_map`, `list_tests`, `read_test`, `write_test`, `delete_test`, `run_tests`, `history`, `scatter_instances`, `scene_group`, `copy_scene_region` |
 | Altro | `undo`, `editor_url` |
 
 `draw_pixels` è lo strumento principale: Claude scrive righe di caratteri e una legenda colore, ad esempio:

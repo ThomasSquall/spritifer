@@ -7,6 +7,7 @@ import { previewSound } from './eventSheet.js';
 import { gameApi } from './gameApi.js';
 import { state } from './gameState.js';
 import { appNav } from './nav.js';
+import { openUsages } from './usagesView.js';
 import { openExport, openPlay } from './play.js';
 import { clear, h, icon, iconButton, linkScriptRefs, promptText, toast } from './dom.js';
 import { componentListCard } from './componentsUi.js';
@@ -145,7 +146,7 @@ export function renderGameSettings(root: HTMLElement): () => void {
     const parse = parseValue;
     for (const [k, v] of Object.entries(g.variables)) {
       const vi = h('input', { type: 'text', title: VALUE_HINT, value: formatValue(v), oninput: () => { g.variables[k] = parse(vi.value); changed(); } });
-      vars.append(h('div', { class: 'prop-row' }, h('code', {}, k), vi, iconButton('close', 'Remove', () => { delete g.variables[k]; changed(); render(); }, { class: 'icon-btn tiny' })));
+      vars.append(h('div', { class: 'prop-row' }, h('code', {}, k), vi, h('span', {}, iconButton('target', `Find what uses ${k}`, () => void openUsages('variable', k), { class: 'icon-btn tiny' }), iconButton('close', 'Remove', () => { delete g.variables[k]; changed(); render(); }, { class: 'icon-btn tiny' }))));
     }
     if (!Object.keys(g.variables).length) vars.append(h('p', { class: 'muted small' }, 'Global variables (score, lives, coins…) are kept across scenes. Use them in events and text.'));
 

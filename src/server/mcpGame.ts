@@ -46,6 +46,12 @@ import { scriptBaseName } from '../core/game/modules.js';
 import { describeTilesetRules, normalizeTilesetRules } from '../core/game/tilerules.js';
 import { SCRIPT_REFERENCE } from '../core/game/script.js';
 import { DIALOGUE_REFERENCE, buildDialogueBook, parseDialogues } from '../core/game/dialogue.js';
+import { USAGE_KINDS, findUsages, formatUsages } from '../core/game/usages.js';
+import { type GameTest, normalizeTest } from '../core/game/gameTests.js';
+import { type ScatterRecipe, deleteGroup, extractRegion, listGroups, pasteRegion, regenerateGroup, renameGroup, scatterIntoGroup } from '../core/game/sceneOps.js';
+import { formatEditorContext, formatNotes, listNotes, setNote } from './context.js';
+import { formatHistory, undoChange } from './history.js';
+import { formatTestRun, instanceSizes, loadSources, mapReport, runTests } from './projectTools.js';
 import { enableGit, gitCommit, gitCommitFiles, gitDiff, gitLog, gitPull, gitPush, gitRestore, gitSetRemote, gitStatus } from './projectGit.js';
 
 type Content = CallToolResult['content'];
@@ -77,6 +83,10 @@ Model:
 - Visual effects (vfx_reference, write_vfx, update_vfx, preview_vfx): attacks, spells and hits as small flow graphs of slashes, shockwaves, beams, projectiles, particles, flashes, shake and hit stop. Played with await vfx("fireball", self, enemy), the event action "Play effect", or a frame event "vfx:slash". Put a Message node where the attack connects and apply damage there. Check them with preview_vfx.
 - Data tables (write_data / update_data / read_data / list_data): the game's database in data/<table>.json — items, weapons with tiers and prices, classes, skills, enemy stats, shop stock, quest rewards. Scripts read db.weapons, db.get('weapons', 'bronze'), db.where('weapons', { tier: 2 }); events, dialogues and activeIf read db("weapons", "bronze", "price"). Prefer tables over constants in scripts for anything a designer would tweak.
 - Things that appear as the game progresses (a town that grows: new buildings, residents, upgraded shops, opened bridges): place them once with active_if (an expression such as "inn_lv >= 1" or "quest_bram == 2"); the engine shows them only while it is true, checking continuously. fn("name", args) in expressions calls a func() from a plain script (synchronous), for conditions too complex for an expression.
+- Working with the person in the editor: when they say "this", "here", "questo", "qui" or report something they just saw, call get_editor_context first (open page, selection, their notes on the map, errors of their last Play). Answer a note with set_note.
+- Before changing or removing something, find_usages shows every place that depends on it. history lists every change, yours and theirs; undo_game_change undoes one without losing what came after.
+- After changing maps, scripts or the story, run_tests runs the saved playtests. get_world_map and validate_game show how scenes connect and what is unreachable.
+- Large maps: scatter_instances (trees, rocks) with a group, scene_group to redo or remove it, copy_scene_region for whole areas. Prefer these to writing code that edits scene files.
 - Projects: list_projects / open_project / create_project switch between games; each project folder has its own sprites, scenes, scripts and game.json.
 - Version control: each game folder is its own git repository, separate from the editor's code (new projects start with one; git_enable adds it to an older project). git_commit after a meaningful step, git_log / git_show / git_diff to look back, git_restore to go back (whole game or one file: uncommitted work is saved first and history is never rewritten), git_push / git_pull with the remote set by git_remote. Commit or push only when the user asks.
 
@@ -89,22 +99,12 @@ Workflow that works:
 6. export_game and tell the user where index.html is (it runs offline and can be uploaded to itch.io as an HTML game).
 `;
 
-export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): void } {
+export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
   const { tool, text, image } = h;
   const AUTHOR = 'claude';
-  const history: { kind: 'game' | 'scene'; name: string; json: string | null }[] = [];
-
-  const remember = (kind: 'game' | 'scene', name: string) => {
-    let json: string | null = null;
-    if (kind === 'game' && ws.hasGame()) json = JSON.stringify(ws.loadGame());
-    if (kind === 'scene' && ws.sceneExists(name)) json = JSON.stringify(ws.loadScene(name));
-    history.push({ kind, name, json });
-    if (history.length > 60) history.shift();
-  };
 
   const mutateGame = <T>(fn: (g: GameProject) => T): { game: GameProject; result: T } => {
     const game = ws.loadGame();
-    remember('game', 'game');
     const result = fn(game);
     ws.saveGame(game, AUTHOR);
     return { game, result };
@@ -112,7 +112,6 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
 
   const mutateScene = <T>(name: string, fn: (s: Scene) => T): { scene: Scene; result: T } => {
     const scene = ws.loadScene(name);
-    remember('scene', name);
     const result = fn(scene);
     ws.saveScene(scene, AUTHOR);
     return { scene, result };
@@ -461,7 +460,6 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         return created;
       });
       for (const s of renamedScenes) {
-        remember('scene', s.name);
         ws.saveScene(s, AUTHOR);
       }
       const o = game.objects.find((x) => x.name === (a.new_name || a.name))!;
@@ -482,7 +480,6 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         const before = sc.instances.length;
         sc.instances = sc.instances.filter((x) => x.object !== a.name);
         if (sc.instances.length !== before) {
-          remember('scene', sc.name);
           removed += before - sc.instances.length;
           ws.saveScene(sc, AUTHOR);
         }
@@ -553,12 +550,10 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         if (!ts.grid) throw new Error(`Sprite "${a.tileset}" has no tile grid (create it with tile_width/tile_height)`);
         tileSize = ts.grid.width;
       }
-      remember('scene', a.name);
       const scene = createScene({ name: a.name, cols: a.cols, rows: a.rows, tileSize, tileset: a.tileset, background: a.background ?? '' });
       ws.saveScene(scene, AUTHOR);
       const g = ws.loadGame();
       if (!g.startScene || !ws.sceneExists(g.startScene) || !ws.hasGame()) {
-        remember('game', 'game');
         g.startScene = g.startScene && ws.sceneExists(g.startScene) ? g.startScene : a.name;
         ws.saveGame(g, AUTHOR);
       }
@@ -667,10 +662,9 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         const game = ws.loadGame();
         const others = ws.listScenes().filter((s) => s.name !== a.scene).map((s) => ws.loadScene(s.name));
         scene.name = a.new_name;
-        remember('game', 'game');
         const changed = renameSceneRefs(game, [scene, ...others], a.scene, a.new_name);
         ws.saveScene(scene, AUTHOR);
-        ws.removeScene(a.scene);
+        ws.removeScene(a.scene, AUTHOR);
         for (const s of changed) if (s !== scene) ws.saveScene(s, AUTHOR);
         ws.saveGame(game, AUTHOR);
       }
@@ -682,15 +676,13 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     assertIdentifier('scene', a.new_name);
     if (ws.sceneExists(a.new_name)) throw new Error(`Scene "${a.new_name}" already exists`);
     const copy = ws.loadScene(a.scene);
-    remember('scene', a.new_name);
     copy.name = a.new_name;
     ws.saveScene(copy, AUTHOR);
     return text(`Created.\n${describeScene(copy)}`);
   });
 
   tool('delete_scene', 'Delete a scene file.', { scene: z.string() }, (a) => {
-    remember('scene', a.scene);
-    ws.removeScene(a.scene);
+    ws.removeScene(a.scene, AUTHOR);
     return text(`Deleted scene "${a.scene}".`);
   }, { destructiveHint: true });
 
@@ -798,6 +790,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         flip_x: z.boolean().optional(),
         tags: z.array(z.string()).optional().describe('Extra group tags for this instance (e.g. ["boss"])'),
         active_if: z.string().optional().describe('Expression: the instance exists only while true (checked at scene start and continuously), e.g. "armory_lv >= 2" or "res_mage". For things that appear as the game progresses: new buildings, residents, upgrades.'),
+        group: z.string().optional().describe('Named group inside the scene (scene_group works on all of it at once)'),
         light: lightSchema.optional().describe('Light of this instance (overrides the type\'s; radius 0 = off)'),
       })).min(1),
       tiles: z.boolean().optional(),
@@ -823,7 +816,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
           }
           const id = newGameId();
           ids.push(id);
-          s.instances.push({ id, object: i.object, x, y, ...(i.name ? { name: i.name } : {}), ...(i.sprite ? { sprite: i.sprite } : {}), ...(i.animation ? { animation: i.animation } : {}), ...(i.props ? { props: i.props } : {}), ...(i.components ? { components: i.components as Record<string, Record<string, Value>> } : {}), ...(i.flip_x ? { flipX: true } : {}), ...(normalizeTags(i.tags) ? { tags: normalizeTags(i.tags) } : {}), ...(i.active_if?.trim() ? { activeIf: checkedExpr(i.active_if) } : {}), ...(i.light ? { light: normalizeLight(i.light, true) } : {}) });
+          s.instances.push({ id, object: i.object, x, y, ...(i.name ? { name: i.name } : {}), ...(i.sprite ? { sprite: i.sprite } : {}), ...(i.animation ? { animation: i.animation } : {}), ...(i.props ? { props: i.props } : {}), ...(i.components ? { components: i.components as Record<string, Record<string, Value>> } : {}), ...(i.flip_x ? { flipX: true } : {}), ...(normalizeTags(i.tags) ? { tags: normalizeTags(i.tags) } : {}), ...(i.active_if?.trim() ? { activeIf: checkedExpr(i.active_if) } : {}), ...(i.light ? { light: normalizeLight(i.light, true) } : {}), ...(i.group ? { group: i.group } : {}) });
         }
       });
       return text(`Placed ${ids.length} instance(s): ${ids.join(', ')}. Scene now has ${scene.instances.length}.`);
@@ -849,6 +842,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       sprite: z.string().nullable().optional().describe('Sprite override (null = the object type\'s)'),
       animation: z.string().nullable().optional(),
       active_if: z.string().nullable().optional().describe('Expression: the instance exists only while true (null or "" = always)'),
+      group: z.string().nullable().optional().describe('Named group (null clears)'),
       light: lightSchema.nullable().optional().describe('Light override (radius 0 = off, null = the object type\'s)'),
       props: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       components: z.record(z.string(), z.union([z.record(z.string(), z.union([valueSchema, z.null()])), z.null()])).optional().describe('Component params by component name (merged; null value deletes a param, null component removes the override)'),
@@ -886,6 +880,10 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
             if (v === undefined) continue;
             if (v === null || v === '') delete i[key];
             else i[key] = v;
+          }
+          if (a.group !== undefined) {
+            if (a.group) i.group = a.group;
+            else delete i.group;
           }
           if (a.active_if !== undefined) {
             if (a.active_if === null || !a.active_if.trim()) delete i.activeIf;
@@ -1036,7 +1034,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
   const saveScript = (name: string, code: string) => {
     const err = checkScriptSyntax(code, `scripts/${name}.js`);
     if (err) throw new Error(`Syntax error, not saved: ${err}`);
-    ws.writeScript(name, code);
+    ws.writeScript(name, code, AUTHOR);
     return text(`Saved scripts/${name}.js (${code.split('\n').length} lines).\n${scriptSummary()}\n\n${problemsText()}`);
   };
 
@@ -1089,7 +1087,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     'Copy ready-made components (see component_library) into scripts/ — plus the ones they need — then attach them like any component (set_object behaviors { type: "script", name: "Health", max: 5 }). The files are normal scripts you can read and edit.',
     { names: z.array(z.string()).min(1).describe('e.g. ["Health", "Damage", "Collectible"]') },
     (a) => {
-      const r = addLibraryComponents(ws, a.names);
+      const r = addLibraryComponents(ws, a.names, AUTHOR);
       return text(`${r.created.length ? `Created ${r.created.map((p) => `scripts/${p}.js`).join(', ')}.` : 'Nothing new to create.'}${r.existing.length ? ` Already in the project: ${r.existing.join(', ')}.` : ''}\n${scriptSummary()}`);
     },
   );
@@ -1097,8 +1095,6 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
   tool('move_script', 'Move or rename a script or a whole folder (e.g. "Patrol" → "enemies/Patrol", "enemies" → "monsters"). When a component file is renamed, its class name and every reference (objects, instances, scene/game components, events) follow.', { from: z.string(), to: z.string() }, (a) => {
     const isFile = ws.scriptExists(a.from);
     const before = isFile ? [a.from] : ws.listScripts().map((s) => s.name).filter((n) => n.startsWith(a.from + '/'));
-    remember('game', 'game');
-    for (const sc of ws.listScenes()) remember('scene', sc.name);
     ws.moveScript(a.from, a.to);
     for (const old of before) {
       const now = isFile ? a.to : a.to + old.slice(a.from.length);
@@ -1107,7 +1103,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       if (x === y) continue;
       const code = ws.readScript(now);
       const renamed = code.replace(new RegExp(`(export\\s+default\\s+class\\s+)${x}\\b`), `$1${y}`);
-      if (renamed !== code) ws.writeScript(now, renamed);
+      if (renamed !== code) ws.writeScript(now, renamed, AUTHOR);
       const game = ws.loadGame();
       const scenes = ws.listScenes().map((sc) => ws.loadScene(sc.name));
       const changed = renameComponentRefs(game, scenes, x, y);
@@ -1124,7 +1120,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
 
   tool('delete_script', 'Delete a script file (or a folder with everything in it, with folder: true).', { name: z.string(), folder: z.boolean().optional() }, (a) => {
     if (a.folder) ws.removeScriptFolder(a.name);
-    else ws.removeScript(a.name);
+    else ws.removeScript(a.name, AUTHOR);
     return text(`Deleted scripts/${a.name}${a.folder ? '/' : '.js'}.\n${scriptSummary()}`);
   }, { destructiveHint: true });
 
@@ -1151,7 +1147,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
   const saveDialogue = (file: string, code: string) => {
     const r = parseDialogues(code, file);
     if (r.errors.length) throw new Error(`Not saved, fix these first:\n${r.errors.map((e) => `- line ${e.line}: ${e.message}`).join('\n')}`);
-    ws.writeDialogue(file, code);
+    ws.writeDialogue(file, code, AUTHOR);
     return text(`Saved dialogues/${file}.dialogue (${r.nodes.length} dialogue(s): ${r.nodes.map((n) => n.name).join(', ')}).\n${dialogueSummary()}\n\n${problemsText()}`);
   };
 
@@ -1171,13 +1167,13 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
 
   tool('rename_dialogue', 'Rename a dialogue file. The dialogues inside keep their names, so NPCs that use them are not affected.', { file: z.string(), to: z.string() }, (a) => {
     if (ws.dialogueExists(a.to)) throw new Error(`Dialogue file "${a.to}" already exists`);
-    ws.writeDialogue(a.to, ws.readDialogue(a.file));
-    ws.removeDialogue(a.file);
+    ws.writeDialogue(a.to, ws.readDialogue(a.file), AUTHOR);
+    ws.removeDialogue(a.file, AUTHOR);
     return text(`Renamed dialogues/${a.file}.dialogue to ${a.to}.dialogue.\n${dialogueSummary()}`);
   });
 
   tool('delete_dialogue', 'Delete a dialogue file.', { file: z.string() }, (a) => {
-    ws.removeDialogue(a.file);
+    ws.removeDialogue(a.file, AUTHOR);
     return text(`Deleted dialogues/${a.file}.dialogue.\n${dialogueSummary()}`);
   }, { destructiveHint: true });
 
@@ -1267,13 +1263,13 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         }
       }
       const saved = ws.saveTable(t, AUTHOR);
-      if (saved.name !== a.table) ws.removeTable(a.table);
+      if (saved.name !== a.table) ws.removeTable(a.table, AUTHOR);
       return text(`Updated data/${saved.name}.json: ${added} added, ${changed} changed, ${a.delete_ids?.length ?? 0} deleted. ${saved.rows.length} rows, columns ${saved.columns.map((c) => c.name).join(', ')}.`);
     },
   );
 
   tool('delete_data', 'Delete a data table.', { table: z.string() }, (a) => {
-    ws.removeTable(a.table);
+    ws.removeTable(a.table, AUTHOR);
     return text(`Deleted data/${a.table}.json.`);
   }, { destructiveHint: true });
 
@@ -1392,14 +1388,14 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         if (ws.vfxExists(a.rename_to)) throw new Error(`Effect "${a.rename_to}" already exists`);
       }
       const out = saveVfxChecked(g, to);
-      if (to !== a.effect) ws.removeVfx(a.effect);
+      if (to !== a.effect) ws.removeVfx(a.effect, AUTHOR);
       return a.preview ? [...out, ...vfxPreview(ws.loadVfx(to))] : out;
     },
   );
 
   tool('delete_vfx', 'Delete a visual effect.', { effect: z.string() }, (a) => {
     ws.loadVfx(a.effect);
-    ws.removeVfx(a.effect);
+    ws.removeVfx(a.effect, AUTHOR);
     return text(`Deleted vfx/${a.effect}.json.\n\n${problemsText()}`);
   }, { destructiveHint: true });
 
@@ -1420,29 +1416,198 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     { readOnlyHint: true },
   );
 
-  tool('validate_game', 'Check the game for problems: unknown triggers/actions/behaviors, bad expressions, missing sprites, objects and scenes.', {}, () => text(problemsText()), { readOnlyHint: true });
+  tool('validate_game', 'Check the game for problems: unknown triggers/actions/behaviors, bad expressions, missing sprites, objects and scenes, and the map checks: scenes nothing leads to, one-way doors, instances stuck on solid tiles or where the player cannot walk.', {}, () => {
+    const maps = mapReport(ws).problems;
+    return text(`${problemsText()}${maps.length ? `\n\nMap checks (${maps.length}), worth a look but sometimes intended:\n${maps.slice(0, 60).map((p) => `- ${p.where}: ${p.message}`).join('\n')}${maps.length > 60 ? `\n... ${maps.length - 60} more` : ''}` : ''}`);
+  }, { readOnlyHint: true });
+
+  // ------------------------------------------------------------------ project-wide tools
+
+  tool('find_usages', 'Where something is used across the whole project: event sheets, instances, active_if, components, scripts, dialogues, data tables, effects. Variables report reads and writes. Prefer this to searching files.', {
+    kind: z.enum(USAGE_KINDS),
+    name: z.string().describe('Variable (gold, scene.timer), object type, sprite, scene, dialogue, component, sound, table or effect name'),
+    per_place: z.number().int().min(1).max(200).optional().describe('Lines shown per file or scene (default 12)'),
+  }, (a) => text(formatUsages(a.kind, a.name, findUsages(loadSources(ws), a.kind, a.name), a.per_place)), { readOnlyHint: true });
+
+  tool('get_editor_context', 'What the person is doing in the editor right now: the open page, scene or sprite, selected instances and tiles, their open notes on the map, and the errors of their last Play. Call it first when they say "this", "here", "questo" or "qui" or report something they just saw.', {}, () => text(formatEditorContext(ws)), { readOnlyHint: true });
+
+  tool('set_note', 'Add a note pinned on a scene (scene, x, y in pixels, text), or answer, resolve, move or delete one by id. Notes appear on the map in the editor, and get_editor_context lists the open ones.', {
+    id: z.string().optional().describe('Omit to create a note'),
+    scene: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    text: z.string().optional(),
+    reply: z.string().optional(),
+    resolved: z.boolean().optional(),
+    delete: z.boolean().optional(),
+  }, (a) => {
+    const n = setNote(ws, { ...a, remove: a.delete }, AUTHOR);
+    return text(n ? `Saved.\n${formatNotes([n])}` : 'Deleted.');
+  });
+
+  tool('get_world_map', 'How the scenes connect: every door, event, script or data entry that leads to a scene, which scenes nothing leads to, and one-way doors.', {}, () => {
+    const { world } = mapReport(ws);
+    const byScene = world.scenes.map((s) => {
+      const out = world.links.filter((l) => l.from === s.name);
+      return `${s.name}${s.name === world.start ? ' [start]' : ''}${s.reachable ? '' : ' [nothing leads here]'}${s.scripted ? ' [reached from code]' : ''}: ${[...new Set(out.map((l) => `${l.to} (${l.via})`))].join(', ') || 'no exits'}`;
+    });
+    const code = world.links.filter((l) => l.from === null);
+    return text(`${byScene.join('\n')}${code.length ? `\n\nFrom code and data:\n${code.slice(0, 40).map((l) => `- ${l.to}: ${l.where}`).join('\n')}` : ''}${world.oneWay.length ? `\n\nOne-way doors:\n${world.oneWay.map((l) => `- ${l.from} -> ${l.to} (${l.where})`).join('\n')}` : ''}`);
+  }, { readOnlyHint: true });
+
+  // ------------------------------------------------------------------ saved playtests
+
+  const describeTest = (t: GameTest) => `${t.name}: ${t.seconds.toFixed(1)}s, ${t.inputs.length} input(s)${t.scene ? `, from ${t.scene}` : ''}${t.description ? ` — ${t.description}` : ''}\n  expects ${[t.expect.scene && `scene ${t.expect.scene}`, ...(t.expect.exprs ?? []), ...(t.expect.logs ?? []).map((l) => `log "${l}"`), t.expect.noErrors !== false && 'no errors'].filter(Boolean).join('; ') || 'nothing'}`;
+
+  tool('list_tests', 'The saved playtests of the game (tests/*.test.json), recorded in the editor or written with write_test.', {}, () => text(ws.listTests().map(describeTest).join('\n') || 'No tests yet.'), { readOnlyHint: true });
+
+  tool('read_test', 'A saved playtest with its inputs.', { name: z.string() }, (a) => text(JSON.stringify(ws.loadTest(a.name), null, 1)), { readOnlyHint: true });
+
+  tool('write_test', 'Save a playtest that can be run again: the game for some seconds with scripted input, and what must be true at the end. With only name and expect it changes what an existing test expects.', {
+    name: z.string(),
+    description: z.string().optional(),
+    seconds: z.number().min(0.1).max(600).optional(),
+    scene: z.string().optional(),
+    seed: z.number().int().optional(),
+    vars: z.record(z.string(), valueSchema).optional(),
+    player_at: z.tuple([z.number(), z.number()]).optional(),
+    inputs: z.array(z.object({ at: z.number().min(0), key: z.string().optional(), duration: z.number().min(0).optional(), click: z.tuple([z.number(), z.number()]).optional() })).optional(),
+    choices: z.array(z.number().int().min(0)).optional(),
+    auto_dialog: z.boolean().optional(),
+    expect: z.object({
+      scene: z.string().optional().describe('The scene it must end in'),
+      exprs: z.array(z.string()).optional().describe('Expressions that must be true at the end: "gold >= 10"'),
+      logs: z.array(z.string()).optional().describe('Text that must appear in the log'),
+      no_errors: z.boolean().optional().describe('Fail on runtime errors (default true)'),
+    }).optional(),
+  }, (a) => {
+    const old = ws.testExists(a.name) ? ws.loadTest(a.name) : undefined;
+    if (!old && a.seconds === undefined) throw new Error('A new test needs seconds');
+    const expect = a.expect ? { scene: a.expect.scene, exprs: a.expect.exprs, logs: a.expect.logs, noErrors: a.expect.no_errors } : old?.expect;
+    const merged = { ...old, ...Object.fromEntries(Object.entries({ description: a.description, seconds: a.seconds, scene: a.scene, seed: a.seed, vars: a.vars, playerAt: a.player_at, inputs: a.inputs, choices: a.choices, autoDialog: a.auto_dialog }).filter(([, v]) => v !== undefined)), expect };
+    return text(`Saved.\n${describeTest(ws.saveTest(normalizeTest(merged, a.name), AUTHOR))}`);
+  });
+
+  tool('delete_test', 'Delete a saved playtest.', { name: z.string() }, (a) => {
+    ws.removeTest(a.name);
+    return text(`Deleted test ${a.name}.`);
+  }, { destructiveHint: true });
+
+  tool('run_tests', 'Run the saved playtests (all, or the ones named) and report which passed; a failed one comes with its last log lines and a screenshot of how it ended. Run them after changing maps, scripts or the story.', { names: z.array(z.string()).optional() }, async (a) => {
+    const run = await runTests(ws, a.names);
+    return [...text(formatTestRun(run.outcomes)), ...run.failed.slice(0, 3).map((f) => image(renderViewport(f.world, run.loaded.sheets, 2)))];
+  }, { readOnlyHint: true });
+
+  // ------------------------------------------------------------------ whole parts of a map
+
+  const tileRect = z.object({ x: z.number().int(), y: z.number().int(), w: z.number().int().min(1), h: z.number().int().min(1) });
+
+  tool('scatter_instances', 'Spread instances at random over a scene or a tile rectangle: trees, rocks, flowers. Deterministic for a seed. The group remembers how it was made, so scene_group regenerate can redo it.', {
+    scene: z.string(),
+    group: z.string().describe('Name of the group they join, e.g. "trees"'),
+    items: z.array(z.object({ object: z.string(), sprite: z.string().optional(), animation: z.string().optional(), weight: z.number().min(0).optional() })).min(1),
+    region: tileRect.optional().describe('In tiles; default the whole scene'),
+    count: z.number().int().min(1).optional(),
+    density: z.number().min(0).optional().describe('Per 100 tiles of the region (default 5)'),
+    min_distance: z.number().min(0).optional().describe('Pixels between bases (default one tile)'),
+    seed: z.number().int().optional(),
+    avoid_solid: z.boolean().optional().describe('Default true'),
+    on_tiles: z.object({ layer: z.string(), tiles: z.array(z.number().int()) }).optional().describe('Only on these tiles of a layer'),
+    flip: z.boolean().optional().describe('Mirror about half of them'),
+    replace: z.boolean().optional().describe('First delete the group as it is'),
+    preview: z.boolean().optional(),
+  }, (a) => {
+    const known = new Set(ws.loadGame().objects.map((o) => o.name));
+    for (const i of a.items) if (!known.has(i.object)) throw new Error(`No object type "${i.object}"`);
+    const recipe: ScatterRecipe = { items: a.items, ...(a.region ? { region: a.region } : {}), ...(a.count !== undefined ? { count: a.count } : {}), ...(a.density !== undefined ? { density: a.density } : {}), ...(a.min_distance !== undefined ? { minDistance: a.min_distance } : {}), seed: a.seed ?? Math.floor(Math.random() * 1e9), ...(a.avoid_solid === false ? { avoidSolid: false } : {}), ...(a.on_tiles ? { onTiles: a.on_tiles } : {}), ...(a.flip ? { flip: true } : {}) };
+    const { scene, result } = mutateScene(a.scene, (s) => {
+      if (a.replace) deleteGroup(s, a.group);
+      return scatterIntoGroup(s, a.group, recipe, instanceSizes(ws, s.tileSize));
+    });
+    const out: Content = text(`Placed ${result.length} instance(s) in group "${a.group}" (seed ${recipe.seed}).`);
+    if (a.preview) out.push(image(renderScenePreview(loadGameBundle(ws), scene.name, {}).png));
+    return out;
+  });
+
+  tool('scene_group', 'Work on a named group of instances: list the groups of a scene, regenerate one (redo its scatters, inside their areas), move it, rename it, delete it (with keep_instances only the name goes). Add to a group with place_instances or update_instances group.', {
+    scene: z.string(),
+    action: z.enum(['list', 'regenerate', 'move', 'rename', 'delete']),
+    group: z.string().optional(),
+    to: z.string().optional().describe('New name (rename)'),
+    dx: z.number().optional(),
+    dy: z.number().optional(),
+    seed: z.number().int().optional().describe('regenerate: a new layout; omit to keep the same one'),
+    keep_instances: z.boolean().optional(),
+  }, (a) => {
+    if (a.action === 'list') {
+      const list = listGroups(ws.loadScene(a.scene));
+      return text(list.map((g) => `${g.name}: ${g.count} instance(s)${g.scatters ? `, ${g.scatters} scatter(s)` : ''}`).join('\n') || 'No groups in this scene.');
+    }
+    const group = a.group;
+    if (!group) throw new Error('This action needs group');
+    let message = '';
+    mutateScene(a.scene, (s) => {
+      if (!listGroups(s).some((g) => g.name === group)) throw new Error(`No group "${group}" in ${a.scene}`);
+      if (a.action === 'regenerate') message = `Regenerated: ${regenerateGroup(s, group, instanceSizes(ws, s.tileSize), a.seed).length} instance(s).`;
+      if (a.action === 'delete') message = `Removed group "${group}" (${deleteGroup(s, group, a.keep_instances)} instance(s)${a.keep_instances ? ' kept' : ''}).`;
+      if (a.action === 'rename') {
+        if (!a.to) throw new Error('rename needs to');
+        renameGroup(s, group, a.to);
+        message = `Renamed to "${a.to}".`;
+      }
+      if (a.action === 'move') {
+        let n = 0;
+        for (const i of s.instances) if (i.group === group) {
+          i.x += a.dx ?? 0;
+          i.y += a.dy ?? 0;
+          n++;
+        }
+        message = `Moved ${n} instance(s).`;
+      }
+    });
+    return text(message);
+  });
+
+  tool('copy_scene_region', 'Copy a rectangle of a map (tiles of every layer and the instances inside) to another place in the same scene or into another one. Empty cells leave the destination as it is, unless overwrite. Instances get new ids.', {
+    scene: z.string(),
+    region: tileRect,
+    to_scene: z.string().optional().describe('Default: the same scene'),
+    x: z.number().int().describe('Destination tile column of the top-left corner'),
+    y: z.number().int(),
+    tiles: z.boolean().optional().describe('Default true'),
+    instances: z.boolean().optional().describe('Default true'),
+    layers: z.array(z.string()).optional(),
+    group: z.string().optional().describe('Group for the copied instances'),
+    overwrite: z.boolean().optional(),
+  }, (a) => {
+    const stamp = extractRegion(ws.loadScene(a.scene), a.region, { tiles: a.tiles, instances: a.instances, layers: a.layers });
+    const { result } = mutateScene(a.to_scene ?? a.scene, (s) => pasteRegion(s, stamp, a.x, a.y, { group: a.group, overwrite: a.overwrite }));
+    return text(`Copied ${result.tiles} tile(s) and ${result.instances.length} instance(s).`);
+  });
 
   tool('export_game', 'Export the game as a single self-contained index.html (plays offline, on any static host, or uploaded to itch.io as an HTML5 game). Default folder: <workspace>/export/web/<title>/.', { out_dir: z.string().optional() }, (a) => {
     const r = exportGame(ws, { outDir: a.out_dir });
     return text(`Exported ${r.file} (${(r.bytes / 1024).toFixed(1)} KB, ${r.scenes} scene(s), ${r.sprites} sprite(s)).${r.problems.length ? `\nProblems:\n${r.problems.map((p) => `- ${p.where}: ${p.message}`).join('\n')}` : ''}`);
   });
 
-  tool('undo_game_change', 'Undo your most recent game or scene changes made through this MCP server (settings, objects, events, tiles, instances).', { steps: z.number().int().min(1).optional() }, (a) => {
-    const steps = Math.min(a.steps ?? 1, history.length);
-    if (!steps) throw new Error('Nothing to undo');
-    const done: string[] = [];
-    for (let i = 0; i < steps; i++) {
-      const h = history.pop()!;
-      if (h.kind === 'game') {
-        if (h.json) ws.saveGame(normalizeGame(JSON.parse(h.json)), AUTHOR);
-        done.push('game');
-      } else {
-        if (h.json) ws.saveScene(normalizeScene(JSON.parse(h.json)), AUTHOR);
-        else if (ws.sceneExists(h.name)) ws.removeScene(h.name);
-        done.push(`scene ${h.name}`);
-      }
-    }
-    return text(`Undid ${steps} change(s): ${done.join(', ')}. ${history.length} more available.`);
+  tool('history', 'The shared history of the game: every change to settings, object types, scenes, data tables, effects, scripts and dialogues, made by you or by the person in the editor, newest first. Sprites have their own versions (versions, restore_version).', {
+    limit: z.number().int().min(1).max(400).optional().describe('Default 40'),
+    author: z.string().optional().describe('"claude" or "editor"'),
+    kind: z.enum(['game', 'scene', 'data', 'vfx', 'script', 'dialogue']).optional(),
+    name: z.string().optional().describe('Only this scene, table, script...'),
+  }, (a) => text(formatHistory(ws.history.list({ ...a, limit: a.limit ?? 40 }))), { readOnlyHint: true });
+
+  tool('undo_game_change', 'Undo changes from the shared history without losing what came after: id undoes that one change (yours or the editor\'s, see history); steps undoes your last changes. Parts edited again since then are kept and reported.', {
+    steps: z.number().int().min(1).optional().describe('How many of your own latest changes (default 1)'),
+    id: z.string().optional().describe('One change from history'),
+  }, (a) => {
+    const targets = a.id ? [a.id] : ws.history.list({ author: AUTHOR }).filter((e) => !e.undoneBy && !e.undoOf).slice(0, a.steps ?? 1).map((e) => e.id);
+    if (!targets.length) throw new Error('Nothing to undo');
+    const lines = targets.map((id) => {
+      const { entry, conflicts } = undoChange(ws, id, AUTHOR);
+      return `Undid ${entry.kind} ${entry.name}: ${entry.summary}${conflicts.length ? `\n  Kept because they changed again: ${conflicts.slice(0, 8).join(', ')}` : ''}`;
+    });
+    return text(lines.join('\n'));
   });
 
   const sign = { added: 'A', modified: 'M', deleted: 'D', renamed: 'R' } as const;
@@ -1498,11 +1663,4 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     await gitPull(ws.dir);
     return text('Up to date with the remote.');
   });
-
-  return {
-    /** Forget undo history (after switching projects). */
-    reset: () => {
-      history.length = 0;
-    },
-  };
 }

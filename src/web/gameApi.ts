@@ -4,6 +4,9 @@ import type { DataTable, GameProject, Scene, SpriteAsset, Value } from '../core/
 import type { Problem } from '../core/game/catalog.js';
 import type { VfxGraph } from '../core/game/vfxGraph.js';
 import type { ScriptInfo } from '../core/game/script.js';
+import type { Usage, UsageKind } from '../core/game/usages.js';
+import type { WorldMap } from '../core/game/worldMap.js';
+import type { GameTest, TestOutcome } from '../core/game/gameTests.js';
 import { apiBase } from './api.js';
 
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -46,6 +49,29 @@ export interface ProjectsResponse {
   defaultId: string;
   projects: ProjectInfo[];
   templates: { id: string; label: string; description: string }[];
+}
+
+export interface HistoryEntry {
+  id: string;
+  time: number;
+  author: string;
+  kind: 'game' | 'scene' | 'data' | 'vfx' | 'script' | 'dialogue';
+  name: string;
+  summary: string;
+  undoOf?: string;
+  undoneBy?: string;
+}
+
+export interface MapNote {
+  id: string;
+  scene: string;
+  x: number;
+  y: number;
+  text: string;
+  author: string;
+  time: number;
+  resolved?: boolean;
+  reply?: string;
 }
 
 export interface SceneSummary {
@@ -139,6 +165,20 @@ export const gameApi = {
   deleteTable: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/data/${enc(name)}`),
   renameTable: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/data/${enc(name)}/rename`, { to }),
   dialogueInfo: () => req<{ nodes: string[]; errors: { file: string; line: number; message: string }[] }>('GET', `${apiBase()}/dialogues/_info`),
+  usages: (kind: UsageKind, name: string) => req<Usage[]>('GET', `${apiBase()}/usages?kind=${kind}&name=${enc(name)}`),
+  world: () => req<{ world: WorldMap; problems: Problem[]; minimaps: Record<string, string> }>('GET', `${apiBase()}/world`),
+  postContext: (ctx: Record<string, unknown>) => req<{ ok: true }>('POST', `${apiBase()}/context`, ctx),
+  postPlayLog: (body: { lines: string[]; reset: boolean }) => req<{ ok: true }>('POST', `${apiBase()}/play-log`, body),
+  notes: () => req<MapNote[]>('GET', `${apiBase()}/notes`),
+  createNote: (note: { scene: string; x: number; y: number; text: string }) => req<MapNote>('POST', `${apiBase()}/notes`, note),
+  updateNote: (id: string, change: Partial<MapNote>) => req<MapNote>('PUT', `${apiBase()}/notes/${enc(id)}`, change),
+  deleteNote: (id: string) => req<{ ok: true }>('DELETE', `${apiBase()}/notes/${enc(id)}`),
+  listTests: () => req<GameTest[]>('GET', `${apiBase()}/tests`),
+  saveTest: (t: GameTest) => req<GameTest>('PUT', `${apiBase()}/tests/${enc(t.name)}`, t),
+  deleteTest: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/tests/${enc(name)}`),
+  runTests: (names?: string[]) => req<TestOutcome[]>('POST', `${apiBase()}/tests/_run`, names ? { names } : {}),
+  history: (author = '') => req<HistoryEntry[]>('GET', `${apiBase()}/history?limit=200${author ? `&author=${enc(author)}` : ''}`),
+  undoChange: (id: string) => req<{ entry: HistoryEntry; conflicts: string[] }>('POST', `${apiBase()}/history/${enc(id)}/undo`, {}),
   projects: () => req<ProjectsResponse>('GET', '/api/projects'),
   createProject: (name: string, template: string) => req<ProjectInfo>('POST', '/api/projects', { name, template }),
   openProject: (dir: string) => req<ProjectInfo>('POST', '/api/projects/open', { dir }),

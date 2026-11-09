@@ -104,7 +104,7 @@ self: Nice weather today!
  * Copies ready-made components (and the ones they need, e.g. Damage → Health) into scripts/<folder>/.
  * Components that already exist (same name, any folder) are left alone. Returns the created paths.
  */
-export function addLibraryComponents(ws: Workspace, names: string[]): { created: string[]; existing: string[] } {
+export function addLibraryComponents(ws: Workspace, names: string[], author = 'unknown'): { created: string[]; existing: string[] } {
   const have = new Set(ws.listScripts().map((s) => scriptBaseName(s.name)));
   const created: string[] = [];
   const existing: string[] = [];
@@ -117,7 +117,7 @@ export function addLibraryComponents(ws: Workspace, names: string[]): { created:
       return;
     }
     const path = `${c.folder}/${c.name}`;
-    ws.writeScript(path, c.code);
+    ws.writeScript(path, c.code, author);
     have.add(name);
     created.push(path);
   };

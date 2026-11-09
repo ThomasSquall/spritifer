@@ -19,6 +19,10 @@ import { renderData } from './dataView.js';
 import { renderVfx } from './vfxView.js';
 import { renderGit } from './gitView.js';
 import { currentProjectId } from './api.js';
+import { renderWorld } from './worldView.js';
+import { renderTests } from './testsView.js';
+import { renderHistory } from './historyView.js';
+import { setPageContext } from './editorContext.js';
 
 const root = document.getElementById('app')!;
 
@@ -27,7 +31,7 @@ let current: { editor: Editor; view: ReturnType<typeof mountEditor> } | null = n
 let sceneEd: SceneEditorHandle | null = null;
 /** Re-renders the current list page after remote changes. */
 let refreshPage: (() => void) | null = null;
-let page: 'sprites' | 'objects' | 'scenes' | 'scripts' | 'dialogues' | 'data' | 'vfx' | 'game' | 'git' | 'sprite' | 'scene' | 'projects' = 'sprites';
+let page: 'sprites' | 'objects' | 'scenes' | 'world' | 'scripts' | 'dialogues' | 'data' | 'vfx' | 'tests' | 'game' | 'history' | 'git' | 'sprite' | 'scene' | 'projects' = 'sprites';
 let scriptsPage: { refresh: () => void; destroy: () => void } | null = null;
 
 /** The previous in-app page, so "back" from the sprite editor returns where the user came from. */
@@ -63,6 +67,7 @@ async function route(): Promise<void> {
   if ((m = /^#\/edit\/(.+)$/.exec(hash))) {
     page = 'sprite';
     const name = decodeURIComponent(m[1]);
+    setPageContext('sprite', { sprite: name });
     try {
       const editor = new Editor(deserializeSprite(await api.get(name)));
       const view = mountEditor(root, editor, { onBack: () => go(/^#\/edit\//.test(prevHash) ? '#/' : prevHash), liveStatus: () => live });
@@ -92,21 +97,45 @@ async function route(): Promise<void> {
     toast(`Could not load the game project: ${(err as Error).message}`, 'error');
   }
 
+  if (hash === '#/world') {
+    page = 'world';
+    document.title = 'World · Spritifer';
+    setPageContext('world');
+    refreshPage = renderWorld(root);
+    return;
+  }
+  if (hash === '#/tests') {
+    page = 'tests';
+    document.title = 'Tests · Spritifer';
+    setPageContext('tests');
+    refreshPage = renderTests(root);
+    return;
+  }
+  if (hash === '#/history') {
+    page = 'history';
+    document.title = 'History · Spritifer';
+    setPageContext('history');
+    refreshPage = renderHistory(root);
+    return;
+  }
   if (hash === '#/git') {
     page = 'git';
     document.title = 'Git · Spritifer';
+    setPageContext('git');
     refreshPage = renderGit(root);
     return;
   }
   if (hash === '#/projects') {
     page = 'projects';
     document.title = 'Projects · Spritifer';
+    setPageContext('projects');
     refreshPage = renderProjects(root);
     return;
   }
   if ((m = /^#\/dialogues(?:\/(.+))?$/.exec(hash))) {
     page = 'dialogues';
     document.title = 'Dialogues · Spritifer';
+    setPageContext('dialogues', m[1] ? { dialogue: decodeURIComponent(m[1]) } : {});
     scriptsPage = renderDialogues(root, m[1] ? decodeURIComponent(m[1]) : null, (name) => go(name ? `#/dialogues/${encodeURIComponent(name)}` : '#/dialogues'));
     refreshPage = scriptsPage.refresh;
     return;
@@ -114,6 +143,7 @@ async function route(): Promise<void> {
   if ((m = /^#\/data(?:\/(.+))?$/.exec(hash))) {
     page = 'data';
     document.title = 'Data · Spritifer';
+    setPageContext('data', m[1] ? { table: decodeURIComponent(m[1]) } : {});
     scriptsPage = renderData(root, m[1] ? decodeURIComponent(m[1]) : null, (name) => go(name ? `#/data/${encodeURIComponent(name)}` : '#/data'));
     refreshPage = scriptsPage.refresh;
     return;
@@ -121,6 +151,7 @@ async function route(): Promise<void> {
   if ((m = /^#\/vfx(?:\/(.+))?$/.exec(hash))) {
     page = 'vfx';
     document.title = 'VFX · Spritifer';
+    setPageContext('vfx', m[1] ? { effect: decodeURIComponent(m[1]) } : {});
     scriptsPage = renderVfx(root, m[1] ? decodeURIComponent(m[1]) : null, (name) => go(name ? `#/vfx/${encodeURIComponent(name)}` : '#/vfx'));
     refreshPage = scriptsPage.refresh;
     return;
@@ -130,14 +161,16 @@ async function route(): Promise<void> {
     document.title = 'Scripts · Spritifer';
     // "#/scripts/<path>:<line>" opens the script at a line (links in errors).
     const target = m[1] ? /^(.*?)(?::(\d+))?$/.exec(decodeURIComponent(m[1]))! : null;
+    setPageContext('scripts', target ? { script: target[1] } : {});
     scriptsPage = renderScripts(root, target ? target[1] : null, (name) => go(name ? `#/scripts/${encodeURIComponent(name)}` : '#/scripts'), target?.[2] ? Number(target[2]) : undefined);
     refreshPage = scriptsPage.refresh;
     return;
   }
-  if ((m = /^#\/scene\/(.+)$/.exec(hash))) {
+  if ((m = /^#\/scene\/([^~]+)(?:~(.+))?$/.exec(hash))) {
     page = 'scene';
+    setPageContext('scene', { scene: decodeURIComponent(m[1]) });
     try {
-      sceneEd = await mountSceneEditor(root, decodeURIComponent(m[1]), () => go('#/scenes'));
+      sceneEd = await mountSceneEditor(root, decodeURIComponent(m[1]), () => go('#/scenes'), m[2] ? decodeURIComponent(m[2]) : undefined);
     } catch (err) {
       toast((err as Error).message, 'error');
       go('#/scenes');
@@ -148,23 +181,27 @@ async function route(): Promise<void> {
     page = 'objects';
     document.title = 'Objects · Spritifer';
     const sel = m[1] ? decodeURIComponent(m[1]) : (state.game?.objects[0]?.name ?? null);
+    setPageContext('objects', sel ? { object: sel } : {});
     refreshPage = renderObjects(root, sel, (name) => go(name ? `#/objects/${encodeURIComponent(name)}` : '#/objects'));
     return;
   }
   if (hash === '#/scenes') {
     page = 'scenes';
     document.title = 'Scenes · Spritifer';
+    setPageContext('scenes');
     refreshPage = renderScenes(root, (name) => go(`#/scene/${encodeURIComponent(name)}`));
     return;
   }
   if (hash === '#/game') {
     page = 'game';
     document.title = 'Game · Spritifer';
+    setPageContext('game');
     refreshPage = renderGameSettings(root);
     return;
   }
   page = 'sprites';
   document.title = 'Spritifer';
+  setPageContext('sprites');
   const refreshGallery = renderGallery(root, (name) => go(`#/edit/${encodeURIComponent(name)}`));
   const gallery = root.firstElementChild;
   const wrapper = document.createElement('div');
@@ -188,7 +225,7 @@ state.subscribe(() => {
 });
 
 async function onRemoteChange(e: ChangeEvent): Promise<void> {
-  const kind = e.type.replace('-changed', '') as 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data' | 'vfx';
+  const kind = e.type.replace('-changed', '') as 'sprite' | 'scene' | 'game' | 'script' | 'dialogue' | 'data' | 'vfx' | 'notes' | 'test';
   const fromSelf = e.updatedBy === 'editor';
   // Changes to other projects (e.g. Claude working elsewhere) only show a note.
   const mine = currentProjectId();
@@ -198,6 +235,16 @@ async function onRemoteChange(e: ChangeEvent): Promise<void> {
     return;
   }
   if (page === 'git') refreshSoon();
+  if (kind === 'notes') {
+    sceneEd?.notesChanged();
+    return;
+  }
+  if (kind === 'test') {
+    if (page === 'tests') refreshSoon();
+    return;
+  }
+  if (page === 'history' && kind !== 'sprite') refreshSoon();
+  if (page === 'world' && (kind === 'scene' || kind === 'game') && !fromSelf) refreshSoon();
   if (kind === 'data') {
     await state.remote('data', e.rev);
     if (page === 'data' && !fromSelf) refreshSoon();

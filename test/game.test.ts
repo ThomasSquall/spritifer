@@ -3,7 +3,8 @@ import { compile, checkExpr } from '../src/core/game/expr.js';
 import { World, emptyInput, runPlaytest } from '../src/core/game/engine.js';
 import { validateGame } from '../src/core/game/catalog.js';
 import { type GameBundle, type SpriteAsset, createGame, createScene, normalizeObject } from '../src/core/game/types.js';
-import { measureText, rasterText } from '../src/core/game/font.js';
+import { BUILTIN_FONT, PIXEL_OPERATOR, gameFont, measureText, rasterText } from '../src/core/game/font.js';
+import { wrapText } from '../src/core/game/script.js';
 
 const ctx = (vars: Record<string, number | string | boolean> = {}) => ({
   get: (p: string[]) => vars[p.join('.')],
@@ -71,6 +72,27 @@ describe('font', () => {
     let n = 0;
     rasterText('I', () => n++);
     expect(n).toBe(9);
+  });
+
+  it('draws Pixel Operator with real lowercase and accents', async () => {
+    const pixels = (t: string) => { const out: string[] = []; rasterText(t, (x, y) => out.push(`${x},${y}`), PIXEL_OPERATOR); return out.join(' '); };
+    expect(pixels('a')).not.toBe(pixels('A'));
+    expect(pixels('è')).not.toBe(pixels('e'));
+    expect(measureText('H', PIXEL_OPERATOR)).toEqual({ width: 3, height: 5 });
+    expect(measureText('a\nb', PIXEL_OPERATOR).height).toBe(12);
+  });
+
+  it('picks the game font only when it lands on whole pixels', async () => {
+    expect(gameFont({ font: 'pixel-operator', uiScale: 2 })).toBe(PIXEL_OPERATOR);
+    expect(gameFont({ font: 'pixel-operator', uiScale: 3 })).toBe(BUILTIN_FONT);
+    expect(gameFont({})).toBe(BUILTIN_FONT);
+  });
+
+  it('wraps proportional text by width', async () => {
+    const lines = wrapText('il il il il il mmmmmm', 30, PIXEL_OPERATOR);
+    expect(lines.length).toBeGreaterThan(1);
+    for (const l of lines) expect(measureText(l, PIXEL_OPERATOR).width).toBeLessThanOrEqual(30);
+    expect(wrapText('AB CD EF', 11)).toEqual(['AB', 'CD', 'EF']);
   });
 });
 

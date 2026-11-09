@@ -6,7 +6,7 @@
 
 import { ACTION_MAP, BEHAVIOR_MAP, CONDITION_MAP, TRIGGER_MAP, withDefaults } from './catalog.js';
 import { type ExprContext, MATH_FUNCTIONS, compile, fmt, parseTarget, toNum, truthy } from './expr.js';
-import { measureText } from './font.js';
+import { BUILTIN_FONT, type PixelFont, gameFont, measureText } from './font.js';
 import { type Behavior, type ComponentOverrides, type DataRow, type DataTable, type EventStep, type GameBundle, type GameEvent, type GameProject, type Hitbox, type Instance, type LightDef, type ObjectType, type Scene, type SpriteAsset, type Value, cellValue } from './types.js';
 import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, fieldsOf, scaledRenderer, wrapText } from './script.js';
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
@@ -15,6 +15,7 @@ import { ParticleSystem } from './particles.js';
 import { type VfxAnchor, type VfxPoint, VfxSystem } from './vfx.js';
 import { TileResolver, tilesetFrame } from './tilerules.js';
 import { type CastShape, MoteField, type ScreenLight, drawClouds, drawShadows, postProcess } from './atmosphere.js';
+import { type Walker, pushTarget, stepPush, swayBands, swayBase } from './wind.js';
 import type { ResolvedRelief } from './relief.js';
 
 export const STEP = 1 / 60;
@@ -109,7 +110,16 @@ export class Actor {
   onGround = false;
   destroyed = false;
   textOverride: string | null = null;
+  /** The game's font, for sizing text objects. */
+  font: PixelFont = BUILTIN_FONT;
   flashUntil = 0;
+  /** How far a walker has pushed this plant aside, and how fast it is moving back. */
+  swayPush = 0;
+  swayPushV = 0;
+  /** Where its feet were last, and when they last moved (plants only react to who is passing). */
+  footX = NaN;
+  footY = NaN;
+  movedAt = -Infinity;
   /** Light it gives off (object type's, or the instance's override). */
   light: LightDef | undefined;
   createdAt: number;
@@ -175,7 +185,7 @@ export class Actor {
       return this.flipX && this.asset ? { x: this.asset.width - hb.x - hb.w, y: hb.y, w: hb.w, h: hb.h } : hb;
     }
     if (!this.asset && this.type.text !== undefined) {
-      const m = measureText(this.textOverride ?? '');
+      const m = measureText(this.textOverride ?? '', this.font);
       const s = this.type.textSize ?? 1;
       return { x: 0, y: 0, w: Math.max(1, m.width * s), h: Math.max(1, m.height * s) };
     }
@@ -227,6 +237,7 @@ export interface SaveData extends SaveSummary {
 export type MusicCommand =
   | { type: 'play'; name: string; volume: number; loop: boolean; fade: number }
   | { type: 'stop'; fade: number }
+  | { type: 'ambience'; layers: { name: string; volume: number }[]; fade: number }
   | { type: 'volume'; channel: 'music' | 'sfx'; value: number };
 
 export interface QueryFilter {
@@ -287,6 +298,11 @@ export class World {
   private hitstopUntil = 0;
   /** Ambient floating particles of the scene atmosphere (own random: gameplay stays deterministic). */
   readonly motes = new MoteField();
+  readonly motes2 = new MoteField();
+  private motes2For: unknown = null;
+  /** The scene's own looping sounds (spatial ones are added to these), and what was last sent to the player. */
+  private ambienceBase: { name: string; volume: number }[] = [];
+  private ambienceSent = '[]';
   private resolvers = new Map<string, TileResolver>();
   /** Tile rules of a tileset (autotiling, textures, overlays). */
   tileResolver(tileset: string): TileResolver {
@@ -384,6 +400,68 @@ export class World {
     this.music = n;
     this.log(`music: ${n}`);
     this.opts.music?.({ type: 'play', name: n, volume: opts.volume ?? 0.6, loop: opts.loop !== false, fade: opts.fade ?? 1 });
+  }
+
+  /** The sounds that loop now, replacing the scene's ones: names or { sound, volume }. An empty list is silence. */
+  setAmbience(list: readonly (string | { sound: string; volume?: number })[], fade = 1.5): void {
+    this.ambienceBase = list.map((l) => (typeof l === 'string' ? { name: l, volume: 0.4 } : { name: l.sound, volume: l.volume ?? 0.4 }));
+    for (const l of this.ambienceBase) if (this.bundle.audio && !(l.name in this.bundle.audio)) throw new Error(`no audio "${l.name}" (import it in the Game tab, audio/ folder)`);
+    this.sendAmbience(fade);
+  }
+
+  /** Sends the loops to the player when something changed: the scene's, plus the nearby objects that sound. */
+  private sendAmbience(fade: number): void {
+    const levels = new Map(this.ambienceBase.map((l) => [l.name, l.volume]));
+    const cx = this.camera.x + this.viewWidth / 2;
+    const cy = this.camera.y + this.viewHeight / 2;
+    for (const a of this.actors) {
+      const s = a.type.ambientSound;
+      if (!s || a.destroyed || !a.visible) continue;
+      const near = 1 - Math.hypot(a.x - cx, a.y - cy) / (s.radius ?? 160);
+      if (near > 0) levels.set(s.sound, Math.max(levels.get(s.sound) ?? 0, (s.volume ?? 0.4) * near ** 1.5));
+    }
+    const layers = [...levels].filter(([name, volume]) => volume >= 0.01 && (!this.bundle.audio || name in this.bundle.audio)).map(([name, volume]) => ({ name, volume: Math.round(volume * 50) / 50 }));
+    const key = JSON.stringify(layers);
+    if (key === this.ambienceSent) return;
+    this.ambienceSent = key;
+    this.opts.music?.({ type: 'ambience', layers, fade });
+  }
+
+  /** Plants lean away from whoever is walking through them, then spring back. */
+  private stepFoliage(dt: number): void {
+    const plants: Actor[] = [];
+    const walkers: Walker[] = [];
+    const left = this.camera.x - 48;
+    const top = this.camera.y - 48;
+    const right = this.camera.x + this.viewWidth + 48;
+    const bottom = this.camera.y + this.viewHeight + 48;
+    for (const a of this.actors) {
+      if (a.destroyed || a.type.hud) continue;
+      if (a.type.sway?.react) {
+        if (a.x > left && a.x < right && a.y > top && a.y < bottom) plants.push(a);
+        continue;
+      }
+      // No contact shadow: rugs, decals and small flying things, which don't touch the plants.
+      if (a.type.shadow === 0 || !a.asset || a.type.sway) continue;
+      if (Number.isNaN(a.footX)) {
+        a.footX = a.x;
+        a.footY = a.y;
+        continue;
+      }
+      const vx = a.x - a.footX;
+      if (vx !== 0 || a.y !== a.footY) a.movedAt = this.clock;
+      a.footX = a.x;
+      a.footY = a.y;
+      if (this.clock - a.movedAt < 0.6) {
+        const b = a.box();
+        walkers.push({ x: b.x + b.w / 2, y: b.y + b.h, vx });
+      }
+    }
+    for (const p of plants) {
+      const b = p.box();
+      const target = p.visible ? pushTarget(b.x + b.w / 2, b.y + b.h, b.w / 2 + 9, p.type.sway!.react!, walkers) : 0;
+      if (target || p.swayPush || p.swayPushV) stepPush(p, target, dt);
+    }
   }
 
   stopMusic(fade = 1): void {
@@ -722,6 +800,7 @@ export class World {
     const spriteName = spriteOverride && this.bundle.sprites[spriteOverride] ? spriteOverride : type.sprite;
     const asset = spriteName ? this.bundle.sprites[spriteName] : undefined;
     const a = new Actor(this.nextId++, type, asset, x, y, this.time);
+    a.font = this.font;
     type.events.forEach((e, i) => {
       if (e.trigger.type === 'timer') a.timers.set(i, this.time + Math.max(0.01, toNum(e.trigger.seconds ?? 1)));
     });
@@ -746,6 +825,13 @@ export class World {
       } catch (err) {
         this.error(`scene ${this.scene.name} music`, err);
       }
+    }
+    // Unlike music, a place with no sounds of its own is quiet: the forest doesn't follow you indoors.
+    try {
+      this.setAmbience(this.scene.ambience ?? []);
+    } catch (err) {
+      this.ambienceBase = [];
+      this.error(`scene ${this.scene.name} ambience`, err);
     }
     // Create every component first (so awake() can find the others), then awake them: game, scene, instances.
     if (firstScene) this.gameComponents = this.makeComponents(this.game.components, 'game');
@@ -1017,6 +1103,14 @@ export class World {
       this.motes.reset(moteCfg);
     }
     this.motes.tick(dt, { x: this.camera.x, y: this.camera.y, w: this.viewWidth, h: this.viewHeight });
+    const mote2Cfg = this.scene.atmosphere?.motes2;
+    if (mote2Cfg !== this.motes2For) {
+      this.motes2For = mote2Cfg;
+      this.motes2.reset(mote2Cfg);
+    }
+    this.motes2.tick(dt, { x: this.camera.x, y: this.camera.y, w: this.viewWidth, h: this.viewHeight });
+    this.stepFoliage(dt);
+    if (this.frame % 6 === 0) this.sendAmbience(0.3);
 
     // Dialogs pause the game; the frame that closes one doesn't run gameplay either (the key press is used up).
     const confirm = input.pressed.has('action') || input.pressed.has('enter') || input.clicks.length > 0;
@@ -1217,6 +1311,17 @@ export class World {
   }
 
   /** Solid at a world point: a solid tile, or a solid instance (not jump-through ones). */
+  /** The tile at a world point on a tile layer, -1 for none or outside the map. */
+  tileAt(x: number, y: number, layer = 'ground'): number {
+    const l = this.scene.layers.find((o) => o.name === layer);
+    if (!l) return -1;
+    const ts = this.tileSize;
+    const tx = Math.floor(x / ts);
+    const ty = Math.floor(y / ts);
+    if (tx < 0 || ty < 0 || tx >= this.scene.cols || ty >= this.scene.rows) return -1;
+    return l.tiles[ty * this.scene.cols + tx] ?? -1;
+  }
+
   isSolidAt(x: number, y: number): boolean {
     const ts = this.tileSize;
     if (this.solidAtTile(Math.floor(x / ts), Math.floor(y / ts))) return true;
@@ -1799,6 +1904,11 @@ export class World {
         if (a.animLock === Infinity) a.animLock = 0;
       }
     }
+  }
+
+  /** The font every text of this game draws with. */
+  get font(): PixelFont {
+    return gameFont(this.game);
   }
 
   /** Canvas pixels per interface pixel. */
@@ -2412,7 +2522,7 @@ export interface Renderer {
   image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, opts: { flipX: boolean; opacity: number; angle: number; scale?: number; flat?: boolean }): void;
   /** blend "add" adds light instead of painting over (glows). */
   rect(x: number, y: number, w: number, h: number, color: string, alpha?: number, blend?: 'add'): void;
-  text(text: string, x: number, y: number, color: string, scale: number): void;
+  text(text: string, x: number, y: number, color: string, scale: number, font?: PixelFont): void;
   /** Multiplies the frame by the ambient color plus the lights, then adds their glow (scene atmosphere). */
   lighting?(ambient: string, lights: ScreenLight[], glow: number): void;
   /** Starts (or skips) recording sprite normals for this frame's reliefLighting. */
@@ -2427,8 +2537,8 @@ export interface Renderer {
   grade?(tint: string, amount: number): void;
   /** Darkens the screen edges. */
   vignette?(strength: number, color: string): void;
-  /** Draws a whole cast shadow in one go; `shape` is the same object for as long as the shadow doesn't change, so it can be kept ready. */
-  stamp?(shape: CastShape, x: number, y: number, zoom: number, color: string, alpha: number): void;
+  /** Draws a whole cast shadow in one go, or only some of its rows; `shape` is the same object for as long as the shadow doesn't change, so it can be kept ready. */
+  stamp?(shape: CastShape, x: number, y: number, zoom: number, color: string, alpha: number, slice?: { row: number; rows: number }): void;
 }
 
 /** A renderer that draws nothing (headless UI). */
@@ -2549,6 +2659,7 @@ export function renderWorld(w: World, r: Renderer): void {
   if (atm) {
     drawClouds(w, r, atm, camX, camY, zoom);
     w.motes.draw(r, camX, camY, zoom);
+    w.motes2.draw(r, camX, camY, zoom);
     postProcess(w, r, atm, camX, camY, zoom);
   }
   // After the lighting: a fireball in a dark cave glows instead of being darkened with the scene.
@@ -2564,7 +2675,7 @@ export function renderWorld(w: World, r: Renderer): void {
   w.scripts.draw(r, camX, camY, zoom);
 
   if (w.message && w.clock < w.message.until) {
-    const m = measureText(w.message.text);
+    const m = measureText(w.message.text, w.font);
     const s = m.width * 2 + 16 <= sw ? 2 : 1;
     const bw = m.width * s + 12;
     const bh = m.height * s + 12;
@@ -2573,7 +2684,7 @@ export function renderWorld(w: World, r: Renderer): void {
     screen.rect(bx, by, bw, bh, '#000000', 0.75);
     screen.rect(bx, by, bw, 1, '#ffffff', 0.5);
     screen.rect(bx, by + bh - 1, bw, 1, '#ffffff', 0.5);
-    screen.text(w.message.text, bx + 6, by + 6, '#ffffff', s);
+    screen.text(w.message.text, bx + 6, by + 6, '#ffffff', s, w.font);
   }
   const fa = w.fadeAlpha;
   if (fa > 0) r.rect(0, 0, vw, vh, w.fade.color, fa);
@@ -2589,9 +2700,10 @@ function drawDialog(w: World, r: Renderer): void {
   const portrait = d.portrait ? w.bundle.sprites[d.portrait] : undefined;
   const pad = 6;
   const pw = portrait ? Math.min(portrait.width, 48) + pad : 0;
-  const cols = Math.max(8, Math.floor((vw - 16 - pad * 2 - pw) / 4));
-  const lines = wrapText(d.text, cols);
-  const textH = Math.max(3, lines.length) * 6;
+  const font = w.font;
+  const lineH = font.lineHeight / font.density;
+  const lines = wrapText(d.text, Math.max(8, Math.floor((vw - 16 - pad * 2 - pw) / 4)) * 4 - 1, font);
+  const textH = Math.max(3, lines.length) * lineH;
   const bh = Math.max(textH, portrait ? Math.min(portrait.height, 48) : 0) + pad * 2;
   const bx = 6;
   const bw = vw - 12;
@@ -2609,27 +2721,27 @@ function drawDialog(w: World, r: Renderer): void {
     r.image(portrait.name, f.x, f.y, Math.min(f.w, 48), Math.min(f.h, 48), bx + pad, by + pad, { flipX: false, opacity: 1, angle: 0 });
   }
   if (d.speaker) {
-    const sw = d.speaker.length * 4 + 7;
+    const sw = measureText(d.speaker, font).width + 8;
     frame(bx + 4, by - 9, sw, 11);
-    r.text(d.speaker, bx + 8, by - 6, '#ffcd75', 1);
+    r.text(d.speaker, bx + 8, by - 6, '#ffcd75', 1, font);
   }
   let left = Math.floor(d.shown);
   lines.forEach((line, i) => {
     if (left <= 0) return;
     const part = line.slice(0, left);
     left -= line.length + 1;
-    r.text(part, bx + pad + pw, by + pad + i * 6, '#f4f4f4', 1);
+    r.text(part, bx + pad + pw, by + pad + i * lineH, '#f4f4f4', 1, font);
   });
   const done = d.shown >= d.text.length;
   if (done && d.choices) {
-    const cw = Math.max(...d.choices.map((c) => c.length)) * 4 + 18;
+    const cw = Math.max(...d.choices.map((c) => measureText(c, font).width)) + 19;
     const ch = d.choices.length * 8 + 8;
     const cx = vw - cw - 8;
     const cy = by - ch - (d.speaker ? 11 : 3);
     frame(cx, cy, cw, ch);
     d.choices.forEach((c, i) => {
-      if (i === d.selected) r.text('>', cx + 4, cy + 5 + i * 8, '#ffcd75', 1);
-      r.text(c, cx + 11, cy + 5 + i * 8, i === d.selected ? '#ffcd75' : '#f4f4f4', 1);
+      if (i === d.selected) r.text('>', cx + 4, cy + 5 + i * 8, '#ffcd75', 1, font);
+      r.text(c, cx + 11, cy + 5 + i * 8, i === d.selected ? '#ffcd75' : '#f4f4f4', 1, font);
     });
   } else if (done && Math.floor(w.clock * 3) % 2 === 0) {
     r.rect(bx + bw - 9, by + bh - 7, 3, 2, '#f4f4f4');
@@ -2646,14 +2758,19 @@ function drawActor(w: World, r: Renderer, a: Actor, camX: number, camY: number, 
   if (a.asset && a.asset.frames.length) {
     const f = a.asset.frames[a.frameIndex()] ?? a.asset.frames[0];
     if (x + f.w * zoom < -8 || y + f.h * zoom < -8 || x > w.game.width + 8 || y > w.game.height + 8) return;
-    r.image(a.asset.name, f.x, f.y, f.w, f.h, x, y, { flipX: a.flipX, opacity: a.opacity, angle: a.angle, ...(zoom !== 1 ? { scale: zoom } : {}) });
+    const opts = { flipX: a.flipX, opacity: a.opacity, angle: a.angle, ...(zoom !== 1 ? { scale: zoom } : {}) };
+    // Bands need whole screen rows to meet without a seam; a zoom tween in progress draws the plant still.
+    if (a.type.sway && !a.angle && Number.isInteger(zoom)) {
+      for (const b of swayBands(a.type.sway, f.h, swayBase(a.type, f.h), a.x, a.y, w.clock, a.swayPush)) r.image(a.asset.name, f.x, f.y + b.row, f.w, b.rows, x + b.offset * zoom, y + b.row * zoom, opts);
+    } else r.image(a.asset.name, f.x, f.y, f.w, f.h, x, y, opts);
   }
   if (a.type.text !== undefined && a.textOverride) {
     const s = Math.max(1, Math.round((a.type.textSize ?? 1) * zoom));
     const color = a.type.textColor ?? '#ffffff';
     // 1px drop shadow keeps HUD text readable on any background.
-    r.text(a.textOverride, x + s, y + s, '#000000', s);
-    r.text(a.textOverride, x, y, color, s);
+    const d = s / w.font.density;
+    r.text(a.textOverride, x + d, y + d, '#000000', s, w.font);
+    r.text(a.textOverride, x, y, color, s, w.font);
   }
 }
 

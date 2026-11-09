@@ -6,7 +6,8 @@
 
 import type { Renderer } from './engine.js';
 import { resolveRelief } from './relief.js';
-import type { Hitbox, LightDef, SceneAtmosphere, SceneMotes, SceneSun, SpriteAsset } from './types.js';
+import type { Hitbox, LightDef, ObjectSway, SceneAtmosphere, SceneMotes, SceneSun, SpriteAsset } from './types.js';
+import { type SwayBand, groupRows, swayBase, swayShift } from './wind.js';
 
 /** An instance as the atmosphere passes see it (the engine's Actor, or a placed instance in the scene editor). */
 export interface AtmosphereActor {
@@ -19,7 +20,7 @@ export interface AtmosphereActor {
   readonly destroyed: boolean;
   readonly light: LightDef | undefined;
   readonly asset: { width: number; height: number; name?: string; frames?: readonly { x: number; y: number; w: number; h: number }[] } | undefined;
-  readonly type: { hud?: boolean; shadow?: number; hitbox?: Hitbox; spriteOffset?: { x: number; y: number } };
+  readonly type: { hud?: boolean; shadow?: number; hitbox?: Hitbox; spriteOffset?: { x: number; y: number }; sway?: ObjectSway };
   /** Mirrored and on which frame: the shadow cast by the sun follows the drawing. */
   readonly flipX?: boolean;
   frameIndex?(): number;
@@ -100,6 +101,9 @@ export interface CastShape {
   readonly bottom: number;
   readonly width: number;
   readonly height: number;
+  /** The rows of `runs` that have something: first, and one past the last. */
+  readonly firstRow: number;
+  readonly endRow: number;
   readonly runs: readonly number[];
 }
 
@@ -140,11 +144,11 @@ function buildCastShape(mask: Uint8Array, fw: number, flip: boolean, dx: number,
       x = end;
     }
   }
-  return { reachX, reachY, bottom, width: W, height: H, runs };
+  return { reachX, reachY, bottom, width: W, height: H, firstRow: runs[1] ?? 0, endRow: (runs[runs.length - 2] ?? -1) + 1, runs };
 }
 
 /** The silhouette of an instance laid on the ground, away from the sun. Crisp, drawn once per pixel so it never doubles up. */
-function castShadow(r: Renderer, a: AtmosphereActor, sunKey: string, dx: number, dy: number, color: string, opacity: number, camX: number, camY: number, zoom: number, viewW: number, viewH: number): void {
+function castShadow(r: Renderer, a: AtmosphereActor, sunKey: string, dx: number, dy: number, color: string, opacity: number, camX: number, camY: number, zoom: number, viewW: number, viewH: number, clock: number): void {
   const asset = a.asset;
   if (!asset?.frames?.length || !asset.name || !r.spriteMask) return;
   const frame = a.frameIndex?.() ?? 0;
@@ -163,9 +167,26 @@ function castShadow(r: Renderer, a: AtmosphereActor, sunKey: string, dx: number,
   const left = Math.round((a.x + (a.type.spriteOffset?.x ?? 0) - shape.reachX - camX) * zoom);
   const top = Math.round((a.y + (a.type.spriteOffset?.y ?? 0) + shape.bottom - shape.reachY - camY) * zoom);
   if (left + shape.width * zoom < 0 || left > viewW || top + shape.height * zoom < 0 || top > viewH) return;
-  if (r.stamp) return r.stamp(shape, left, top, zoom, color, opacity);
+  // Wind: each row of ground is the shadow of one height of the plant, so it moves as that row of the sprite does.
+  // With the sun exactly at the side every height falls on the same rows, and there is nothing to separate.
+  let bands: SwayBand[] | undefined;
+  if (a.type.sway && Math.abs(dy) >= 0.05 && Number.isInteger(zoom)) {
+    const shift = swayShift(a.type.sway, swayBase(a.type, f.h), a.x, a.y, clock);
+    const { bottom, reachY } = shape;
+    bands = groupRows(shape.firstRow, shape.endRow, (row) => shift(Math.round(bottom - (row - reachY) / dy)));
+  }
+  if (r.stamp) {
+    if (!bands) return r.stamp(shape, left, top, zoom, color, opacity);
+    for (const b of bands) r.stamp(shape, left + b.offset * zoom, top, zoom, color, opacity, b);
+    return;
+  }
   const runs = shape.runs;
-  for (let i = 0; i < runs.length; i += 3) r.rect(left + runs[i]! * zoom, top + runs[i + 1]! * zoom, runs[i + 2]! * zoom, zoom, color, opacity);
+  for (const b of bands ?? [{ row: shape.firstRow, rows: shape.endRow - shape.firstRow, offset: 0 }]) {
+    for (let i = 0; i < runs.length; i += 3) {
+      const y = runs[i + 1]!;
+      if (y >= b.row && y < b.row + b.rows) r.rect(left + (runs[i]! + b.offset) * zoom, top + y * zoom, runs[i + 2]! * zoom, zoom, color, opacity);
+    }
+  }
 }
 
 /** Is this instance (plus `margin` world pixels around it) off the screen? Cheap enough to ask before anything else. */
@@ -198,7 +219,7 @@ export function drawShadows(w: AtmosphereWorld, r: Renderer, atm: SceneAtmospher
       if (a.destroyed || !a.visible || a.type.hud || !a.asset || a.opacity <= 0 || a.type.shadow === 0 || a.z < 0) continue;
       // A shadow reaches at most as far as the sprite is tall, times the length of the shadow.
       if (offView(a, camX, camY, zoom, viewW, viewH, a.asset.height * 1.6 + 2)) continue;
-      castShadow(r, a, sunKey, dx, dy, color, opacity, camX, camY, zoom, viewW, viewH);
+      castShadow(r, a, sunKey, dx, dy, color, opacity, camX, camY, zoom, viewW, viewH, w.clock);
     }
   }
   for (const a of w.actors) {

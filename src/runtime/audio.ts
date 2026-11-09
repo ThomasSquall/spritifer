@@ -29,13 +29,21 @@ const SFX: Record<string, Sfx> = {
 };
 
 export interface MusicCmd {
-  type: 'play' | 'stop' | 'volume';
+  type: 'play' | 'stop' | 'volume' | 'ambience';
   name?: string;
   volume?: number;
   loop?: boolean;
   fade?: number;
   channel?: 'music' | 'sfx';
   value?: number;
+  /** Ambience: every loop that should be sounding now, with its volume. */
+  layers?: { name: string; volume: number }[];
+}
+
+interface AmbienceLoop {
+  src: AudioBufferSourceNode | null;
+  gain: GainNode | null;
+  volume: number;
 }
 
 export class SoundBoard {
@@ -55,6 +63,9 @@ export class SoundBoard {
   private track: { name: string; src: AudioBufferSourceNode | null; gain: GainNode | null; volume: number } | null = null;
   /** Music asked for before audio was unlocked (first key or click): starts then. */
   private pendingMusic: MusicCmd | null = null;
+  /** Looping background sounds by name. */
+  private loops = new Map<string, AmbienceLoop>();
+  private pendingAmbience: MusicCmd | null = null;
 
   get musicMuted(): boolean {
     return this.musicOff;
@@ -125,6 +136,11 @@ export class SoundBoard {
       if (g && this.ctx) g.gain.setTargetAtTime(cmd.channel === 'music' ? this.musicLevel() : v, this.ctx.currentTime, 0.05);
       return;
     }
+    if (cmd.type === 'ambience') {
+      if (this.ctx) this.ambience(cmd.layers ?? [], Math.max(0.05, cmd.fade ?? 1));
+      else this.pendingAmbience = cmd;
+      return;
+    }
     const ctx = this.ctx;
     if (!ctx) {
       this.pendingMusic = cmd.type === 'play' ? cmd : null;
@@ -157,6 +173,51 @@ export class SoundBoard {
     });
   }
 
+  /** Makes the loops match the list: new ones fade in, missing ones fade out, the others glide to their volume. */
+  private ambience(layers: { name: string; volume: number }[], fade: number): void {
+    const ctx = this.ctx!;
+    const now = ctx.currentTime;
+    const wanted = new Map(layers.map((l) => [l.name, l.volume]));
+    for (const [name, loop] of this.loops) {
+      if (wanted.has(name)) continue;
+      this.loops.delete(name);
+      loop.volume = 0;
+      if (!loop.gain) continue;
+      loop.gain.gain.cancelScheduledValues(now);
+      loop.gain.gain.setTargetAtTime(0, now, fade / 3);
+      loop.src?.stop(now + fade * 1.5);
+    }
+    for (const [name, volume] of wanted) {
+      const known = this.loops.get(name);
+      if (known) {
+        if (known.volume === volume) continue;
+        known.volume = volume;
+        if (known.gain) {
+          known.gain.gain.cancelScheduledValues(now);
+          known.gain.gain.setTargetAtTime(volume, now, fade / 3);
+        }
+        continue;
+      }
+      const loop: AmbienceLoop = { src: null, gain: null, volume };
+      this.loops.set(name, loop);
+      void this.buffer(name).then((buf) => {
+        // It may have been dropped while the file was decoding.
+        if (!buf || !this.ctx || this.loops.get(name) !== loop) return;
+        const src = this.ctx.createBufferSource();
+        src.buffer = buf;
+        src.loop = true;
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0, this.ctx.currentTime);
+        gain.gain.setTargetAtTime(loop.volume, this.ctx.currentTime, fade / 3);
+        src.connect(gain).connect(this.out('sfx'));
+        // Started at a random point: two loops of the same length never line up the same way twice.
+        src.start(0, Math.random() * buf.duration);
+        loop.src = src;
+        loop.gain = gain;
+      });
+    }
+  }
+
   /** Must be called from a user gesture before sounds can play in most browsers. */
   unlock(): void {
     if (this.ctx) {
@@ -175,6 +236,11 @@ export class SoundBoard {
     if (this.pendingMusic) {
       const m = this.pendingMusic;
       this.pendingMusic = null;
+      this.music(m);
+    }
+    if (this.pendingAmbience) {
+      const m = this.pendingAmbience;
+      this.pendingAmbience = null;
       this.music(m);
     }
   }

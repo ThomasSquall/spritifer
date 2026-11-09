@@ -1,6 +1,7 @@
 /** Scene editor: paint tile layers, place and move instances, edit scene settings and events. */
 
 import { TileResolver, type TilesetRules, tilesetFrame } from '../core/game/tilerules.js';
+import { swayBands, swayBase } from '../core/game/wind.js';
 import { type AtmosphereActor, type AtmosphereWorld, MoteField, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
 import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
 import { CanvasRenderer } from '../runtime/canvasRenderer.js';
@@ -257,6 +258,9 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const PREVIEW_KEY = 'spritifer.sceneGameLook';
   let showGameLook = (() => { try { return localStorage.getItem(PREVIEW_KEY) !== '0'; } catch { return true; } })();
   const motes = new MoteField();
+  const motes2 = new MoteField();
+  let motes2Cfg: SceneMotes | undefined;
+  let motes2Key = '';
   let motesCfg: SceneMotes | undefined;
   let motesKey = '';
   let lastTick = performance.now();
@@ -299,7 +303,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     };
   });
   // Not behind the Play overlay: the game runs on the same thread, and this redraws every light at full size.
-  const animating = () => showGameLook && !isPlaying() && !!(scene.atmosphere || (tileset && tileset.frames.length > 1));
+  const animating = () => showGameLook && !isPlaying() && !!(scene.atmosphere || (tileset && tileset.frames.length > 1) || state.game?.objects.some((o) => o.sway));
   const stopWatchingPlay = onPlayChange(() => {
     if (animating() && !raf && canvas.isConnected) raf = requestAnimationFrame(loop);
   });
@@ -431,14 +435,19 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         if (fr) {
           const drawX = inst.x + (obj?.spriteOffset?.x ?? 0);
           const drawY = inst.y + (obj?.spriteOffset?.y ?? 0);
-          relief?.r.captureNormals(fr.a.name, fr.f.x, fr.f.y, fr.f.w, fr.f.h, drawX - view.x, drawY - view.y, { flipX: !!inst.flipX, opacity: 1 });
-          if (inst.flipX) {
-            ctx.save();
-            ctx.translate(drawX + fr.f.w, drawY);
-            ctx.scale(-1, 1);
-            ctx.drawImage(fr.a.img, fr.f.x, fr.f.y, fr.f.w, fr.f.h, 0, 0, fr.f.w, fr.f.h);
-            ctx.restore();
-          } else ctx.drawImage(fr.a.img, fr.f.x, fr.f.y, fr.f.w, fr.f.h, drawX, drawY, fr.f.w, fr.f.h);
+          // In the game look the wind moves plants as in Play; a whole sprite is one band that stays still.
+          const bands = look && obj?.sway ? swayBands(obj.sway, fr.f.h, swayBase(obj, fr.f.h), inst.x, inst.y, clock) : [{ row: 0, rows: fr.f.h, offset: 0 }];
+          for (const b of bands) {
+            const bandX = drawX + b.offset;
+            relief?.r.captureNormals(fr.a.name, fr.f.x, fr.f.y + b.row, fr.f.w, b.rows, bandX - view.x, drawY + b.row - view.y, { flipX: !!inst.flipX, opacity: 1 });
+            if (inst.flipX) {
+              ctx.save();
+              ctx.translate(bandX + fr.f.w, drawY);
+              ctx.scale(-1, 1);
+              ctx.drawImage(fr.a.img, fr.f.x, fr.f.y + b.row, fr.f.w, b.rows, 0, b.row, fr.f.w, b.rows);
+              ctx.restore();
+            } else ctx.drawImage(fr.a.img, fr.f.x, fr.f.y + b.row, fr.f.w, b.rows, bandX, drawY + b.row, fr.f.w, b.rows);
+          }
         } else if (obj?.text !== undefined) {
           const r = previewText(obj.text, obj, scene.variables);
           if (r.error) {
@@ -476,6 +485,14 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         motesCfg.count = Math.min(400, Math.round((atm.motes.count ?? 24) * screens));
       }
       motes.tick(Math.min(0.1, (now - lastTick) / 1000), view);
+      const key2 = JSON.stringify(atm.motes2 ?? null);
+      if (key2 !== motes2Key) {
+        motes2Key = key2;
+        motes2Cfg = atm.motes2 ? { ...atm.motes2 } : undefined;
+        motes2.reset(motes2Cfg);
+      }
+      if (motes2Cfg && atm.motes2) motes2Cfg.count = Math.min(400, Math.round((atm.motes2.count ?? 24) * (view.w * view.h) / Math.max(1, state.game!.width * state.game!.height)));
+      motes2.tick(Math.min(0.1, (now - lastTick) / 1000), view);
       ctx.save();
       ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, (panX + view.x * zoom) * dpr, (panY + view.y * zoom) * dpr);
       ctx.beginPath();
@@ -483,6 +500,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       ctx.clip();
       drawClouds(world, r, atm, view.x, view.y, 1);
       motes.draw(r, view.x, view.y, 1);
+      motes2.draw(r, view.x, view.y, 1);
       if (relief) {
         // The picture so far, at game resolution; lit there and painted back at the editor's zoom.
         relief.g.imageSmoothingEnabled = false;
@@ -1299,6 +1317,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
           h('option', { value: '-', selected: scene.music === '-' }, '— silence —'),
           ...state.audio.map((a) => h('option', { value: a, selected: scene.music === a }, a)),
           ...(scene.music && scene.music !== '-' && !state.audio.includes(scene.music) ? [h('option', { value: scene.music, selected: true }, `${scene.music} (missing)`)] : []))),
+        ambienceCard(),
         h('label', { class: 'inline', title: 'Instances lower on screen are drawn in front: depth for top-down games and RPGs' },
           h('input', { type: 'checkbox', checked: !!scene.ySort, onchange: (e: Event) => { snapshot(); if ((e.target as HTMLInputElement).checked) scene.ySort = true; else delete scene.ySort; changed(); } }),
           'Sort by Y (top-down depth)'),
@@ -1325,6 +1344,27 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   }
 
   /** Parallax background images, back to front (same fields as update_scene backgrounds). */
+  /** The sounds that loop while the scene lasts: wind, crickets, dripping. */
+  function ambienceCard(): HTMLElement {
+    const list = scene.ambience ?? [];
+    const box = h('div', { class: 'bg-list' }, h('div', { class: 'small', title: 'Sounds that loop while this scene lasts, fading across scene changes. Heard in Play' }, 'Ambient sounds'));
+    const save = () => {
+      if (list.length) scene.ambience = list;
+      else delete scene.ambience;
+      changed();
+      renderSettings();
+    };
+    list.forEach((l, i) => {
+      const sel = h('select', { onchange: () => { snapshot(); l.sound = sel.value; save(); } },
+        ...state.audio.map((a) => h('option', { value: a, selected: a === l.sound }, a)),
+        ...(!state.audio.includes(l.sound) ? [h('option', { value: l.sound, selected: true }, `${l.sound} (missing)`)] : []));
+      const vol = h('input', { type: 'number', class: 'num', min: '0', max: '1', step: '0.05', title: 'Volume, 0..1', value: String(l.volume ?? 0.4), onchange: () => { snapshot(); l.volume = Math.max(0, Math.min(1, Number(vol.value) || 0)); save(); } });
+      box.append(h('div', { class: 'prop-row' }, sel, vol, iconButton('close', 'Remove', () => { snapshot(); list.splice(i, 1); save(); }, { class: 'icon-btn tiny' })));
+    });
+    if (state.audio.length) box.append(h('button', { class: 'small', onclick: () => { snapshot(); list.push({ sound: state.audio[0]!, volume: 0.4 }); save(); } }, 'Add ambient sound'));
+    return box;
+  }
+
   function backgroundsCard(): HTMLElement {
     const box = h('div', { class: 'bg-list' });
     const list = scene.backgrounds;

@@ -5,7 +5,7 @@
 
 import type { Renderer } from '../core/game/engine.js';
 import type { CastShape, ScreenLight } from '../core/game/atmosphere.js';
-import { rasterText } from '../core/game/font.js';
+import { BUILTIN_FONT, type PixelFont, fontPixelSize, rasterText, textBitmapSize } from '../core/game/font.js';
 import { type ResolvedRelief, frameMask, normalSheetFor, reliefKind, shadeRelief } from '../core/game/relief.js';
 import type { SpriteAsset } from '../core/game/types.js';
 
@@ -247,7 +247,7 @@ export class CanvasRenderer implements Renderer {
   private stamps = new WeakMap<CastShape, { color: string; canvas: HTMLCanvasElement }>();
 
   /** A cast shadow is painted once on its own canvas, then drawn with one call instead of one rectangle per row. */
-  stamp(shape: CastShape, x: number, y: number, zoom: number, color: string, alpha: number): void {
+  stamp(shape: CastShape, x: number, y: number, zoom: number, color: string, alpha: number, slice?: { row: number; rows: number }): void {
     let entry = this.stamps.get(shape);
     if (!entry || entry.color !== color) {
       const canvas = document.createElement('canvas');
@@ -260,25 +260,28 @@ export class CanvasRenderer implements Renderer {
     }
     const c = this.ctx;
     c.globalAlpha = alpha;
-    c.drawImage(entry.canvas, x, y, shape.width * zoom, shape.height * zoom);
+    const row = slice?.row ?? 0;
+    const rows = slice?.rows ?? shape.height;
+    c.drawImage(entry.canvas, 0, row, shape.width, rows, x, y + row * zoom, shape.width * zoom, rows * zoom);
     c.globalAlpha = 1;
   }
 
-  text(text: string, x: number, y: number, color: string, scale: number): void {
-    const key = color + '\u0000' + text;
+  text(text: string, x: number, y: number, color: string, scale: number, font: PixelFont = BUILTIN_FONT): void {
+    const key = font.id + '\u0000' + color + '\u0000' + text;
+    const size = textBitmapSize(text, font);
     let cv = this.textCache.get(key);
     if (!cv) {
       cv = document.createElement('canvas');
-      const lines = text.split('\n');
-      cv.width = Math.max(1, Math.max(...lines.map((l) => [...l].length)) * 4);
-      cv.height = Math.max(1, lines.length * 6);
+      cv.width = size.width;
+      cv.height = size.height;
       const g = cv.getContext('2d')!;
       g.fillStyle = color;
-      rasterText(text, (px, py) => g.fillRect(px, py, 1, 1));
+      rasterText(text, (px, py) => g.fillRect(px, py + size.top, 1, 1), font);
       if (this.textCache.size > 400) this.textCache.clear();
       this.textCache.set(key, cv);
     }
-    this.ctx.drawImage(cv, Math.round(x), Math.round(y), cv.width * scale, cv.height * scale);
+    const p = fontPixelSize(font, scale);
+    this.ctx.drawImage(cv, Math.round(x), Math.round(y) - size.top * p, cv.width * p, cv.height * p);
   }
 }
 

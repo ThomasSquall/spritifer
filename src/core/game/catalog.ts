@@ -4,6 +4,7 @@
  */
 
 import { checkExpr } from './expr.js';
+import { FONTS, fontFits } from './font.js';
 import type { Behavior, DataTable, EventStep, GameEvent, GameProject, Scene, Value } from './types.js';
 import { resolveObjectTypes } from './variants.js';
 import { type VfxGraph, checkVfx } from './vfxGraph.js';
@@ -308,6 +309,8 @@ function checkEvents(where: string, events: GameEvent[], ctx: { objects: Set<str
 /** Static checks: unknown types, bad expressions, missing objects/scenes/sprites. */
 export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<string>, scripts?: ScriptShape, dialogues?: { nodes: string[]; errors: { file: string; line: number; message: string }[] }, audio?: string[], tables?: Record<string, DataTable>, vfx?: { graphs: Record<string, VfxGraph>; sprites: Map<string, string[]> }): Problem[] {
   const out: Problem[] = [];
+  const font = FONTS.find((f) => f.id === game.font);
+  if (font && !fontFits(font, game.uiScale)) out.push({ where: 'game', message: `the font "${font.label}" needs a UI scale that is a multiple of ${font.density}: the built-in font is used instead` });
   for (const g of Object.values(vfx?.graphs ?? {})) for (const message of checkVfx(g, { sprites: vfx?.sprites, sounds: [...SOUNDS, ...(audio ?? [])] })) out.push({ where: `effect ${g.name}`, message });
   // db("table", ...) in an expression must name a table.
   const checkDb = (where: string, src: string) => {
@@ -388,11 +391,13 @@ export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<st
       if (err) out.push({ where: `object ${o.name}.text`, message: err });
     }
     for (const b of o.behaviors) if (b.type === 'dialogue' && b.dialogue && dialogues && !dialogues.nodes.includes(String(b.dialogue))) out.push({ where: `object ${o.name} behavior Talks`, message: `no dialogue "${b.dialogue}"` });
+    if (o.ambientSound && audio && !audio.includes(o.ambientSound.sound)) out.push({ where: `object ${o.name}`, message: `ambient sound "${o.ambientSound.sound}" not found in audio/` });
     checkEvents(`object ${o.name}`, o.events, { objects, scenes: sceneNames, object: true, functions: scripts?.functions, dialogues: dialogues?.nodes, components: compNames, audio, actions: Object.keys(game.actions ?? {}), ...(vfx ? { vfx: Object.keys(vfx.graphs) } : {}) }, out);
   }
   for (const s of scenes) {
     if (s.tileset && !sprites.has(s.tileset)) out.push({ where: `scene ${s.name}`, message: `tileset sprite "${s.tileset}" not found` });
     if (s.music && s.music !== '-' && audio && !audio.includes(s.music)) out.push({ where: `scene ${s.name}`, message: `music "${s.music}" not found in audio/` });
+    for (const l of s.ambience ?? []) if (audio && !audio.includes(l.sound)) out.push({ where: `scene ${s.name}`, message: `ambience "${l.sound}" not found in audio/` });
     for (const b of s.backgrounds) if (!sprites.has(b.sprite)) out.push({ where: `scene ${s.name} background`, message: `sprite "${b.sprite}" not found` });
     const missing = new Set(s.instances.filter((i) => !objects.has(i.object)).map((i) => i.object));
     for (const m of missing) out.push({ where: `scene ${s.name}`, message: `instances of unknown object "${m}"` });

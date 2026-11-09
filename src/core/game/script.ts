@@ -14,7 +14,7 @@
  */
 
 import type { Actor, Renderer, World } from './engine.js';
-import { CELL_H, CELL_W, measureText } from './font.js';
+import { BUILTIN_FONT, CELL_H, CELL_W, type PixelFont, measureText } from './font.js';
 import { resolveImport, scriptBaseName, transformModule } from './modules.js';
 import { BEHAVIOUR_RESERVED, type ComponentParamType, LIFECYCLE_NAMES, PARAM_TYPES } from './scriptApi.js';
 import type { Value } from './types.js';
@@ -31,7 +31,7 @@ export function scaledRenderer(r: Renderer, k: number): Renderer {
     clear: (color) => r.clear(color),
     image: (sprite, sx, sy, sw, sh, dx, dy, o) => r.image(sprite, sx, sy, sw, sh, dx * k, dy * k, { ...o, scale: (o.scale ?? 1) * k }),
     rect: (x, y, w, h, color, alpha, blend) => r.rect(x * k, y * k, w * k, h * k, color, alpha, blend),
-    text: (text, x, y, color, scale) => r.text(text, x * k, y * k, color, scale * k),
+    text: (text, x, y, color, scale, font) => r.text(text, x * k, y * k, color, scale * k, font),
   };
 }
 
@@ -484,21 +484,24 @@ export interface MenuOptions {
 }
 
 /** Wraps lines to `maxCols` characters (the pixel font is monospaced). */
-export function wrapText(text: string, maxCols: number): string[] {
+export function wrapText(text: string, maxWidth: number, font: PixelFont = BUILTIN_FONT): string[] {
+  const fits = (s: string) => measureText(s, font).width <= maxWidth;
   const out: string[] = [];
   for (const para of text.split('\n')) {
     let line = '';
     for (const word of para.split(/\s+/)) {
       if (!word) continue;
       if (!line) line = word;
-      else if (line.length + 1 + word.length <= maxCols) line += ' ' + word;
+      else if (fits(line + ' ' + word)) line += ' ' + word;
       else {
         out.push(line);
         line = word;
       }
-      while (line.length > maxCols) {
-        out.push(line.slice(0, maxCols));
-        line = line.slice(maxCols);
+      while (!fits(line) && line.length > 1) {
+        let n = 1;
+        while (n < line.length && fits(line.slice(0, n + 1))) n++;
+        out.push(line.slice(0, n));
+        line = line.slice(n);
       }
     }
     out.push(line);
@@ -1133,6 +1136,7 @@ export class ScriptHost {
           case 'alive': return !a.destroyed;
           case 'width': return a.box().w;
           case 'height': return a.box().h;
+          case 'spriteName': return a.asset?.name ?? '';
           case 'centerX': { const b = a.box(); return b.x + b.w / 2; }
           case 'centerY': { const b = a.box(); return b.y + b.h / 2; }
           case 'tags': return [...a.tags];
@@ -1360,10 +1364,11 @@ export class ScriptHost {
       text: (text, x, y, o = {}) => {
         const s = Math.max(1, Math.round(o.size ?? 1));
         const t = String(text);
-        const m = measureText(t);
+        const m = measureText(t, w.font);
         const ox = o.align === 'center' ? -Math.round((m.width * s) / 2) : o.align === 'right' ? -m.width * s : 0;
-        if (o.shadow !== false) r.text(t, x + ox + s, y + s, '#000000', s);
-        r.text(t, x + ox, y, o.color ?? '#ffffff', s);
+        const d = s / w.font.density;
+        if (o.shadow !== false) r.text(t, x + ox + d, y + d, '#000000', s, w.font);
+        r.text(t, x + ox, y, o.color ?? '#ffffff', s, w.font);
       },
       rect: (x, y, ww, hh, color, alpha = 1) => r.rect(Math.round(x), Math.round(y), Math.round(ww), Math.round(hh), color, alpha),
       panel: (x, y, ww, hh, o = {}) => {
@@ -1397,7 +1402,7 @@ export class ScriptHost {
         r.image(name, f.x, f.y, f.w, f.h, Math.round(x), Math.round(y), { flipX: !!o.flipX, opacity: o.opacity ?? 1, angle: 0, scale: spriteScale(o.scale ?? 1, k) });
       },
       measure: (text, size = 1) => {
-        const m = measureText(String(text));
+        const m = measureText(String(text), w.font);
         return { width: m.width * size, height: m.height * size };
       },
       toScreen: (x, y) => ({ x: Math.round(((x - camX) * zoom) / k), y: Math.round(((y - camY) * zoom) / k) }),
@@ -1422,7 +1427,7 @@ export class ScriptHost {
       },
       button: (label, x, y, o = {}) => {
         const t = String(label);
-        const m = measureText(t);
+        const m = measureText(t, w.font);
         const ww = o.w ?? m.width + 10;
         const hh = o.h ?? 11;
         const hot = !o.disabled && hover(x, y, ww, hh);
@@ -1441,7 +1446,7 @@ export class ScriptHost {
         if (!list.length) return null;
         const rh = o.rowHeight ?? 9;
         const top = o.title ? 12 : 4;
-        const ww = o.w ?? Math.max(...list.map((it) => measureText(it.label).width + (it.right ? measureText(it.right).width + 8 : 0))) + 22;
+        const ww = o.w ?? Math.max(...list.map((it) => measureText(it.label, w.font).width + (it.right ? measureText(it.right, w.font).width + 8 : 0))) + 22;
         const hh = top + list.length * rh + 3;
         let sel = Math.max(0, Math.min(list.length - 1, this.menus.get(String(id)) ?? 0));
         const enabled = (i: number) => !list[i].disabled;
@@ -1618,6 +1623,7 @@ export class ScriptHost {
       // tags and physics queries
       findWithTag: (tag: string) => w.actors.filter((a) => !a.destroyed && a.tags.has(String(tag))).map((a) => this.handle(a)),
       isSolidAt: (x: number, y: number) => w.isSolidAt(Number(x), Number(y)),
+      tileAt: (x: number, y: number, layer?: string) => w.tileAt(Number(x), Number(y), layer === undefined ? undefined : String(layer)),
       overlapBox: (x: number, y: number, ww: number, hh: number, f?: unknown) => w.overlapRect({ x: Number(x), y: Number(y), w: Number(ww), h: Number(hh) }, this.filter(f)).map((a) => this.handle(a)),
       overlapCircle: (x: number, y: number, r: number, f?: unknown) => w.overlapCircle(Number(x), Number(y), Number(r), this.filter(f)).map((a) => this.handle(a)),
       findNearest: (x: number | Handle, y?: number | Record<string, unknown>, f?: unknown) => {
@@ -1674,6 +1680,7 @@ export class ScriptHost {
       pause: (on = true) => (w.paused = !!on),
       music: (name: string, opts: { volume?: number; loop?: boolean; fade?: number } = {}) => w.playMusic(String(name), opts ?? {}),
       stopMusic: (fade = 1) => w.stopMusic(Number(fade)),
+      ambience: (list: string | (string | { sound: string; volume?: number })[], fade = 1.5) => w.setAmbience(Array.isArray(list) ? list : list ? [String(list)] : [], Number(fade)),
       setVolume: (channel: 'music' | 'sfx', value: number) => w.setVolume(channel, value),
       log: (...args: unknown[]) => w.log(args.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')),
       key: (name: string) => w.input.down.has(String(name)),

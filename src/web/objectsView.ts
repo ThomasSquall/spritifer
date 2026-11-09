@@ -288,6 +288,41 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
       else obj.shadow = Math.max(0, Math.round(Number(v)));
       changed();
     } });
+  // Wind: seen moving in Play and in the scene editor's game look.
+  const swaySet = (amount: string, speed: string, react = swayReactIn.value) => {
+    const a = Number(amount);
+    if (!(a > 0)) delete obj.sway;
+    else {
+      const s = Number(speed);
+      const r = Number(react);
+      obj.sway = { amount: Math.min(24, a), ...(s > 0 && s !== 1 ? { speed: Math.min(5, Math.max(0.1, s)) } : {}), ...(r > 0 ? { react: Math.min(24, r) } : {}) };
+    }
+    changed();
+  };
+  const swayIn = h('input', { type: 'number', class: 'num', min: '0', max: '24', step: '1', value: obj.sway ? String(obj.sway.amount) : '',
+    placeholder: parent?.sway ? `${parent.sway.amount} (inherited)` : 'none',
+    onchange: () => swaySet(swayIn.value, swaySpeedIn.value) });
+  const swaySpeedIn = h('input', { type: 'number', class: 'num', min: '0.1', max: '5', step: '0.1', value: obj.sway?.speed !== undefined ? String(obj.sway.speed) : '',
+    placeholder: '1', onchange: () => swaySet(swayIn.value, swaySpeedIn.value) });
+  const swayReactIn = h('input', { type: 'number', class: 'num', min: '0', max: '24', step: '1', value: obj.sway?.react !== undefined ? String(obj.sway.react) : '',
+    placeholder: '0', onchange: () => swaySet(swayIn.value, swaySpeedIn.value) });
+  // A sound looping around the instances: fires, fountains.
+  const ambientSet = () => {
+    if (!ambientSel.value) delete obj.ambientSound;
+    else {
+      const v = Number(ambientVolIn.value);
+      const r = Number(ambientRadiusIn.value);
+      obj.ambientSound = { sound: ambientSel.value, ...(ambientVolIn.value !== '' && v >= 0 ? { volume: Math.min(1, v) } : {}), ...(r >= 8 ? { radius: Math.min(4096, r) } : {}) };
+    }
+    changed();
+  };
+  const ambientCurrent = obj.ambientSound?.sound ?? '';
+  const ambientSel = h('select', { onchange: ambientSet },
+    h('option', { value: '', selected: !ambientCurrent }, parent?.ambientSound ? `${parent.ambientSound.sound} (inherited)` : '— none —'),
+    ...state.audio.map((a) => h('option', { value: a, selected: a === ambientCurrent }, a)),
+    ...(ambientCurrent && !state.audio.includes(ambientCurrent) ? [h('option', { value: ambientCurrent, selected: true }, `${ambientCurrent} (missing)`)] : []));
+  const ambientVolIn = h('input', { type: 'number', class: 'num', min: '0', max: '1', step: '0.05', value: obj.ambientSound?.volume !== undefined ? String(obj.ambientSound.volume) : '', placeholder: '0.4', onchange: ambientSet });
+  const ambientRadiusIn = h('input', { type: 'number', class: 'num', min: '8', max: '4096', step: '8', value: obj.ambientSound?.radius !== undefined ? String(obj.ambientSound.radius) : '', placeholder: '160', onchange: ambientSet });
 
   const isText = obj.text !== undefined;
   const textPreviewEl = h('div', { class: 'text-preview' });
@@ -345,6 +380,8 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
           h('div', { class: 'row4', title: 'Draws the sprite shifted from the instance position, so a larger canvas keeps the same position and hitbox' }, ...offsetIns.map((inp, i) => h('label', {}, `Sprite offset ${'xy'[i]}`, inp))),
           h('label', {}, 'Draw order (z)', zIn),
           h('label', { title: 'Soft contact shadow under instances in scenes with an atmosphere: width in px. Empty = automatic (hitbox width), 0 = none (rugs, doormats, flowerbeds)' }, 'Shadow width (px)', shadowIn),
+          h('div', { class: 'row4', title: 'The wind bends the sprite when drawn, without new art or frames: the top moves by this many pixels, the foot stays still and the hitbox does not move. Trees want 2-4' }, h('label', {}, 'Wind sway (px)', swayIn), h('label', {}, 'Wind speed', swaySpeedIn), h('label', { title: 'Pixels a character walking through pushes the top aside; it springs back after. Grass and ferns want 2-4. Seen in Play' }, 'Pushed by walkers (px)', swayReactIn)),
+          h('div', { class: 'row4', title: 'A sound that loops around every instance of this object (fire, fountain): louder the closer the camera is. Heard in Play' }, h('label', {}, 'Ambient sound', ambientSel), h('label', {}, 'Volume', ambientVolIn), h('label', {}, 'Heard up to (px)', ambientRadiusIn)),
           lightBox,
         ),
       ),

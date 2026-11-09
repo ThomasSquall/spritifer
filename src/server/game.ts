@@ -7,7 +7,7 @@ import { type Bitmap, type Sprite } from '../core/sprite.js';
 import { buildSpritesheet } from '../core/sheet.js';
 import { parseColor } from '../core/color.js';
 import { scaleBitmap } from '../core/draw.js';
-import { rasterText } from '../core/game/font.js';
+import { BUILTIN_FONT, type PixelFont, fontPixelSize, rasterText } from '../core/game/font.js';
 import { type Renderer, World, renderWorld } from '../core/game/engine.js';
 import type { ScreenLight } from '../core/game/atmosphere.js';
 import { type ResolvedRelief, buildNormalSheet, frameMask, normalSheetFor, reliefKind, resolveRelief, shadeRelief } from '../core/game/relief.js';
@@ -460,16 +460,17 @@ export class BitmapRenderer implements Renderer {
     }
   }
 
-  text(text: string, x: number, y: number, color: string, scale: number): void {
+  text(text: string, x: number, y: number, color: string, scale: number, font: PixelFont = BUILTIN_FONT): void {
     let c: [number, number, number, number];
     try {
       c = parseColor(color);
     } catch {
       return;
     }
+    const p = fontPixelSize(font, scale);
     rasterText(text, (px, py) => {
-      for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) this.blend(Math.round(x) + px * scale + sx, Math.round(y) + py * scale + sy, c[0], c[1], c[2], c[3]);
-    });
+      for (let sy = 0; sy < p; sy++) for (let sx = 0; sx < p; sx++) this.blend(Math.round(x) + px * p + sx, Math.round(y) + py * p + sy, c[0], c[1], c[2], c[3]);
+    }, font);
   }
 }
 

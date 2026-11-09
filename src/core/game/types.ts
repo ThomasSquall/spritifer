@@ -6,6 +6,7 @@
 import { type TilesetRules, normalizeTilesetRules } from './tilerules.js';
 import type { SpriteRelief } from '../sprite.js';
 import type { VfxGraph } from './vfxGraph.js';
+import { BUILTIN_FONT, FONTS } from './font.js';
 
 export type Value = number | string | boolean;
 
@@ -80,10 +81,42 @@ export interface ObjectType {
   light?: LightDef;
   /** Soft contact shadow under the instance: width in px (0 = none). Absent = automatic (hitbox width) when the scene has shadows. */
   shadow?: number;
+  /** Moved by the wind when drawn (trees, tall plants): the hitbox and the art don't change. */
+  sway?: ObjectSway;
+  /** Sound looping around the instance (fires, fountains): louder the closer the camera is. */
+  ambientSound?: ObjectAmbientSound;
   /** Instance variables with their default values (self.hp, self.speed...). */
   properties: Record<string, Value>;
   behaviors: Behavior[];
   events: GameEvent[];
+}
+
+/** How the wind moves an object. */
+export interface ObjectSway {
+  /** Pixels the top of the sprite travels (trunk and foot stay still). */
+  amount: number;
+  /** 1 = normal, 2 = twice as fast (default 1). */
+  speed?: number;
+  /** Pixels a character walking through pushes the top aside, springing back after (grass, ferns). Default 0. */
+  react?: number;
+}
+
+/** A sound that loops around an object. */
+export interface ObjectAmbientSound {
+  /** Audio file name. */
+  sound: string;
+  /** Volume next to it, 0..1 (default 0.4). */
+  volume?: number;
+  /** Heard up to this many pixels from the middle of the screen (default 160). */
+  radius?: number;
+}
+
+/** A sound that loops for as long as the scene lasts. */
+export interface SceneAmbience {
+  /** Audio file name. */
+  sound: string;
+  /** 0..1 (default 0.4). */
+  volume?: number;
 }
 
 export interface TileLayer {
@@ -143,6 +176,8 @@ export interface SceneAtmosphere {
   tint?: string;
   tintAmount?: number;
   motes?: SceneMotes;
+  /** A second kind of particles over the first (dust and falling leaves together). */
+  motes2?: SceneMotes;
   /** Per-pixel lighting: lights and the sun shape the volumes of the sprites. */
   relief?: SceneRelief;
 }
@@ -231,6 +266,8 @@ export interface Scene {
   persistent?: boolean;
   /** Music when the scene starts: an audio file name, "-" for silence; absent = keep what plays. */
   music?: string;
+  /** Sounds that loop while the scene lasts (wind, crickets, dripping): they fade across scene changes. */
+  ambience?: SceneAmbience[];
   /** Scene variables (reset when the scene starts). Read as `scene.name`. */
   variables: Record<string, Value>;
   /** Scene components (managers, level logic, HUD): `{ type: "script", name, ...params }`. */
@@ -252,6 +289,8 @@ export interface GameProject {
   zoom: 'fit' | number;
   /** Interface pixels are this many canvas pixels: scripts and dialogs work in width/uiScale × height/uiScale. Scenes without a Camera zoom the same. Default 1. */
   uiScale?: number;
+  /** Id of the font all text draws with (see FONTS). Absent = the built-in 3x5. */
+  font?: string;
   background: string;
   startScene: string;
   /** Pixels per second squared, used by platformer and patrol behaviors. */
@@ -377,6 +416,10 @@ export function normalizeObject(v: unknown): ObjectType {
   const light = normalizeLight(o.light);
   if (light) obj.light = light;
   if (typeof o.shadow === 'number' && Number.isFinite(o.shadow)) obj.shadow = Math.max(0, Math.round(o.shadow));
+  const sway = normalizeSway(o.sway);
+  if (sway) obj.sway = sway;
+  const ambientSound = normalizeAmbientSound(o.ambientSound);
+  if (ambientSound) obj.ambientSound = ambientSound;
   return obj;
 }
 
@@ -391,6 +434,7 @@ export function normalizeGame(v: unknown): GameProject {
     height: Math.max(16, Math.min(1080, Math.round(num(o.height, 180)))),
     zoom,
     ...(num(o.uiScale, 1) > 1 ? { uiScale: Math.min(8, Math.round(num(o.uiScale, 1))) } : {}),
+    ...(typeof o.font === 'string' && o.font !== BUILTIN_FONT.id && FONTS.some((f) => f.id === o.font) ? { font: o.font } : {}),
     background: str(o.background, '#181425'),
     startScene: str(o.startScene, ''),
     gravity: num(o.gravity, 900),
@@ -432,6 +476,35 @@ const clampN = (v: unknown, lo: number, hi: number): number | undefined => (type
 const colorOr = (v: unknown): string | undefined => (typeof v === 'string' && COLOR_RE.test(v) ? v : undefined);
 const compact = <T extends object>(o: T): T => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 
+/** A wind setting, or undefined when it wouldn't move anything. */
+export function normalizeSway(v: unknown): ObjectSway | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const S = v as Record<string, unknown>;
+  const amount = clampN(S.amount, 0, 24);
+  if (!amount) return undefined;
+  const speed = clampN(S.speed, 0.1, 5);
+  const react = clampN(S.react, 0, 24);
+  return { amount, ...(speed !== undefined && speed !== 1 ? { speed } : {}), ...(react ? { react } : {}) };
+}
+
+/** A looping sound of an object, or undefined. */
+export function normalizeAmbientSound(v: unknown): ObjectAmbientSound | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const A = v as Record<string, unknown>;
+  if (typeof A.sound !== 'string' || !A.sound) return undefined;
+  return compact({ sound: A.sound, volume: clampN(A.volume, 0, 1), radius: clampN(A.radius, 8, 4096) });
+}
+
+/** The looping sounds of a scene, or undefined when there are none. */
+export function normalizeAmbience(v: unknown): SceneAmbience[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const list = v.flatMap((x): SceneAmbience[] => {
+    const L = x as Record<string, unknown> | null;
+    return L && typeof L === 'object' && typeof L.sound === 'string' && L.sound ? [compact({ sound: L.sound, volume: clampN(L.volume, 0, 1) })] : [];
+  });
+  return list.length ? list : undefined;
+}
+
 /** A light definition, or undefined. With allowOff a radius 0 light is kept (an instance switching its type's light off). */
 export function normalizeLight(v: unknown, allowOff = false): LightDef | undefined {
   if (!v || typeof v !== 'object') return undefined;
@@ -447,8 +520,7 @@ export function normalizeAtmosphere(v: unknown): SceneAtmosphere | undefined {
   if (!v || typeof v !== 'object') return undefined;
   const A = v as Record<string, unknown>;
   const C = A.clouds as Record<string, unknown> | undefined;
-  const M = A.motes as Record<string, unknown> | undefined;
-  const motes: SceneMotes | undefined =
+  const moteLayer = (M: Record<string, unknown> | undefined): SceneMotes | undefined =>
     M && typeof M === 'object' && (MOTE_PRESETS as readonly string[]).includes(String(M.preset))
       ? compact({ preset: M.preset as SceneMotes['preset'], count: clampN(M.count, 0, 400), color: Array.isArray(M.color) ? M.color.filter((c): c is string => !!colorOr(c)) : colorOr(M.color) })
       : undefined;
@@ -463,7 +535,8 @@ export function normalizeAtmosphere(v: unknown): SceneAtmosphere | undefined {
     clouds: C && typeof C === 'object' && typeof C.sprite === 'string' && C.sprite ? compact({ sprite: C.sprite, opacity: clampN(C.opacity, 0, 1), speedX: clampN(C.speedX, -500, 500), speedY: clampN(C.speedY, -500, 500) }) : undefined,
     tint: colorOr(A.tint),
     tintAmount: clampN(A.tintAmount, 0, 1),
-    motes,
+    motes: moteLayer(A.motes as Record<string, unknown> | undefined),
+    motes2: moteLayer(A.motes2 as Record<string, unknown> | undefined),
     relief: normalizeRelief(A.relief),
   });
   return Object.keys(out).length ? out : undefined;
@@ -538,6 +611,7 @@ export function normalizeScene(v: unknown): Scene {
     ...(o.ySort === true ? { ySort: true } : {}),
     ...(o.persistent === true ? { persistent: true } : {}),
     ...(typeof o.music === 'string' && o.music ? { music: o.music } : {}),
+    ...(normalizeAmbience(o.ambience) ? { ambience: normalizeAmbience(o.ambience) } : {}),
     variables: vars(o.variables),
     ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
     ...(normalizeAtmosphere(o.atmosphere) ? { atmosphere: normalizeAtmosphere(o.atmosphere) } : {}),

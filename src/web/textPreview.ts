@@ -1,7 +1,7 @@
 /** Evaluates a text object's expression in the editor (with starting values) to show what the game will display. */
 
 import { MATH_FUNCTIONS, compile, fmt, toNum } from '../core/game/expr.js';
-import { measureText, rasterText } from '../core/game/font.js';
+import { gameFont, measureText, rasterText } from '../core/game/font.js';
 import type { ObjectType, Value } from '../core/game/types.js';
 import { state } from './gameState.js';
 
@@ -41,13 +41,15 @@ export function looksLikePlainText(expr: string): boolean {
 
 /** Draws text with the game's pixel font at world coordinates on a 2D context (scene editor). */
 export function drawPixelText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string, scale: number): void {
+  const font = gameFont(state.game);
+  const p = scale / font.density;
   ctx.fillStyle = '#000000';
-  rasterText(text, (px, py) => ctx.fillRect(x + (px + 1) * scale, y + (py + 1) * scale, scale, scale));
+  rasterText(text, (px, py) => ctx.fillRect(x + (px + 1) * p, y + (py + 1) * p, p, p), font);
   ctx.fillStyle = color;
-  rasterText(text, (px, py) => ctx.fillRect(x + px * scale, y + py * scale, scale, scale));
+  rasterText(text, (px, py) => ctx.fillRect(x + px * p, y + py * p, p, p), font);
 }
 
 export function textSize(text: string, scale: number): { w: number; h: number } {
-  const m = measureText(text);
+  const m = measureText(text, gameFont(state.game));
   return { w: Math.max(4, (m.width + 1) * scale), h: Math.max(4, (m.height + 1) * scale) };
 }

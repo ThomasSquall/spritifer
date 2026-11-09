@@ -5,6 +5,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { BEHAVIOR_MAP, SOUNDS, catalogReference, describeEvent, describeStep } from '../core/game/catalog.js';
 import { checkExpr } from '../core/game/expr.js';
+import { BUILTIN_FONT, FONTS } from '../core/game/font.js';
 import { type PlaytestInput, runPlaytest } from '../core/game/engine.js';
 import { renameComponentRefs, renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
 import {
@@ -25,6 +26,9 @@ import {
   normalizeActions,
   normalizeAtmosphere,
   normalizeLight,
+  normalizeSway,
+  normalizeAmbientSound,
+  normalizeAmbience,
   MOTE_PRESETS,
   normalizeObject,
   normalizeScene,
@@ -175,6 +179,7 @@ const atmosphereSchema = z.object({
   tint: z.string().optional().describe('Soft-light color grade, e.g. "#ffb070" golden hour, "#5080ff" cold'),
   tint_amount: z.number().min(0).max(1).optional(),
   motes: z.object({ preset: z.enum(MOTE_PRESETS), count: z.number().int().min(0).max(400).optional(), color: z.union([z.string(), z.array(z.string())]).optional() }).nullable().optional().describe('Ambient floating particles'),
+  motes2: z.object({ preset: z.enum(MOTE_PRESETS), count: z.number().int().min(0).max(400).optional(), color: z.union([z.string(), z.array(z.string())]).optional() }).nullable().optional().describe('A second kind of particles over the first (dust and falling leaves together)'),
   relief: z.object({
     strength: z.number().min(0).max(2).optional().describe('How strongly light shapes the sprites (default 1)'),
     bands: z.number().int().min(0).max(16).optional().describe('Light steps on the sprites, 0 = smooth (default 4)'),
@@ -191,7 +196,7 @@ const atmosphereSchema = z.object({
   }).nullable().optional().describe('Per-pixel lighting: lights and the sun shape the volumes of the sprites, from a normal map computed automatically. Pass {} to enable with defaults. See set_relief for a single sprite'),
 });
 const toAtmosphere = (a: z.infer<typeof atmosphereSchema>) =>
-  normalizeAtmosphere({ ambient: a.ambient, glow: a.glow, shadows: a.shadows, shadowColor: a.shadow_color, shadowOpacity: a.shadow_opacity, vignette: a.vignette, vignetteColor: a.vignette_color, clouds: a.clouds ? { sprite: a.clouds.sprite, opacity: a.clouds.opacity, speedX: a.clouds.speed_x, speedY: a.clouds.speed_y } : undefined, tint: a.tint, tintAmount: a.tint_amount, motes: a.motes ?? undefined, relief: a.relief ? { strength: a.relief.strength, bands: a.relief.bands, rim: a.relief.rim, lightHeight: a.relief.light_height, tiles: a.relief.tiles, sun: a.relief.sun } : undefined });
+  normalizeAtmosphere({ ambient: a.ambient, glow: a.glow, shadows: a.shadows, shadowColor: a.shadow_color, shadowOpacity: a.shadow_opacity, vignette: a.vignette, vignetteColor: a.vignette_color, clouds: a.clouds ? { sprite: a.clouds.sprite, opacity: a.clouds.opacity, speedX: a.clouds.speed_x, speedY: a.clouds.speed_y } : undefined, tint: a.tint, tintAmount: a.tint_amount, motes: a.motes ?? undefined, motes2: a.motes2 ?? undefined, relief: a.relief ? { strength: a.relief.strength, bands: a.relief.bands, rim: a.relief.rim, lightHeight: a.relief.light_height, tiles: a.relief.tiles, sun: a.relief.sun } : undefined });
 
 const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
   const stepSchema = z.record(z.string(), valueSchema).describe('{ type: "...", ...params }');
@@ -232,6 +237,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       width: z.number().int().min(16).max(1920).optional().describe('Viewport width in game pixels (e.g. 320)'),
       height: z.number().int().min(16).max(1080).optional().describe('Viewport height (e.g. 180)'),
       zoom: z.union([z.literal('fit'), z.number().int().min(1).max(16)]).optional().describe('"fit" = largest integer zoom that fits the window'),
+      font: z.enum(FONTS.map((f) => f.id) as [string, ...string[]]).optional().describe('Font of all in-game text. "builtin" is the 3x5 capitals; "pixel-operator" has lowercase and accents, keeps the 4x6-per-character layout and needs a ui_scale of 2, 4, 6 or 8'),
       ui_scale: z.number().int().min(1).max(8).optional().describe('Interface pixels are this many canvas pixels: width 960 with ui_scale 3 keeps scripts and dialogs in 320×180, and a Camera zoom of 2 then shows 480×270 of the world with square pixels'),
       background: z.string().optional(),
       start_scene: z.string().optional(),
@@ -262,6 +268,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         if (a.width !== undefined) g.width = a.width;
         if (a.height !== undefined) g.height = a.height;
         if (a.zoom !== undefined) g.zoom = a.zoom;
+        if (a.font !== undefined) { if (a.font === BUILTIN_FONT.id) delete g.font; else g.font = a.font; }
         if (a.ui_scale !== undefined) { if (a.ui_scale > 1) g.uiScale = a.ui_scale; else delete g.uiScale; }
         if (a.background !== undefined) g.background = a.background;
         if (a.start_scene !== undefined) {
@@ -352,7 +359,9 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       hud: z.boolean().optional().describe('Draw in screen space (ignores the camera)'),
       light: lightSchema.nullable().optional().describe('Light it gives off (seen in scenes with an atmosphere: darker ambient + glow). null removes'),
       shadow: z.number().min(0).nullable().optional().describe('Contact shadow width in px (0 = none, null = automatic: hitbox width). Flat things (rugs, doormats, flowerbeds) want 0'),
+      sway: z.object({ amount: z.number().min(0).max(24).describe('Pixels the top of the sprite travels; the foot stays still. Trees want 2-4'), speed: z.number().min(0.1).max(5).optional().describe('1 = normal'), react: z.number().min(0).max(24).optional().describe('Pixels a character walking through pushes the top aside, springing back after. Grass and ferns want 2-4') }).nullable().optional().describe('Wind: bends the sprite when drawn, without new art or frames, with gusts travelling across the map. The hitbox does not move. null = off'),
       extends: z.string().nullable().optional().describe('Make it a VARIANT of another object type (like a Unity prefab variant): it inherits sprite, hitbox, properties, tags, components (params can be overridden by listing the same component with only the changed params) and events, and stores only what differs. null = standalone again. Queries and events on the parent type (find("slime"), "collides with slime", count) include its variants.'),
+      ambient_sound: z.object({ sound: z.string(), volume: z.number().min(0).max(1).optional().describe('Next to it, default 0.4'), radius: z.number().min(8).max(4096).optional().describe('Heard up to this many px from the middle of the screen, default 160') }).nullable().optional().describe('A sound looping around every instance (fire, fountain): louder the closer the camera is. null = off'),
       tags: z.array(z.string()).optional().describe('Group tags for scripts (self.hasTag, findWithTag, raycast/overlap filters, countTag()), e.g. ["enemy"]. Replaces the list.'),
       properties: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       behaviors: z.array(stepSchema).optional().describe('e.g. [{type:"platformer", speed:100, jump:300}, {type:"camera"}]'),
@@ -416,6 +425,17 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         if (a.shadow !== undefined) {
           if (a.shadow === null) delete o.shadow;
           else o.shadow = Math.round(a.shadow);
+        }
+        if (a.sway !== undefined) {
+          const s = a.sway === null ? undefined : normalizeSway(a.sway);
+          if (s) o.sway = s;
+          else delete o.sway;
+        }
+        if (a.ambient_sound !== undefined) {
+          const s = a.ambient_sound === null ? undefined : normalizeAmbientSound(a.ambient_sound);
+          if (s && !ws.listAudio().some((x) => x.name === s.sound)) throw new Error(`No audio "${s.sound}". Import it with import_audio.`);
+          if (s) o.ambientSound = s;
+          else delete o.ambientSound;
         }
         for (const [k, v] of Object.entries(a.properties ?? {})) {
           assertIdentifier('property', k);
@@ -580,6 +600,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       persistent: z.boolean().optional().describe('Remember instances when leaving (positions, properties, destroyed ones), e.g. an RPG town you come back to after a battle'),
       components: z.array(stepSchema).optional().describe('Scene components (replace the list): [{ type: "script", name: "Battle", foeHp: 12 }] — managers, level logic, HUD'),
       music: z.string().nullable().optional().describe('Music when the scene starts: an audio file name (list_audio), "-" for silence, null = keep what plays'),
+      ambience: z.array(z.object({ sound: z.string(), volume: z.number().min(0).max(1).optional().describe('default 0.4') })).optional().describe('Sounds that loop while the scene lasts (wind, crickets, dripping), replacing the list; [] = none. They fade across scene changes'),
       atmosphere: atmosphereSchema.nullable().optional().describe('Lighting and mood (replaces the whole atmosphere; null removes it). Lights come from object types / instances with "light".'),
     },
     (a) => {
@@ -608,6 +629,12 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
           if (atm?.clouds && !ws.exists(atm.clouds.sprite)) throw new Error(`Clouds sprite "${atm.clouds.sprite}" not found`);
           if (atm) s.atmosphere = atm;
           else delete s.atmosphere;
+        }
+        if (a.ambience) {
+          for (const l of a.ambience) if (!ws.listAudio().some((x) => x.name === l.sound)) throw new Error(`No audio "${l.sound}". Import it with import_audio.`);
+          const list = normalizeAmbience(a.ambience);
+          if (list) s.ambience = list;
+          else delete s.ambience;
         }
         if (a.music !== undefined) {
           if (a.music === null || a.music === '') delete s.music;

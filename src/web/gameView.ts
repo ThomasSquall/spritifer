@@ -2,6 +2,7 @@
 
 import type { GameProject, Value } from '../core/game/types.js';
 import { GAME_NAME_RE, normalizeActions } from '../core/game/types.js';
+import { BUILTIN_FONT, FONTS } from '../core/game/font.js';
 import { previewSound } from './eventSheet.js';
 import { gameApi } from './gameApi.js';
 import { state } from './gameState.js';
@@ -130,6 +131,11 @@ export function renderGameSettings(root: HTMLElement): () => void {
       else delete g.uiScale;
       changed();
     } });
+    const fontSel = h('select', { title: 'Font of all in-game text. Pixel Operator needs an even UI scale.', onchange: () => {
+      if (fontSel.value === BUILTIN_FONT.id) delete g.font;
+      else g.font = fontSel.value;
+      changed();
+    } }, ...FONTS.map((f) => h('option', { value: f.id, selected: (g.font ?? BUILTIN_FONT.id) === f.id }, f.label)));
     const bgIn = colorInput(g.background, (v) => { if (v) { g.background = v; changed(); } }, { fallback: '#181425' });
     const gravIn = h('input', { type: 'number', value: String(g.gravity), oninput: () => { g.gravity = Number(gravIn.value) || 0; changed(); } });
     const startSel = h('select', { onchange: () => { g.startScene = startSel.value; changed(); } }, ...state.scenes.map((s) => h('option', { value: s.name, selected: s.name === g.startScene }, s.name)));
@@ -164,7 +170,7 @@ export function renderGameSettings(root: HTMLElement): () => void {
           h('div', { class: 'row2' }, h('label', {}, 'Screen width (px)', wIn), h('label', {}, 'Screen height (px)', hIn)),
           presets,
           h('div', { class: 'row2' }, h('label', {}, 'Zoom', zoomSel), h('label', {}, 'UI scale', uiScaleIn)),
-          h('label', {}, 'Background', bgIn),
+          h('div', { class: 'row2' }, h('label', {}, 'Font', fontSel), h('label', {}, 'Background', bgIn)),
           h('div', { class: 'row2' }, h('label', {}, 'Gravity (px/s²)', gravIn), h('label', {}, 'Start scene', startSel)),
           h('label', { class: 'inline' }, touchIn, 'On-screen controls on phones and tablets'),
         ),

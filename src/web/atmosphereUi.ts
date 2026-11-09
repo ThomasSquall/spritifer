@@ -242,12 +242,13 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
       ),
     );
 
-    // Particles.
-    const m = atm.motes;
+    // Particles: a function because a scene can have two kinds at once.
+    const moteGroup = (key: 'motes' | 'motes2', title: string) => {
+    const m = atm[key];
     const moteSel = h('select', { onchange: () => {
       o.before();
-      if (moteSel.value) atm.motes = { preset: moteSel.value as SceneMotes['preset'], ...(m?.count !== undefined ? { count: m.count } : {}) };
-      else delete atm.motes;
+      if (moteSel.value) atm[key] = { preset: moteSel.value as SceneMotes['preset'], ...(m?.count !== undefined ? { count: m.count } : {}) };
+      else delete atm[key];
       o.changed();
       render();
     } }, h('option', { value: '' }, '— none —'), ...MOTE_PRESETS.map((p) => h('option', { value: p, selected: p === m?.preset }, MOTE_LABELS[p])));
@@ -260,16 +261,17 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
         colorsIn!.value = m.color === undefined ? '' : Array.isArray(m.color) ? m.color.join(', ') : m.color;
         o.changed();
       } }) : null;
-    const particles = h('div', { class: 'atm-group' },
-      h('div', { class: 'atm-group-title' }, 'Particles'),
+    return h('div', { class: 'atm-group' },
+      h('div', { class: 'atm-group-title' }, title),
       h('div', { class: 'row2' },
         h('label', {}, 'Kind', moteSel),
         m ? numberField('On screen', m.count, '24', o, (v) => { if (v === undefined) delete m.count; else m.count = Math.max(0, Math.min(400, Math.round(v))); }, { min: '0', max: '400', step: '1' }) : h('span', {}),
       ),
       m ? h('label', { title: 'Comma-separated hex colors (e.g. #a0f0ff, #ffffff); empty = the preset colors' }, 'Colors', colorsIn) : null,
     );
+    };
 
-    box.append(h('div', { class: 'form atm-form' }, h('label', {}, 'Preset', presetSel), lighting, relief, shadows, clouds, grade, particles));
+    box.append(h('div', { class: 'form atm-form' }, h('label', {}, 'Preset', presetSel), lighting, relief, shadows, clouds, grade, moteGroup('motes', 'Particles'), moteGroup('motes2', 'More particles')));
   };
   render();
   return box;

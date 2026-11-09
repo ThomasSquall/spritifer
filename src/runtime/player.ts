@@ -541,6 +541,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       setFps(on);
     },
     destroy() {
+      sound.music({ type: 'ambience', layers: [], fade: 0.1 });
       cancelAnimationFrame(raf);
       ro.disconnect();
       window.removeEventListener('keydown', onKeyDown);

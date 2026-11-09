@@ -525,6 +525,10 @@ export class ScriptHost {
   readonly errors: string[] = [];
   dialog: DialogState | null = null;
   private dialogQueue: Omit<DialogState, 'openedAt'>[] = [];
+  /** Typewriter speed multiplier (options menus). */
+  dialogSpeed = 1;
+  /** Lines close by themselves (skipping a cutscene); choices still wait. */
+  dialogSkip = false;
   private posed: Actor | null = null;
   private timers: Timer[] = [];
   private conditions: { test: () => boolean; resolve: () => void; persistent: boolean }[] = [];
@@ -1213,12 +1217,17 @@ export class ScriptHost {
   updateDialog(dt: number, confirm: boolean, up: boolean, down: boolean, auto: { choices: number[]; delay: number } | null): boolean {
     const d = this.dialog;
     if (!d) return false;
-    d.shown = Math.min(d.text.length, d.shown + dt * 45);
+    d.shown = Math.min(d.text.length, d.shown + dt * 45 * this.dialogSpeed);
     if (d.choices) {
       if (up) d.selected = (d.selected + d.choices.length - 1) % d.choices.length;
       if (down) d.selected = (d.selected + 1) % d.choices.length;
     }
     let go = confirm;
+    // Skipping runs through the lines, so whatever they set still happens, but a choice always waits for the player.
+    if (this.dialogSkip && !d.choices) {
+      d.shown = d.text.length;
+      go = true;
+    }
     if (auto && this.world.clock - d.openedAt >= auto.delay) {
       d.shown = d.text.length;
       if (d.choices) d.selected = Math.max(0, Math.min(d.choices.length - 1, auto.choices.shift() ?? 0));
@@ -1684,6 +1693,8 @@ export class ScriptHost {
       hitstop: (seconds = 0.08) => w.hitstop(Number(seconds)),
       ambience: (list: string | (string | { sound: string; volume?: number })[], fade = 1.5) => w.setAmbience(Array.isArray(list) ? list : list ? [String(list)] : [], Number(fade)),
       setVolume: (channel: 'music' | 'sfx', value: number) => w.setVolume(channel, value),
+      setDialogSpeed: (speed: number) => { host.dialogSpeed = Math.max(0.1, Number(speed) || 1); },
+      setDialogSkip: (on = true) => { host.dialogSkip = !!on; },
       log: (...args: unknown[]) => w.log(args.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')),
       key: (name: string) => w.input.down.has(String(name)),
       pressed: (name: string) => w.input.pressed.has(String(name)),

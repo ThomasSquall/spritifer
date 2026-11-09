@@ -5,6 +5,7 @@ import { validateGame } from '../src/core/game/catalog.js';
 import { type GameBundle, type SpriteAsset, createGame, createScene, normalizeObject } from '../src/core/game/types.js';
 import { BUILTIN_FONT, PIXEL_OPERATOR, gameFont, measureText, rasterText } from '../src/core/game/font.js';
 import { wrapText } from '../src/core/game/script.js';
+import { nodeEvaluator } from '../src/server/scripts.js';
 
 const ctx = (vars: Record<string, number | string | boolean> = {}) => ({
   get: (p: string[]) => vars[p.join('.')],
@@ -335,6 +336,23 @@ describe('scripts', () => {
       onDraw((ui) => ui.bar(2, 2, 20, 4, vars.gold, 10))` };
     const r = await runPlaytest(b, { seconds: 1 });
     expect(r.logs.some((l) => l.endsWith('arrived 78 hp 3'))).toBe(true);
+  });
+});
+
+describe('dialog speed and skipping', () => {
+  const bundle = (script: string) => {
+    const b = platformBundle();
+    b.scripts = { ...(b.scripts ?? {}), main: script };
+    return b;
+  };
+
+  it('closes lines by itself while skipping, and still waits on a choice', async () => {
+    const r = await runPlaytest(
+      bundle(`onStart(async () => { setDialogSkip(true); await say('one'); await say('two'); vars.c = await choose(['a', 'b']); vars.done = 1 })`),
+      { seconds: 1, autoDialog: false, evaluator: nodeEvaluator },
+    );
+    expect(r.logs.some((l) => l.includes('dialog: two'))).toBe(true);
+    expect(r.final.globals.done).toBeUndefined();
   });
 });
 

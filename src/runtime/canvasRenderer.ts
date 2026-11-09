@@ -7,6 +7,7 @@ import type { Renderer } from '../core/game/engine.js';
 import type { CastShape, ScreenLight } from '../core/game/atmosphere.js';
 import { BUILTIN_FONT, type PixelFont, fontPixelSize, rasterText, textBitmapSize } from '../core/game/font.js';
 import { type ResolvedRelief, frameMask, normalSheetFor, reliefKind, shadeRelief } from '../core/game/relief.js';
+import type { ReflectionBand, WaterPiece } from '../core/game/reflections.js';
 import type { SpriteAsset } from '../core/game/types.js';
 
 interface NormalSheet {
@@ -26,12 +27,23 @@ export class CanvasRenderer implements Renderer {
     this.ctx.fillRect(0, 0, this.w, this.h);
   }
 
-  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; angle: number; scale?: number; flat?: boolean }): void {
+  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, o: { flipX: boolean; opacity: number; angle: number; scale?: number; flat?: boolean; white?: number }): void {
     const img = this.images.get(sprite);
     if (!img) return;
     this.captureNormals(sprite, sx, sy, sw, sh, dx, dy, o);
     const c = this.ctx;
     const k = o.scale ?? 1;
+    if (o.white) {
+      const sheet = this.whiteSheet(sprite, img);
+      this.image(sprite, sx, sy, sw, sh, dx, dy, { ...o, white: 0 });
+      c.save();
+      c.globalAlpha = o.opacity * Math.min(1, o.white);
+      c.translate(dx + (sw * k) / 2, dy + (sh * k) / 2);
+      if (o.flipX) c.scale(-1, 1);
+      c.drawImage(sheet, sx, sy, sw, sh, (-sw * k) / 2, (-sh * k) / 2, sw * k, sh * k);
+      c.restore();
+      return;
+    }
     if (!o.flipX && !o.angle && o.opacity >= 1) {
       c.drawImage(img, sx, sy, sw, sh, dx, dy, sw * k, sh * k);
       return;
@@ -43,6 +55,104 @@ export class CanvasRenderer implements Renderer {
     if (o.flipX) c.scale(-1, 1);
     c.drawImage(img, sx, sy, sw, sh, (-sw * k) / 2, (-sh * k) / 2, sw * k, sh * k);
     c.restore();
+  }
+
+  private whiteSheets = new Map<string, HTMLCanvasElement>();
+
+  /** The sprite's sheet in solid white, made once: a character lit by a blow. */
+  private whiteSheet(sprite: string, img: CanvasImageSource): HTMLCanvasElement {
+    let sheet = this.whiteSheets.get(sprite);
+    if (sheet) return sheet;
+    sheet = document.createElement('canvas');
+    const source = img as HTMLImageElement | HTMLCanvasElement;
+    sheet.width = (source as HTMLImageElement).naturalWidth || source.width;
+    sheet.height = (source as HTMLImageElement).naturalHeight || source.height;
+    const g = sheet.getContext('2d')!;
+    g.drawImage(img, 0, 0);
+    g.globalCompositeOperation = 'source-in';
+    g.fillStyle = '#ffffff';
+    g.fillRect(0, 0, sheet.width, sheet.height);
+    this.whiteSheets.set(sprite, sheet);
+    return sheet;
+  }
+
+  private waterLayers: { picture: HTMLCanvasElement; mask: HTMLCanvasElement } | null = null;
+  private waterMasks = new Map<string, HTMLCanvasElement>();
+  private sheetPixels = new Map<string, { data: Uint8ClampedArray; width: number } | null>();
+
+  /** Which pixels of a patch of the sheet are water. */
+  private waterMask(piece: WaterPiece): HTMLCanvasElement | null {
+    const key = `${piece.sprite}|${piece.sources.join()}`;
+    let mask = this.waterMasks.get(key);
+    if (mask) return mask;
+    let sheet = this.sheetPixels.get(piece.sprite);
+    if (sheet === undefined) {
+      const img = this.images.get(piece.sprite) as HTMLImageElement | HTMLCanvasElement | undefined;
+      sheet = img ? this.readImage(img) : null;
+      this.sheetPixels.set(piece.sprite, sheet);
+    }
+    if (!sheet) return null;
+    const { data, width } = sheet;
+    mask = document.createElement('canvas');
+    mask.width = piece.sw;
+    mask.height = piece.sh;
+    const g = mask.getContext('2d')!;
+    g.fillStyle = '#ffffff';
+    const s = piece.sources;
+    for (let y = 0; y < piece.sh; y++) {
+      for (let x = 0; x < piece.sw; x++) {
+        const at = (k: number) => ((s[k + 1]! + y) * width + s[k]! + x) * 4;
+        let water = s.length === 2 && data[at(0) + 3]! > 0;
+        for (let k = 2; k < s.length && !water; k += 2) {
+          const a = at(0);
+          const b = at(k);
+          water = data[a]! !== data[b]! || data[a + 1]! !== data[b + 1]! || data[a + 2]! !== data[b + 2]!;
+        }
+        if (water) g.fillRect(x, y, 1, 1);
+      }
+    }
+    this.waterMasks.set(key, mask);
+    return mask;
+  }
+
+  reflections(water: WaterPiece[], bands: ReflectionBand[], zoom: number): void {
+    if (!this.waterLayers) {
+      const make = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = this.w;
+        canvas.height = this.h;
+        return canvas;
+      };
+      this.waterLayers = { picture: make(), mask: make() };
+    }
+    const { picture, mask } = this.waterLayers;
+    const m = mask.getContext('2d')!;
+    m.imageSmoothingEnabled = false;
+    m.clearRect(0, 0, this.w, this.h);
+    for (const p of water) {
+      const tile = this.waterMask(p);
+      if (tile) m.drawImage(tile, p.x, p.y, p.sw * zoom, p.sh * zoom);
+    }
+    const g = picture.getContext('2d')!;
+    g.imageSmoothingEnabled = false;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    g.clearRect(0, 0, this.w, this.h);
+    for (const b of bands) {
+      const img = this.images.get(b.sprite);
+      if (!img) continue;
+      g.globalAlpha = b.alpha;
+      // Upside down, and mirrored as the sprite itself is.
+      g.setTransform(b.flipX ? -1 : 1, 0, 0, -1, b.flipX ? b.dx + b.sw * zoom : b.dx, b.dy + b.sh * zoom);
+      g.drawImage(img, b.sx, b.sy, b.sw, b.sh, 0, 0, b.sw * zoom, b.sh * zoom);
+    }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'destination-in';
+    g.drawImage(mask, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    this.ctx.globalAlpha = 1;
+    this.ctx.drawImage(picture, 0, 0);
   }
 
   rect(x: number, y: number, w: number, h: number, color: string, alpha = 1, blend?: 'add'): void {

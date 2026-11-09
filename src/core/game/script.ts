@@ -429,7 +429,7 @@ export interface UiApi {
   rect(x: number, y: number, w: number, h: number, color: string, alpha?: number): void;
   panel(x: number, y: number, w: number, h: number, opts?: { color?: string; border?: string; alpha?: number }): void;
   bar(x: number, y: number, w: number, h: number, value: number, max: number, color?: string, back?: string): void;
-  sprite(name: string, x: number, y: number, opts?: { frame?: number; animation?: string; elapsed?: number; flipX?: boolean; opacity?: number; scale?: number }): void;
+  sprite(name: string, x: number, y: number, opts?: { white?: number; frame?: number; animation?: string; elapsed?: number; flipX?: boolean; opacity?: number; scale?: number }): void;
   measure(text: string, size?: number): { width: number; height: number };
   /** Converts world coordinates (instance x/y) to screen coordinates. */
   toScreen(x: number, y: number): { x: number; y: number };
@@ -1395,11 +1395,11 @@ export class ScriptHost {
             const len = tag.to - tag.from + 1;
             const dur = asset.frames[tag.from]?.duration ?? 100;
             // With elapsed the clip plays once from its start and stays on the last frame.
-            fi = tag.from + (o.elapsed !== undefined ? Math.min(len - 1, Math.floor((Math.max(0, o.elapsed) * 1000) / dur)) : Math.floor((w.clock * 1000) / dur) % len);
+            fi = tag.from + (o.elapsed !== undefined ? Math.min(len - 1, Math.floor((Math.max(0, o.elapsed) * 1000) / dur)) : Math.floor((w.animClock * 1000) / dur) % len);
           }
         }
         const f = asset.frames[fi] ?? asset.frames[0];
-        r.image(name, f.x, f.y, f.w, f.h, Math.round(x), Math.round(y), { flipX: !!o.flipX, opacity: o.opacity ?? 1, angle: 0, scale: spriteScale(o.scale ?? 1, k) });
+        r.image(name, f.x, f.y, f.w, f.h, Math.round(x), Math.round(y), { flipX: !!o.flipX, opacity: o.opacity ?? 1, angle: 0, scale: spriteScale(o.scale ?? 1, k), ...(o.white ? { white: Number(o.white) } : {}) });
       },
       measure: (text, size = 1) => {
         const m = measureText(String(text), w.font);
@@ -1588,6 +1588,7 @@ export class ScriptHost {
         get height() { return w.screenHeight; },
         get time() { return w.time; },
         get clock() { return w.clock; },
+        get animClock() { return w.animClock; },
         get dialogOpen() { return !!host.dialog; },
         get paused() { return w.paused; },
         get music() { return w.music; },
@@ -1680,6 +1681,7 @@ export class ScriptHost {
       pause: (on = true) => (w.paused = !!on),
       music: (name: string, opts: { volume?: number; loop?: boolean; fade?: number } = {}) => w.playMusic(String(name), opts ?? {}),
       stopMusic: (fade = 1) => w.stopMusic(Number(fade)),
+      hitstop: (seconds = 0.08) => w.hitstop(Number(seconds)),
       ambience: (list: string | (string | { sound: string; volume?: number })[], fade = 1.5) => w.setAmbience(Array.isArray(list) ? list : list ? [String(list)] : [], Number(fade)),
       setVolume: (channel: 'music' | 'sfx', value: number) => w.setVolume(channel, value),
       log: (...args: unknown[]) => w.log(args.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')),

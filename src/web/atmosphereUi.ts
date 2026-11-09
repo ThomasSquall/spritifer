@@ -95,6 +95,8 @@ export interface AtmosphereEditorOptions extends EditHooks {
   set(v: SceneAtmosphere | undefined): void;
   /** Sprite names for the cloud shadows. */
   sprites(): string[];
+  /** Audio files, for the thunder. */
+  audio?(): string[];
   /** Re-render after a structural change (preset, on/off, clouds on/off). */
   rerender?(): void;
 }
@@ -242,6 +244,50 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
       ),
     );
 
+    // Rain, shafts of light and reflections: each one switched on by its checkbox.
+    const toggle = <K extends 'rain' | 'shafts' | 'reflections'>(key: K, label: string, title: string) =>
+      h('label', { class: 'inline', title }, h('input', { type: 'checkbox', checked: !!atm[key], onchange: (e: Event) => {
+        o.before();
+        if ((e.target as HTMLInputElement).checked) atm[key] = {} as SceneAtmosphere[K];
+        else delete atm[key];
+        o.changed();
+        render();
+      } }), label);
+    const weather = () => {
+      const rain = atm.rain;
+      const shafts = atm.shafts;
+      const reflect = atm.reflections;
+      const thunder = rain ? h('select', { onchange: () => { o.before(); if (thunder!.value) rain.thunder = thunder!.value; else delete rain.thunder; o.changed(); } },
+        h('option', { value: '' }, '— none —'),
+        ...(o.audio?.() ?? []).map((a) => h('option', { value: a, selected: a === rain.thunder }, a))) : null;
+      const waterSprites = reflect ? h('input', { type: 'text', spellcheck: false, placeholder: 'none', value: (reflect.sprites ?? []).join(', '), onchange: () => {
+        o.before();
+        const list = waterSprites!.value.split(/[\s,]+/).filter(Boolean);
+        if (list.length) reflect.sprites = list;
+        else delete reflect.sprites;
+        o.changed();
+      } }) : null;
+      return h('div', { class: 'atm-group' },
+        h('div', { class: 'atm-group-title' }, 'Weather and water'),
+        toggle('rain', 'Rain', 'Rain over the scene, with lightning if you ask for it'),
+        rain ? h('div', { class: 'row2' },
+          numberField('Drops', rain.count, '140', o, (v) => { if (v === undefined) delete rain.count; else rain.count = Math.max(0, Math.min(800, Math.round(v))); }, { min: '0', max: '800', step: '10' }),
+          numberField('Slant°', rain.angle, '12', o, (v) => { if (v === undefined) delete rain.angle; else rain.angle = Math.max(-60, Math.min(60, v)); }, { min: '-60', max: '60' }),
+          numberField('Lightning/min', rain.lightning, '0', o, (v) => { if (v === undefined) delete rain.lightning; else rain.lightning = Math.max(0, Math.min(30, v)); }, { min: '0', max: '30', step: '0.5' }),
+          h('label', { title: 'Played a moment after each flash' }, 'Thunder', thunder)) : null,
+        toggle('shafts', 'Shafts of light', 'Light slanting through the air; floating particles catch it'),
+        shafts ? h('div', { class: 'row2' },
+          numberField('Per screen', shafts.count, '5', o, (v) => { if (v === undefined) delete shafts.count; else shafts.count = Math.max(1, Math.min(24, v)); }, { min: '1', max: '24' }),
+          numberField('Width', shafts.width, '30', o, (v) => { if (v === undefined) delete shafts.width; else shafts.width = Math.max(2, Math.min(300, v)); }, { min: '2', max: '300' }),
+          numberField('Slant°', shafts.angle, '22', o, (v) => { if (v === undefined) delete shafts.angle; else shafts.angle = Math.max(-70, Math.min(70, v)); }, { min: '-70', max: '70' }),
+          colorField('Color', shafts.color, '#ffe6b0', o, (v) => { shafts.color = v; })) : null,
+        shafts ? slider('Strength', shafts.opacity ?? 0.14, 0, 1, 0.01, o, (v) => { shafts.opacity = v; }) : null,
+        toggle('reflections', 'Reflections in water', 'Water mirrors what stands by it. Tiles that animate count as water by themselves'),
+        reflect ? slider('Strength', reflect.opacity ?? 0.32, 0, 1, 0.01, o, (v) => { reflect.opacity = v; }) : null,
+        reflect ? h('label', { title: 'Sprites of instances that are water too (a canal laid over a dry bed), comma separated' }, 'Water sprites', waterSprites) : null,
+      );
+    };
+
     // Particles: a function because a scene can have two kinds at once.
     const moteGroup = (key: 'motes' | 'motes2', title: string) => {
     const m = atm[key];
@@ -271,7 +317,7 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
     );
     };
 
-    box.append(h('div', { class: 'form atm-form' }, h('label', {}, 'Preset', presetSel), lighting, relief, shadows, clouds, grade, moteGroup('motes', 'Particles'), moteGroup('motes2', 'More particles')));
+    box.append(h('div', { class: 'form atm-form' }, h('label', {}, 'Preset', presetSel), lighting, relief, shadows, clouds, grade, moteGroup('motes', 'Particles'), moteGroup('motes2', 'More particles'), weather()));
   };
   render();
   return box;

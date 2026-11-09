@@ -15,6 +15,8 @@ import { ParticleSystem } from './particles.js';
 import { type VfxAnchor, type VfxPoint, VfxSystem } from './vfx.js';
 import { TileResolver, tilesetFrame } from './tilerules.js';
 import { type CastShape, MoteField, type ScreenLight, drawClouds, drawShadows, postProcess } from './atmosphere.js';
+import { RainField, drawShafts } from './weather.js';
+import { type ReflectionBand, type WaterMap, type WaterPiece, addWaterActors, drawReflections, findWater } from './reflections.js';
 import { type Walker, pushTarget, stepPush, swayBands, swayBase } from './wind.js';
 import type { ResolvedRelief } from './relief.js';
 
@@ -290,16 +292,21 @@ export class World {
     asset: (name) => this.bundle.sprites[name],
     sound: (name, volume) => this.opts.sound?.(name, volume),
     shake: (intensity, seconds) => this.startShake(intensity, seconds),
-    hitstop: (seconds) => (this.hitstopUntil = Math.max(this.hitstopUntil, this.clock + seconds)),
+    hitstop: (seconds) => this.hitstop(seconds),
     message: (message, data) => this.emit(message, data),
     log: (message) => this.log(message),
   });
   /** Hit stop: the game holds still until this clock time, effects keep playing. */
   private hitstopUntil = 0;
+  private hitstopFrom = 0;
   /** Ambient floating particles of the scene atmosphere (own random: gameplay stays deterministic). */
   readonly motes = new MoteField();
   readonly motes2 = new MoteField();
   private motes2For: unknown = null;
+  readonly rain = new RainField();
+  private rainFor: unknown = null;
+  /** The water of the current scene (found when first needed). */
+  private water: { scene: unknown; map: WaterMap } | null = null;
   /** The scene's own looping sounds (spatial ones are added to these), and what was last sent to the player. */
   private ambienceBase: { name: string; volume: number }[] = [];
   private ambienceSent = '[]';
@@ -400,6 +407,29 @@ export class World {
     this.music = n;
     this.log(`music: ${n}`);
     this.opts.music?.({ type: 'play', name: n, volume: opts.volume ?? 0.6, loop: opts.loop !== false, fade: opts.fade ?? 1 });
+  }
+
+  /** Holds everything still for an instant: the weight of a blow. */
+  hitstop(seconds: number): void {
+    if (this.clock >= this.hitstopUntil) this.hitstopFrom = this.clock;
+    this.hitstopUntil = Math.max(this.hitstopUntil, this.clock + Math.max(0, Number(seconds) || 0));
+  }
+
+  /** The clock animations follow: it stands still during a hit stop. */
+  get animClock(): number {
+    return this.clock < this.hitstopUntil ? this.hitstopFrom : this.clock;
+  }
+
+  /** Where the water of this scene is. */
+  waterMap(): WaterMap | null {
+    const cfg = this.scene.atmosphere?.reflections;
+    if (!cfg) return null;
+    if (this.water?.scene !== this.scene) {
+      const map = findWater(this.scene.layers, this.scene.cols, this.scene.rows, this.tileResolver(this.scene.tileset ?? ''));
+      addWaterActors(map, this.actors, cfg.sprites ?? [], this.scene.tileSize);
+      this.water = { scene: this.scene, map };
+    }
+    return this.water.map;
   }
 
   /** The sounds that loop now, replacing the scene's ones: names or { sound, volume }. An empty list is silence. */
@@ -1095,8 +1125,10 @@ export class World {
       this.applyPendingScene();
       return;
     }
-    this.particles.tick(dt);
-    this.vfx.tick(dt);
+    if (this.clock >= this.hitstopUntil) {
+      this.particles.tick(dt);
+      this.vfx.tick(dt);
+    }
     const moteCfg = this.scene.atmosphere?.motes;
     if (moteCfg !== this.motesFor) {
       this.motesFor = moteCfg;
@@ -1109,6 +1141,12 @@ export class World {
       this.motes2.reset(mote2Cfg);
     }
     this.motes2.tick(dt, { x: this.camera.x, y: this.camera.y, w: this.viewWidth, h: this.viewHeight });
+    const rainCfg = this.scene.atmosphere?.rain;
+    if (rainCfg !== this.rainFor) {
+      this.rainFor = rainCfg;
+      this.rain.reset(rainCfg);
+    }
+    this.rain.tick(dt, { x: this.camera.x, y: this.camera.y, w: this.viewWidth, h: this.viewHeight }, (name, volume) => this.opts.sound?.(name, volume));
     this.stepFoliage(dt);
     if (this.frame % 6 === 0) this.sendAmbience(0.3);
 
@@ -2519,7 +2557,7 @@ export class World {
 export interface Renderer {
   clear(color: string): void;
   /** Draws part of a sprite's spritesheet. */
-  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, opts: { flipX: boolean; opacity: number; angle: number; scale?: number; flat?: boolean }): void;
+  image(sprite: string, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, opts: { white?: number; flipX: boolean; opacity: number; angle: number; scale?: number; flat?: boolean }): void;
   /** blend "add" adds light instead of painting over (glows). */
   rect(x: number, y: number, w: number, h: number, color: string, alpha?: number, blend?: 'add'): void;
   text(text: string, x: number, y: number, color: string, scale: number, font?: PixelFont): void;
@@ -2538,6 +2576,8 @@ export interface Renderer {
   /** Darkens the screen edges. */
   vignette?(strength: number, color: string): void;
   /** Draws a whole cast shadow in one go, or only some of its rows; `shape` is the same object for as long as the shadow doesn't change, so it can be kept ready. */
+  /** Mirrored strips, showing only over the water pieces. */
+  reflections?(water: WaterPiece[], bands: ReflectionBand[], zoom: number): void;
   stamp?(shape: CastShape, x: number, y: number, zoom: number, color: string, alpha: number, slice?: { row: number; rows: number }): void;
 }
 
@@ -2630,6 +2670,17 @@ export function renderWorld(w: World, r: Renderer): void {
   });
 
   const atm = scene.atmosphere;
+  // Reflections: over the water, under the shadows and everything standing by it.
+  const reflect = atm?.reflections;
+  if (reflect && r.reflections) {
+    const map = w.waterMap();
+    if (map) items.push({ z: -1.8, order: 0, draw: () => {
+      const grid = tileset ? (tileset.grid ?? { width: ts, height: ts }) : null;
+      const tcols = tileset && grid ? Math.max(1, Math.floor(tileset.width / grid.width)) : 1;
+      const f0 = tileset?.frames[0];
+      drawReflections(r, reflect, map, w.actors, tileset && grid && f0 ? { name: tileset.name, tile: (t) => [f0.x + (t % tcols) * grid.width, f0.y + Math.floor(t / tcols) * grid.height], w: grid.width, h: grid.height } : null, ts, w.clock, camX, camY, zoom, vw, vh);
+    } });
+  }
   // Contact shadows: above the ground layers, below everything standing on them.
   if (atm) items.push({ z: -1.5, order: 0, draw: () => drawShadows(w, r, atm, camX, camY, zoom) });
   // Particles: behind the instances (above tiles), and in front of them.
@@ -2660,7 +2711,10 @@ export function renderWorld(w: World, r: Renderer): void {
     drawClouds(w, r, atm, camX, camY, zoom);
     w.motes.draw(r, camX, camY, zoom);
     w.motes2.draw(r, camX, camY, zoom);
+    w.rain.draw(r, camX, camY, zoom);
     postProcess(w, r, atm, camX, camY, zoom);
+    if (atm.shafts) drawShafts(r, atm.shafts, w.clock, camX, camY, zoom, vw, vh, [w.motes, w.motes2]);
+    w.rain.drawFlash(r, vw, vh);
   }
   // After the lighting: a fireball in a dark cave glows instead of being darkened with the scene.
   if (!w.scripts.effectsInUi) {

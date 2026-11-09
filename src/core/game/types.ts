@@ -156,6 +156,49 @@ export interface SceneMotes {
   color?: string | string[];
 }
 
+/** Rain over the scene, with lightning if asked. */
+export interface SceneRain {
+  /** Drops at once (default 140). */
+  count?: number;
+  /** Slant in degrees (default 12). */
+  angle?: number;
+  /** Pixels per second (default 420). */
+  speed?: number;
+  color?: string;
+  /** 0..1 (default 0.42). */
+  opacity?: number;
+  /** Little splashes where drops land (default true). */
+  splashes?: boolean;
+  /** Flashes of lightning per minute (default 0). */
+  lightning?: number;
+  flashColor?: string;
+  /** Audio file played a moment after each flash. */
+  thunder?: string;
+}
+
+/** Shafts of light through the air. */
+export interface SceneShafts {
+  /** How many fit in a screen's width, before gaps (default 5). */
+  count?: number;
+  color?: string;
+  /** 0..1 (default 0.14). */
+  opacity?: number;
+  /** Slant in degrees (default 22). */
+  angle?: number;
+  /** Pixels (default 30). */
+  width?: number;
+}
+
+/** Water that mirrors what stands by it. Tiles that animate count as water by themselves. */
+export interface SceneReflections {
+  /** 0..1 (default 0.32). */
+  opacity?: number;
+  /** Pixels the image trembles sideways (default 1). */
+  wobble?: number;
+  /** Sprites of instances that are water too (a canal laid over a dry bed). */
+  sprites?: string[];
+}
+
 /** Lighting and atmosphere of a scene: what makes it feel like a place and not a grid. */
 export interface SceneAtmosphere {
   /** Multiplied over the world: "#ffffff" = plain daylight, "#ffe8d0" warm afternoon, "#6a6aa8" dusk, "#2a2c50" night/caves. Lights cut through it. */
@@ -178,6 +221,9 @@ export interface SceneAtmosphere {
   motes?: SceneMotes;
   /** A second kind of particles over the first (dust and falling leaves together). */
   motes2?: SceneMotes;
+  rain?: SceneRain;
+  shafts?: SceneShafts;
+  reflections?: SceneReflections;
   /** Per-pixel lighting: lights and the sun shape the volumes of the sprites. */
   relief?: SceneRelief;
 }
@@ -538,8 +584,34 @@ export function normalizeAtmosphere(v: unknown): SceneAtmosphere | undefined {
     motes: moteLayer(A.motes as Record<string, unknown> | undefined),
     motes2: moteLayer(A.motes2 as Record<string, unknown> | undefined),
     relief: normalizeRelief(A.relief),
+    rain: normalizeRain(A.rain),
+    shafts: normalizeShafts(A.shafts),
+    reflections: normalizeReflections(A.reflections),
   });
   return Object.keys(out).length ? out : undefined;
+}
+
+function normalizeRain(v: unknown): SceneRain | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const R = v as Record<string, unknown>;
+  return compact({
+    count: clampN(R.count, 0, 800), angle: clampN(R.angle, -60, 60), speed: clampN(R.speed, 50, 1500), color: colorOr(R.color), opacity: clampN(R.opacity, 0, 1),
+    splashes: typeof R.splashes === 'boolean' ? R.splashes : undefined, lightning: clampN(R.lightning, 0, 30), flashColor: colorOr(R.flashColor),
+    thunder: typeof R.thunder === 'string' && R.thunder ? R.thunder : undefined,
+  });
+}
+
+function normalizeShafts(v: unknown): SceneShafts | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const S = v as Record<string, unknown>;
+  return compact({ count: clampN(S.count, 1, 24), color: colorOr(S.color), opacity: clampN(S.opacity, 0, 1), angle: clampN(S.angle, -70, 70), width: clampN(S.width, 2, 300) });
+}
+
+function normalizeReflections(v: unknown): SceneReflections | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const R = v as Record<string, unknown>;
+  const sprites = Array.isArray(R.sprites) ? R.sprites.filter((s): s is string => typeof s === 'string' && !!s) : [];
+  return compact({ opacity: clampN(R.opacity, 0, 1), wobble: clampN(R.wobble, 0, 8), sprites: sprites.length ? sprites : undefined });
 }
 
 function normalizeRelief(v: unknown): SceneRelief | undefined {

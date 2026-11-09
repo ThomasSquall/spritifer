@@ -397,6 +397,8 @@ export function validateGame(game: GameProject, scenes: Scene[], sprites: Set<st
   for (const s of scenes) {
     if (s.tileset && !sprites.has(s.tileset)) out.push({ where: `scene ${s.name}`, message: `tileset sprite "${s.tileset}" not found` });
     if (s.music && s.music !== '-' && audio && !audio.includes(s.music)) out.push({ where: `scene ${s.name}`, message: `music "${s.music}" not found in audio/` });
+    if (s.atmosphere?.rain?.thunder && audio && !audio.includes(s.atmosphere.rain.thunder)) out.push({ where: `scene ${s.name}`, message: `thunder "${s.atmosphere.rain.thunder}" not found in audio/` });
+    for (const sp of s.atmosphere?.reflections?.sprites ?? []) if (!sprites.has(sp)) out.push({ where: `scene ${s.name}`, message: `water sprite "${sp}" not found` });
     for (const l of s.ambience ?? []) if (audio && !audio.includes(l.sound)) out.push({ where: `scene ${s.name}`, message: `ambience "${l.sound}" not found in audio/` });
     for (const b of s.backgrounds) if (!sprites.has(b.sprite)) out.push({ where: `scene ${s.name} background`, message: `sprite "${b.sprite}" not found` });
     const missing = new Set(s.instances.filter((i) => !objects.has(i.object)).map((i) => i.object));

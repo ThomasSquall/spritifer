@@ -2,6 +2,8 @@
 
 import { TileResolver, type TilesetRules, tilesetFrame } from '../core/game/tilerules.js';
 import { swayBands, swayBase } from '../core/game/wind.js';
+import { RainField, drawShafts } from '../core/game/weather.js';
+import { type WaterMap, addWaterActors, drawReflections, findWater } from '../core/game/reflections.js';
 import { type AtmosphereActor, type AtmosphereWorld, MoteField, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
 import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
 import { CanvasRenderer } from '../runtime/canvasRenderer.js';
@@ -259,6 +261,9 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   let showGameLook = (() => { try { return localStorage.getItem(PREVIEW_KEY) !== '0'; } catch { return true; } })();
   const motes = new MoteField();
   const motes2 = new MoteField();
+  const rain = new RainField();
+  let rainKey = '';
+  let waterPreview: { at: number; map: WaterMap } | null = null;
   let motes2Cfg: SceneMotes | undefined;
   let motes2Key = '';
   let motesCfg: SceneMotes | undefined;
@@ -419,6 +424,27 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       }
       return atmRenderer.r;
     };
+    if (atm?.reflections && tileset) {
+      const cfg = atm.reflections;
+      const sheet = tileset;
+      items.push({ z: -1.8, o: 0, d: () => {
+        // Painting tiles changes the water, so it is looked for again now and then rather than once.
+        if (!waterPreview || now - waterPreview.at > 1000) {
+          const map = findWater(scene.layers, scene.cols, scene.rows, resolverFor());
+          addWaterActors(map, actors, cfg.sprites ?? [], ts());
+          waterPreview = { at: now, map };
+        }
+        const grid = sheet.grid ?? { width: ts(), height: ts() };
+        const tcols = Math.max(1, Math.floor(sheet.width / grid.width));
+        const f0 = sheet.frames[0]!;
+        const tileRect = (t: number): [number, number] => [f0.x + (t % tcols) * grid.width, f0.y + Math.floor(t / tcols) * grid.height];
+        ctx.save();
+        ctx.translate(view.x, view.y);
+        drawReflections(rendererFor(view.w, view.h), cfg, waterPreview.map, actors, { name: sheet.name, tile: tileRect, w: grid.width, h: grid.height }, ts(), clock, view.x, view.y, 1, view.w, view.h);
+        ctx.restore();
+        ctx.globalAlpha = 1;
+      } });
+    }
     if (atm && atm.shadows !== false) {
       items.push({ z: -1.5, o: 0, d: () => {
         drawShadows({ clock, game: { width: W, height: H }, actors, motes, bundle: { sprites } }, rendererFor(view.w, view.h), atm, 0, 0, 1);
@@ -493,6 +519,12 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       }
       if (motes2Cfg && atm.motes2) motes2Cfg.count = Math.min(400, Math.round((atm.motes2.count ?? 24) * (view.w * view.h) / Math.max(1, state.game!.width * state.game!.height)));
       motes2.tick(Math.min(0.1, (now - lastTick) / 1000), view);
+      const rainConfig = JSON.stringify(atm.rain ?? null);
+      if (rainConfig !== rainKey) {
+        rainKey = rainConfig;
+        rain.reset(atm.rain ? { ...atm.rain } : undefined);
+      }
+      rain.tick(Math.min(0.1, (now - lastTick) / 1000), view);
       ctx.save();
       ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, (panX + view.x * zoom) * dpr, (panY + view.y * zoom) * dpr);
       ctx.beginPath();
@@ -501,6 +533,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       drawClouds(world, r, atm, view.x, view.y, 1);
       motes.draw(r, view.x, view.y, 1);
       motes2.draw(r, view.x, view.y, 1);
+      rain.draw(r, view.x, view.y, 1);
       if (relief) {
         // The picture so far, at game resolution; lit there and painted back at the editor's zoom.
         relief.g.imageSmoothingEnabled = false;
@@ -513,6 +546,8 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(relief.canvas, 0, 0, view.w, view.h);
       } else postProcess(world, r, atm, view.x, view.y, 1);
+      if (atm.shafts) drawShafts(r, atm.shafts, clock, view.x, view.y, 1, view.w, view.h, [motes, motes2]);
+      rain.drawFlash(r, view.w, view.h);
       ctx.restore();
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
@@ -1324,7 +1359,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('label', { class: 'inline', title: 'Coming back to this scene (e.g. after a battle) keeps positions, opened chests, defeated enemies and instance properties. Restart Scene forgets.' },
           h('input', { type: 'checkbox', checked: !!scene.persistent, onchange: (e: Event) => { snapshot(); if ((e.target as HTMLInputElement).checked) scene.persistent = true; else delete scene.persistent; changed(); } }),
           'Remember instances when leaving'),
-        atmosphereEditor({ before: snapshot, changed, get: () => scene.atmosphere, set: (v) => { if (v) scene.atmosphere = v; else delete scene.atmosphere; },
+        atmosphereEditor({ audio: () => state.audio, before: snapshot, changed, get: () => scene.atmosphere, set: (v) => { if (v) scene.atmosphere = v; else delete scene.atmosphere; },
           sprites: () => state.sprites.filter((sp) => !sp.grid).map((sp) => sp.name), rerender: () => void loadAssets() }),
         vars,
         componentListCard('Scene components', 'Managers and level logic: a script component here runs for the whole scene (this.self is null), e.g. a battle, a wave spawner, the level HUD.', () => scene.components, (list) => { snapshot(); if (list?.length) scene.components = list; else delete scene.components; }, () => sheetContext(null, []), () => changed()),

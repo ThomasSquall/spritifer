@@ -340,6 +340,14 @@ input.expr { font-family: var(--mono); }
 .play-title { font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
 .play-body { display: grid; grid-template-columns: 1fr 300px; min-height: 0; }
 .play-frame { width: 100%; height: 100%; border: 0; background: #000; }
+.play-volume { display: inline-flex; align-items: center; gap: 6px; }
+/* Full screen: only the game, with a discreet floating bar for the music and for leaving. */
+.play-overlay:fullscreen { grid-template-rows: 1fr; }
+.play-overlay:fullscreen .play-body { grid-template-columns: 1fr; }
+.play-overlay:fullscreen .play-side { display: none; }
+.play-overlay:fullscreen .play-head { position: absolute; top: 8px; right: 8px; z-index: 1; height: 36px; border: 1px solid var(--line); border-radius: 8px; opacity: 0.3; transition: opacity 0.15s; }
+.play-overlay:fullscreen .play-head:hover, .play-overlay:fullscreen .play-head:focus-within { opacity: 1; }
+.play-overlay:fullscreen .play-head > :not(.play-keep-fullscreen) { display: none; }
 .play-logs { overflow-y: auto; background: #0d0f13; border-left: 1px solid var(--line); font: 11px/1.5 var(--mono); padding: 8px; color: #aeb5c4; }
 .play-logs .err { color: #ff8a90; }
 .play-errcount { color: #ff8a90; font-size: 12px; }

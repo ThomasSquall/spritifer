@@ -50,6 +50,8 @@ export class SoundBoard {
   private volumes = { music: 1, sfx: 1 };
   /** Music switched off: the track keeps running silently, so switching back resumes it. */
   private musicOff = false;
+  /** The player's own music volume (0..1), on top of the volume the game sets for itself. */
+  private playerMusicVolume = 1;
   private track: { name: string; src: AudioBufferSourceNode | null; gain: GainNode | null; volume: number } | null = null;
   /** Music asked for before audio was unlocked (first key or click): starts then. */
   private pendingMusic: MusicCmd | null = null;
@@ -60,11 +62,25 @@ export class SoundBoard {
 
   set musicMuted(off: boolean) {
     this.musicOff = off;
+    this.applyMusicLevel();
+  }
+
+  get musicVolume(): number {
+    return this.playerMusicVolume;
+  }
+
+  set musicVolume(volume: number) {
+    this.playerMusicVolume = Math.max(0, Math.min(1, volume));
+    this.applyMusicLevel();
+  }
+
+  private applyMusicLevel(): void {
     if (this.musicGain && this.ctx) this.musicGain.gain.setTargetAtTime(this.musicLevel(), this.ctx.currentTime, 0.05);
   }
 
+  /** Squared because hearing is not linear: half way on the slider should sound about half as loud. */
   private musicLevel(): number {
-    return this.musicOff ? 0 : this.volumes.music;
+    return this.musicOff ? 0 : this.volumes.music * this.playerMusicVolume ** 2;
   }
 
   setFiles(files: Record<string, string> | undefined): void {

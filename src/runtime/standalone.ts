@@ -30,6 +30,9 @@ if (!bundle) {
     onMusicChange: (on) => {
       if (inFrame) window.parent.postMessage({ source: 'spritifer-game', type: 'music', on }, '*');
     },
+    onMusicVolume: (volume) => {
+      if (inFrame) window.parent.postMessage({ source: 'spritifer-game', type: 'musicVolume', volume }, '*');
+    },
     // The game page served by the editor; an exported game has no button, only F4.
     fpsButton: !inFrame && location.pathname.endsWith('/play.html'),
     onFpsChange: (on) => {
@@ -45,7 +48,7 @@ if (!bundle) {
   // Messages from the editor's Play overlay: hot reload, and the live inspector (pause, step, inspect, edit).
   if (inFrame) {
     window.addEventListener('message', (e: MessageEvent) => {
-      const d = e.data as { source?: string; type?: string; scripts?: Record<string, string>; on?: boolean; edit?: WorldEdit };
+      const d = e.data as { source?: string; type?: string; scripts?: Record<string, string>; on?: boolean; volume?: number; edit?: WorldEdit };
       if (e.source !== window.parent || d?.source !== 'spritifer-editor') return;
       void playing.then((player) => {
         switch (d.type) {
@@ -56,6 +59,9 @@ if (!bundle) {
             return;
           case 'music':
             player.music = !!d.on;
+            return;
+          case 'musicVolume':
+            player.musicVolume = Number(d.volume) || 0;
             return;
           case 'fps':
             player.fps = !!d.on;

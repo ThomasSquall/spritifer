@@ -22,6 +22,8 @@ export interface PlayerOptions {
   musicButton?: boolean;
   /** Called with the music state at start and whenever it changes. */
   onMusicChange?: (on: boolean) => void;
+  /** Called once at start with the music volume (0..1) remembered in this browser. */
+  onMusicVolume?: (volume: number) => void;
   /** Small on-screen button for the frame-rate readout (for playing from the editor's server, not in exported games). */
   fpsButton?: boolean;
   /** Called with the state of the frame-rate readout at start and whenever it changes. */
@@ -38,6 +40,8 @@ export interface Player {
   stepOnce(): void;
   /** Music on or off while the game runs (effects are not affected). */
   music: boolean;
+  /** Music volume, 0..1; remembered in this browser. */
+  musicVolume: number;
   /** Frame-rate readout on or off (F4). */
   fps: boolean;
 }
@@ -97,6 +101,7 @@ const STYLE = `
 `;
 
 const MUSIC_PREF = '__music';
+const MUSIC_VOLUME_PREF = '__musicVolume';
 const FPS_PREF = '__fps';
 
 /** Starts the game inside `container`. Resolves once the sprites are loaded. */
@@ -184,6 +189,9 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     root.append(musicBtn);
   }
   showMusic();
+  const savedVolume = storage.get(MUSIC_VOLUME_PREF);
+  sound.musicVolume = savedVolume === null ? 1 : Number(savedVolume) || 0;
+  opts.onMusicVolume?.(sound.musicVolume);
 
   // ---------------------------------------------------------------- frame-rate readout
   let fpsOn = storage.get(FPS_PREF) === 'on';
@@ -492,6 +500,13 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     },
     set music(on: boolean) {
       setMusic(on);
+    },
+    get musicVolume() {
+      return sound.musicVolume;
+    },
+    set musicVolume(volume: number) {
+      sound.musicVolume = volume;
+      storage.set(MUSIC_VOLUME_PREF, String(sound.musicVolume));
     },
     get fps() {
       return fpsOn;

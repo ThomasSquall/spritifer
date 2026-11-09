@@ -88,7 +88,7 @@ export async function openPlay(scene?: string): Promise<void> {
     logs.scrollTop = logs.scrollHeight;
   };
   const onMsg = (e: MessageEvent) => {
-    const d = e.data as { source?: string; type?: string; message?: string; data?: unknown; on?: boolean };
+    const d = e.data as { source?: string; type?: string; message?: string; data?: unknown; on?: boolean; volume?: number };
     if (e.source === frame.contentWindow && d?.source === 'spritifer-game' && d.type === 'inspect' && d.data) inspector.update(d.data as Parameters<typeof inspector.update>[0]);
     if (e.source !== frame.contentWindow || d?.source !== 'spritifer-game') return;
     if (d.type === 'log' && d.message) addLog(d.message);
@@ -97,6 +97,7 @@ export async function openPlay(scene?: string): Promise<void> {
       musicOn = !!d.on;
       musicBtn.classList.toggle('on', musicOn);
     }
+    if (d.type === 'musicVolume') showVolume(Number(d.volume) || 0);
     if (d.type === 'fps') {
       fpsOn = !!d.on;
       fpsBtn.classList.toggle('on', fpsOn);
@@ -114,10 +115,13 @@ export async function openPlay(scene?: string): Promise<void> {
     inspector.destroy();
     window.removeEventListener('message', onMsg);
     document.removeEventListener('keydown', onKey, true);
+    document.removeEventListener('fullscreenchange', onFullscreen);
     overlay.remove();
     setOpen(false);
   };
   const onKey = (e: KeyboardEvent) => {
+    // In full screen Esc belongs to the browser: it leaves full screen and must not also close the game.
+    if (document.fullscreenElement || performance.now() - leftFullscreenAt < 300) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       close();
@@ -128,6 +132,39 @@ export async function openPlay(scene?: string): Promise<void> {
   const hitBtn = h('button', { class: 'small', title: 'Show collision boxes (F2 in game)', onclick: () => { debug = !debug; hitBtn.classList.toggle('on', debug); reload(); } }, 'Hitboxes');
   let musicOn = true;
   const musicBtn = h('button', { class: 'small on', title: 'Music on or off while the game runs (F3 in game); remembered for the next Play', onclick: () => { sendToGame({ type: 'music', on: !musicOn }); frame.focus(); } }, 'Music');
+  const volumeSlider = h('input', {
+    type: 'range', min: '0', max: '100', value: '100', 'aria-label': 'Music volume',
+    oninput: () => {
+      const volume = Number(volumeSlider.value) / 100;
+      sendToGame({ type: 'musicVolume', volume });
+      volumeSlider.title = volumeTitle(volume);
+      // Moving the slider while the music is off would otherwise seem to do nothing.
+      if (!musicOn && volume > 0) sendToGame({ type: 'music', on: true });
+    },
+    onchange: () => frame.focus(),
+  });
+  const volumeTitle = (volume: number) => `Music volume: ${Math.round(volume * 100)}%; remembered for the next Play`;
+  const showVolume = (volume: number) => {
+    volumeSlider.value = String(Math.round(volume * 100));
+    volumeSlider.title = volumeTitle(volume);
+  };
+  showVolume(1);
+  let leftFullscreenAt = -Infinity;
+  const fullscreenLabel = () => (document.fullscreenElement === overlay ? 'Exit full screen' : 'Full screen');
+  const fullscreenBtn = h('button', {
+    class: 'small play-keep-fullscreen', title: 'Play on the whole screen (Esc leaves full screen)',
+    onclick: () => {
+      const change = document.fullscreenElement === overlay ? document.exitFullscreen() : overlay.requestFullscreen();
+      change.catch(() => toast('This browser refused full screen', 'error'));
+    },
+  }, 'Full screen');
+  fullscreenBtn.hidden = !document.fullscreenEnabled;
+  const onFullscreen = () => {
+    if (document.fullscreenElement !== overlay) leftFullscreenAt = performance.now();
+    fullscreenBtn.textContent = fullscreenLabel();
+    frame.focus();
+  };
+  document.addEventListener('fullscreenchange', onFullscreen);
   let fpsOn = false;
   const fpsBtn = h('button', { class: 'small', title: 'Show frame rate and frame time on the game (F4 in game); remembered for the next Play', onclick: () => { sendToGame({ type: 'fps', on: !fpsOn }); frame.focus(); } }, 'FPS');
   const overlay = h('div', { class: 'play-overlay' },
@@ -137,10 +174,11 @@ export async function openPlay(scene?: string): Promise<void> {
       h('span', { class: 'spacer' }),
       errCount,
       hotBtn,
-      musicBtn,
+      h('span', { class: 'play-volume play-keep-fullscreen' }, musicBtn, volumeSlider),
       fpsBtn,
       hitBtn,
       h('button', { class: 'small', onclick: reload }, 'Restart'),
+      fullscreenBtn,
       h('button', { class: 'small', onclick: () => window.open(gameApi.playUrl(scene), '_blank') }, 'New tab'),
       iconButton('close', 'Close (Esc)', close),
     ),

@@ -6,6 +6,7 @@
  * Perspective is therefore something added to the game's picture, and at zero it is the game's picture.
  */
 
+import type { HdCells } from './hd.js';
 import { findWater } from './reflections.js';
 import type { TileResolver } from './tilerules.js';
 import type { TileLayer } from './types.js';
@@ -75,20 +76,20 @@ export function overscanOf(cam: Camera3d): { left: number; top: number; right: n
   return { left: side, right: side, top, bottom: 0 };
 }
 
-/** A wall cell: part of the vertical front, or part of the top. */
-export type WallCell = { face: number } | { cap: number; left: boolean; right: boolean };
+/** A wall cell: part of the vertical front, or part of the top. `stretch` makes a front taller than the rows it has. */
+export type WallCell = { face: number; stretch?: number } | { cap: number; left: boolean; right: boolean };
 
 /**
  * Which cells stand up, read from the map as it is. A solid cell is a wall when the ground art under it is used only under
  * solid cells (so it is painted masonry, not grass under a tree trunk) and doesn't animate (water blocks the way too).
  * A map where such cells are a minority has no walls. In a column of wall cells the lowest `wallRows` are the front; the ones above are the top.
  */
-export function findWalls(layers: readonly TileLayer[], cols: number, rows: number, resolver: TileResolver, wallRows: number): (WallCell | null)[] {
+export function findWalls(layers: readonly TileLayer[], cols: number, rows: number, resolver: TileResolver, wallRows: number, corrections?: HdCells): (WallCell | null)[] {
   const total = cols * rows;
   const out: (WallCell | null)[] = new Array(total).fill(null);
   const solid = layers.filter((l) => l.solid);
   const ground = layers.find((l) => !l.solid);
-  if (!solid.length || wallRows <= 0) return out;
+  if (wallRows <= 0) return out;
   const blocked = (i: number) => solid.some((l) => l.tiles[i]! >= 0);
   const open = new Set<number>();
   if (ground) for (let i = 0; i < total; i++) if (!blocked(i)) open.add(ground.tiles[i]!);
@@ -107,7 +108,16 @@ export function findWalls(layers: readonly TileLayer[], cols: number, rows: numb
   }
   // Masonry makes up most of what blocks a built map. Out of doors a tile or two that happens to be used only at the
   // edge of the map is not a wall: there, trees and houses are what stands up.
-  if (wallCells < blockedCells / 2) return out;
+  if (wallCells < blockedCells / 2) isWall.fill(0);
+  // What was corrected by hand wins over all of the above.
+  const fronts = new Map<number, number>();
+  for (const [key, n] of Object.entries(corrections ?? {})) {
+    const [x, y] = key.split(',').map(Number) as [number, number];
+    if (x >= cols || y >= rows) continue;
+    const i = y * cols + x;
+    isWall[i] = n > 0 ? 1 : 0;
+    if (n > 0) fronts.set(i, n);
+  }
   const wall = (x: number, y: number) => x >= 0 && y >= 0 && x < cols && y < rows && !!isWall[y * cols + x];
   for (let x = 0; x < cols; x++) {
     for (let y = rows - 1; y >= 0; y--) {
@@ -115,12 +125,25 @@ export function findWalls(layers: readonly TileLayer[], cols: number, rows: numb
       let top = y;
       while (wall(x, top - 1)) top--;
       const length = y - top + 1;
+      // A height corrected by hand anywhere in the column sets the whole column; the lowest cell decides.
+      let wanted = wallRows;
+      let byHand = false;
+      for (let cy = y; cy >= top; cy--) {
+        const n = fronts.get(cy * cols + x);
+        if (n !== undefined) {
+          wanted = n;
+          byHand = true;
+          break;
+        }
+      }
       // A wall running off the bottom of the map shows no front: only its top is seen.
-      const front = y === rows - 1 ? 0 : Math.min(wallRows, length);
-      const raise = y === rows - 1 ? Math.min(wallRows, length) : front;
+      const front = y === rows - 1 ? 0 : Math.min(wanted, length);
+      const raise = y === rows - 1 ? Math.min(wanted, length) : front;
+      // Asked by hand for more height than the column has rows: its art is stretched to get there.
+      const stretch = byHand && y !== rows - 1 && length < wanted ? wanted / length : undefined;
       for (let cy = y; cy >= top; cy--) {
         const row = y - cy;
-        out[cy * cols + x] = row < front ? { face: row } : { cap: raise, left: !wall(x - 1, cy), right: !wall(x + 1, cy) };
+        out[cy * cols + x] = row < front ? { face: row, ...(stretch ? { stretch } : {}) } : { cap: raise, left: !wall(x - 1, cy), right: !wall(x + 1, cy) };
       }
       y = top;
     }

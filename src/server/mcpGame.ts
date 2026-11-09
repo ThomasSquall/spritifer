@@ -36,7 +36,7 @@ import {
   resizeScene,
 } from '../core/game/types.js';
 import { exportAndroid } from './android.js';
-import { HD_FIELDS, normalizeHd } from '../core/game/hd.js';
+import { HD_CELL_MAX_ROWS, HD_FIELDS, normalizeHd } from '../core/game/hd.js';
 import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePreview, renderVfxStrip, renderViewport } from './game.js';
 import { type VfxEdge, type VfxGraph, VFX_NAME_RE, VFX_REFERENCE, VFX_TEMPLATES, VFX_TEMPLATE_IDS, VFX_NODE_TYPES, checkVfx, normalizeVfx, vfxEdgePort, vfxHasCycle, vfxInputErrors } from '../core/game/vfxGraph.js';
 import { encodePng } from './png.js';
@@ -596,7 +596,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     region: z.object({ x: z.number().int(), y: z.number().int(), w: z.number().int(), h: z.number().int() }).optional().describe('Tile region for the dump'),
   }, (a) => {
     const s = ws.loadScene(a.scene);
-    const lines = [describeScene(s), '', 'Instances:'];
+    const lines = [describeScene(s), ...(s.hdCells ? [`2D-HD wall corrections (x,y: 0 flat, n front rows): ${JSON.stringify(s.hdCells)}`] : []), '', 'Instances:'];
     for (const i of s.instances) lines.push(`- ${i.id}: ${i.name ? `"${i.name}" (${i.object})` : i.object}${i.sprite ? ` sprite ${i.sprite}` : ''} at ${i.x},${i.y} (tile ${Math.floor(i.x / s.tileSize)},${Math.floor(i.y / s.tileSize)})${i.flipX ? ' flipped' : ''}${i.props ? ' ' + JSON.stringify(i.props) : ''}${i.components ? ' components ' + JSON.stringify(i.components) : ''}${i.activeIf ? ` active if (${i.activeIf})` : ''}`);
     if (a.layer) {
       const l = s.layers.find((x) => x.name === a.layer);
@@ -628,6 +628,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       backgrounds: z.array(z.object({ sprite: z.string(), parallax: z.number().optional(), repeat_x: z.boolean().optional(), y: z.number().optional() })).optional().describe('Parallax background images, back to front'),
       variables: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       y_sort: z.boolean().optional().describe('Draw instances lower on screen in front (top-down / RPG depth)'),
+      hd_walls: z.array(z.object({ x: z.number().int().min(0), y: z.number().int().min(0), w: z.number().int().min(1).optional(), h: z.number().int().min(1).optional(), mode: z.enum(['auto', 'flat', 'wall']), rows: z.number().int().min(1).max(HD_CELL_MAX_ROWS).optional().describe('With mode wall: height of the front in tiles (default 3). The whole column of wall cells takes it') })).optional().describe('Corrections to the automatic walls of the 2D-HD view, cell by cell or by rectangle, merged with the ones already there. auto removes a correction'),
       persistent: z.boolean().optional().describe('Remember instances when leaving (positions, properties, destroyed ones), e.g. an RPG town you come back to after a battle'),
       components: z.array(stepSchema).optional().describe('Scene components (replace the list): [{ type: "script", name: "Battle", foeHp: 12 }] — managers, level logic, HUD'),
       music: z.string().nullable().optional().describe('Music when the scene starts: an audio file name (list_audio), "-" for silence, null = keep what plays'),
@@ -639,6 +640,18 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         if (a.persistent !== undefined) {
           if (a.persistent) s.persistent = true;
           else delete s.persistent;
+        }
+        for (const c of a.hd_walls ?? []) {
+          const cells = { ...(s.hdCells ?? {}) };
+          for (let y = c.y; y < c.y + (c.h ?? 1); y++) {
+            for (let x = c.x; x < c.x + (c.w ?? 1); x++) {
+              if (x >= s.cols || y >= s.rows) throw new Error(`hd_walls: cell ${x},${y} is outside the scene`);
+              if (c.mode === 'auto') delete cells[`${x},${y}`];
+              else cells[`${x},${y}`] = c.mode === 'flat' ? 0 : (c.rows ?? 3);
+            }
+          }
+          if (Object.keys(cells).length) s.hdCells = cells;
+          else delete s.hdCells;
         }
         if (a.y_sort !== undefined) {
           if (a.y_sort) s.ySort = true;

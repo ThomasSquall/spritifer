@@ -4,7 +4,7 @@
  *
  * Every parameter lives in HD_FIELDS, the one table the normalizer, the editor sliders and the MCP tools read.
  * The browser draws the look with shaders (runtime/hdCompositor.ts); applyHdBuffer is the same look on plain pixels,
- * for the editor preview and the headless screenshots. Keep the two in step. Pure and browser-safe.
+ * for the headless screenshots. Keep the two in step. Pure and browser-safe.
  */
 
 import type { ScreenLight } from './atmosphere.js';
@@ -92,6 +92,19 @@ export interface HdFrame {
   /** Where the camera target stands on the screen, 0..1. */
   subjectY: number;
   lights: ScreenLight[];
+}
+
+/** Corrections to the automatic walls, by "x,y" of the cell: 0 = stays flat, n = wall with a front n tiles high. */
+export type HdCells = Record<string, number>;
+export const HD_CELL_MAX_ROWS = 8;
+
+export function normalizeHdCells(v: unknown): HdCells | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const out: HdCells = {};
+  for (const [k, n] of Object.entries(v as Record<string, unknown>)) {
+    if (/^\d+,\d+$/.test(k) && typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= HD_CELL_MAX_ROWS) out[k] = n;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));

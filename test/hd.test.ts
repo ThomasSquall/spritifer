@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { HD_FIELDS, type HdFrame, applyHdBuffer, hdBlurAt, normalizeHd, resolveHd } from '../src/core/game/hd.js';
-import { normalizeAtmosphere, normalizeGame } from '../src/core/game/types.js';
+import { HD_FIELDS, type HdFrame, applyHdBuffer, hdBlurAt, normalizeHd, normalizeHdCells, resolveHd } from '../src/core/game/hd.js';
+import { normalizeAtmosphere, normalizeGame, normalizeScene } from '../src/core/game/types.js';
 
 const flat = { bloom: 0, haze: 0, halo: 0, exposure: 1, contrast: 1, saturation: 1, vignette: 0, blurFar: 0, blurNear: 0 };
 const frame = (over: object): HdFrame => ({ hd: resolveHd({ ...flat, ...over }, undefined)!, subjectY: 0.5, lights: [] });
@@ -41,6 +41,15 @@ describe('auto 2D-HD settings', () => {
   it('lets lamps shine only in the dark', () => {
     expect(resolveHd(undefined, undefined, '#ffffff')!.darkness).toBe(0);
     expect(resolveHd(undefined, undefined, '#202030')!.darkness).toBe(1);
+  });
+});
+
+describe('auto 2D-HD wall corrections', () => {
+  it('keep what is valid and survive with the scene', () => {
+    expect(normalizeHdCells({ '3,4': 2, '1,1': 0, nope: 1, '2,2': 99, '5,5': 1.5 })).toEqual({ '3,4': 2, '1,1': 0 });
+    expect(normalizeHdCells({})).toBeUndefined();
+    expect(normalizeScene({ hdCells: { '3,4': 2 } }).hdCells).toEqual({ '3,4': 2 });
+    expect(normalizeScene({}).hdCells).toBeUndefined();
   });
 });
 

@@ -25,6 +25,7 @@ export function clear(el: Element): void {
 }
 
 const ICONS: Record<string, string> = {
+  wall: '<path d="M3 4.5h14v11H3zM3 8.2h14M3 11.8h14M8 4.5v3.7M13 4.5v3.7M6 8.2v3.6M11 8.2v3.6M15 8.2v3.6M8 11.8v3.7M13 11.8v3.7"/>',
   pencil: '<path d="M4 16l1-4 8-8 3 3-8 8z"/><path d="M11.5 5.5l3 3"/>',
   eraser: '<path d="M3.5 13.5l7-7 6 6-4 4h-5z"/><path d="M7 10l6 6"/><path d="M8 16.5h9"/>',
   fill: '<path d="M4 9l5-5 7 7-5 5z"/><path d="M4 9h12"/><path d="M17.5 13s1.5 2 1.5 3a1.5 1.5 0 0 1-3 0c0-1 1.5-3 1.5-3z"/>',

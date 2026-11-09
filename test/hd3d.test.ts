@@ -83,6 +83,32 @@ describe('2D-HD walls', () => {
     expect(cells[0]).toEqual({ face: 0 });
   });
 
+  it('follows the corrections painted by hand', () => {
+    const cells = findWalls(map(rows), 3, 6, resolver, 3, { '1,3': 0, '2,3': 1 });
+    // Taking a cell out splits the column: what is left above it has no floor of its own, and is a shorter wall.
+    expect(cells[3 * 3 + 1]).toBeNull();
+    expect(cells[2 * 3 + 1]).toEqual({ face: 0 });
+    // A height set low in a column sets it for the column.
+    expect(cells[3 * 3 + 2]).toEqual({ face: 0 });
+    expect(cells[2 * 3 + 2]).toEqual({ cap: 1, left: false, right: true });
+  });
+
+  it('raises what the automatic detection left flat', () => {
+    const cells = findWalls(map(['...', '...', '...'], true), 3, 3, resolver, 3, { '1,0': 2, '1,1': 2 });
+    expect(cells[1 * 3 + 1]).toEqual({ face: 0 });
+    expect(cells[1]).toEqual({ face: 1 });
+    expect(cells[0]).toBeNull();
+  });
+
+  it('stretches a short wall to the height asked by hand, but never an automatic one', () => {
+    expect(findWalls(map(['...', '...', '...'], true), 3, 3, resolver, 3, { '1,1': 3 })[1 * 3 + 1]).toEqual({ face: 0, stretch: 3 });
+    expect(findWalls(map(['###', '...']), 3, 2, resolver, 3)[1]).toEqual({ face: 0 });
+  });
+
+  it('ignores corrections left outside a map that was made smaller', () => {
+    expect(findWalls(map(['...']), 3, 1, resolver, 3, { '9,9': 2 }).every((c) => c === null)).toBe(true);
+  });
+
   it('does nothing with no rows asked for', () => {
     expect(findWalls(map(rows), 3, 6, resolver, 0).every((c) => c === null)).toBe(true);
   });

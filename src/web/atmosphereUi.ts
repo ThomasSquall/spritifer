@@ -114,6 +114,8 @@ export interface AtmosphereEditorOptions extends EditHooks {
   rerender?(): void;
   /** The game-wide 2D-HD settings this scene falls back to. */
   gameHd?(): GameHd | undefined;
+  /** Opens the 2D-HD view of the scene. */
+  showHd?(): void;
 }
 
 /** The "Atmosphere" section of the scene settings. */
@@ -227,6 +229,7 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
     const hd2 = h('div', { class: 'atm-group' },
       h('div', { class: 'atm-group-title', title: 'Bloom, depth of field and haze over the picture. Maps and sprites are not touched. The game-wide values are in Game settings' }, 'Auto 2D-HD'),
       hdSel,
+      o.showHd ? h('button', { class: 'small', type: 'button', title: 'See the scene through the game\'s own 2D-HD camera while you move these settings', onclick: () => o.showHd!() }, 'Open 2D-HD view') : null,
       hdMode === 'own' && atm.hd ? hdSliders(atm.hd, o.gameHd?.(), o) : null,
     );
 

@@ -483,8 +483,9 @@ export class HdScene implements Renderer {
     const P = (px: number, py: number, h: number) => worldPoint(cam, px - cx, py - cy, h);
     if ('face' in cell) {
       const foot = y + size * (cell.face + 1);
-      const h0 = cell.face * size * raise;
-      const h1 = (cell.face + 1) * size * raise;
+      const tall = size * raise * (cell.stretch ?? 1);
+      const h0 = cell.face * tall;
+      const h1 = (cell.face + 1) * tall;
       this.push(this.stand, { ...base, src, flat, depth: foot - cy, at: [P(x, foot, h1), P(x + size, foot, h1), P(x + size, foot, h0), P(x, foot, h0)] });
       return;
     }

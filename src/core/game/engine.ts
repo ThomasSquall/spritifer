@@ -432,7 +432,7 @@ export class World {
   /** Which cells of the map stand up in the 2D-HD perspective. */
   wallMap(rows: number): (WallCell | null)[] {
     if (this.walls?.scene !== this.scene || this.walls.rows !== rows) {
-      this.walls = { scene: this.scene, rows, cells: findWalls(this.scene.layers, this.scene.cols, this.scene.rows, this.tileResolver(this.scene.tileset ?? ''), rows) };
+      this.walls = { scene: this.scene, rows, cells: findWalls(this.scene.layers, this.scene.cols, this.scene.rows, this.tileResolver(this.scene.tileset ?? ''), rows, this.scene.hdCells) };
     }
     return this.walls.cells;
   }

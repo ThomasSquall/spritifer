@@ -7,7 +7,7 @@ import { type TilesetRules, normalizeTilesetRules } from './tilerules.js';
 import type { SpriteRelief } from '../sprite.js';
 import type { VfxGraph } from './vfxGraph.js';
 import { BUILTIN_FONT, FONTS } from './font.js';
-import { type GameHd, type SceneHd, normalizeHd } from './hd.js';
+import { type GameHd, type HdCells, type SceneHd, normalizeHd, normalizeHdCells } from './hd.js';
 import type { ScatterRecipe, SceneGroup } from './sceneOps.js';
 
 export type Value = number | string | boolean;
@@ -318,6 +318,8 @@ export interface Scene {
   ySort?: boolean;
   /** Remember placed instances when leaving the scene (positions, properties, destroyed ones): RPG towns. Restarting the scene forgets. */
   persistent?: boolean;
+  /** Corrections to the automatic walls of the 2D-HD perspective. */
+  hdCells?: HdCells;
   /** Music when the scene starts: an audio file name, "-" for silence; absent = keep what plays. */
   music?: string;
   /** Sounds that loop while the scene lasts (wind, crickets, dripping): they fade across scene changes. */
@@ -734,6 +736,7 @@ export function normalizeScene(v: unknown): Scene {
     events: normalizeEvents(o.events),
     ...(o.ySort === true ? { ySort: true } : {}),
     ...(o.persistent === true ? { persistent: true } : {}),
+    ...(normalizeHdCells(o.hdCells) ? { hdCells: normalizeHdCells(o.hdCells) } : {}),
     ...(typeof o.music === 'string' && o.music ? { music: o.music } : {}),
     ...(normalizeAmbience(o.ambience) ? { ambience: normalizeAmbience(o.ambience) } : {}),
     variables: vars(o.variables),

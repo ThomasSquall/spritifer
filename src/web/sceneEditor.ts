@@ -4,11 +4,13 @@ import { TileResolver, type TilesetRules, tilesetFrame } from '../core/game/tile
 import { swayBands, swayBase } from '../core/game/wind.js';
 import { RainField, drawShafts } from '../core/game/weather.js';
 import { type WaterMap, addWaterActors, drawReflections, findWater } from '../core/game/reflections.js';
-import { type AtmosphereActor, type AtmosphereWorld, MoteField, collectLights, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
-import { applyHdBuffer, resolveHd } from '../core/game/hd.js';
+import { type AtmosphereActor, type AtmosphereWorld, MoteField, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
 import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
 import { CanvasRenderer } from '../runtime/canvasRenderer.js';
 import { atmosphereEditor, lightEditor } from './atmosphereUi.js';
+import { HdPreview } from './hdPreview.js';
+import { HD_CELL_MAX_ROWS, HD_FIELDS, resolveHd } from '../core/game/hd.js';
+import { type WallCell, findWalls } from '../core/game/hd3d.js';
 import { openTileRules } from './tileRulesUi.js';
 import { renderEventSheet } from './eventSheet.js';
 import { checkExpr } from '../core/game/expr.js';
@@ -27,7 +29,7 @@ import { updateContext } from './editorContext.js';
 import { type MapNote } from './gameApi.js';
 import { openUsages } from './usagesView.js';
 
-type Tool = 'paint' | 'rect' | 'fill' | 'erase' | 'place' | 'select' | 'scatter' | 'note';
+type Tool = 'paint' | 'rect' | 'fill' | 'erase' | 'place' | 'select' | 'scatter' | 'note' | 'walls';
 
 /** The copied part of a map; it stays while moving to another scene. */
 let clipboard: SceneStamp | null = null;
@@ -41,6 +43,7 @@ const TOOLS: { id: Tool; label: string; icon: string; key: string }[] = [
   { id: 'select', label: 'Select / move objects (Shift+click adds one, Shift+drag or drag on empty space selects an area)', icon: 'move', key: 'V' },
   { id: 'scatter', label: 'Scatter objects (settings in the Groups tab)', icon: 'onion', key: 'S' },
   { id: 'note', label: 'Note on the map (Claude reads these)', icon: 'tag', key: 'N' },
+  { id: 'walls', label: 'Correct the walls of the 2D-HD view', icon: 'wall', key: 'W' },
 ];
 
 interface Brush {
@@ -123,8 +126,16 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     if (undoStack.length > 80) undoStack.shift();
     redoStack.length = 0;
   };
+  const hdPreview = new HdPreview({
+    wrap: () => wrap,
+    scene: () => scene,
+    sprites: () => new Map(tileset ? [...assets, [tileset.name, tileset]] : assets),
+    center: () => { const v = visibleRect(); return { x: v.x + v.w / 2, y: v.y + v.h / 2 }; },
+    onVisible: (on) => { hdBtn.classList.toggle('active', on); if (!on) draw(); },
+  });
   const changed = () => {
     dirty = true;
+    hdPreview.invalidate();
     saveLabel.textContent = 'Unsaved';
     saveLabel.dataset.state = 'dirty';
     clearTimeout(saveTimer);
@@ -187,6 +198,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     atmRenderer = null;
     reliefRenderer = null;
     reliefCache.clear();
+    hdPreview.reload();
     draw();
     renderPalette();
     renderRight();
@@ -211,6 +223,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   gridBtn.classList.toggle('active', showGrid);
   const dimBtn = iconButton('eye', 'Dim other layers', () => { dimOthers = !dimOthers; dimBtn.classList.toggle('active', dimOthers); draw(); });
   const lookBtn = iconButton('sun', 'Game look (L): preview lights, shadows, clouds, particles, color grade and animated tiles as in Play', () => setGameLook(!showGameLook));
+  const hdBtn = h('button', { class: 'small', title: 'See the scene through the game\'s 2D-HD camera: perspective, raised walls, depth of field. Its settings are in the Scene tab, under Atmosphere', onclick: () => hdPreview.toggle() }, '2D-HD');
   const nameBtn = h('button', { class: 'sprite-name', title: 'Rename scene', onclick: async () => {
     const to = await promptText('Rename scene', 'New name', scene.name);
     if (!to || to === scene.name) return;
@@ -262,6 +275,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       gridBtn,
       dimBtn,
       lookBtn,
+      hdBtn,
       h('span', { class: 'sep' }),
       h('button', { class: 'small', onclick: () => void openEvents() }, icon('tag', 14), 'Scene events'),
       h('button', { class: 'small', title: 'Find what uses this scene', onclick: () => void openUsages('scene', scene.name) }, icon('target', 14), 'Usages'),
@@ -371,7 +385,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     };
   });
   // Not behind the Play overlay: the game runs on the same thread, and this redraws every light at full size.
-  const animating = () => showGameLook && !isPlaying() && !!(scene.atmosphere || (tileset && tileset.frames.length > 1) || state.game?.objects.some((o) => o.sway));
+  const animating = () => showGameLook && !isPlaying() && !hdPreview.visible && !!(scene.atmosphere || (tileset && tileset.frames.length > 1) || state.game?.objects.some((o) => o.sway));
   const stopWatchingPlay = onPlayChange(() => {
     if (animating() && !raf && canvas.isConnected) raf = requestAnimationFrame(loop);
   });
@@ -615,18 +629,6 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       ctx.restore();
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
-      // Auto 2D-HD, shown when the game or this scene has it set.
-      const hd = (state.game?.hd?.enabled || (atm.hd && !atm.hd.off)) ? resolveHd(state.game?.hd, atm.hd, atm.ambient) : null;
-      if (hd) {
-        const k = zoom * dpr;
-        const px = { x: Math.round((panX + view.x * zoom) * dpr), y: Math.round((panY + view.y * zoom) * dpr), w: Math.round(view.w * k), h: Math.round(view.h * k) };
-        const lights = collectLights(world, view.x, view.y, 1).map((l) => ({ ...l, x: l.x * k, y: l.y * k, radius: l.radius * k }));
-        if (px.w > 0 && px.h > 0) {
-          const picture = ctx.getImageData(px.x, px.y, px.w, px.h);
-          applyHdBuffer(picture.data, px.w, px.h, { hd, subjectY: 0.55, lights });
-          ctx.putImageData(picture, px.x, px.y);
-        }
-      }
     }
     lastTick = now;
     hudItems.sort((a, b) => a.z - b.z || a.o - b.o);
@@ -719,6 +721,36 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     });
     ctx.textAlign = 'start';
     ctx.textBaseline = 'alphabetic';
+    if (tool === 'walls') {
+      const cells = wallCells();
+      const px = ts() * zoom;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `600 ${Math.max(9, Math.min(14, px * 0.4))}px system-ui`;
+      for (let y = 0; y < scene.rows; y++) {
+        for (let x = 0; x < scene.cols; x++) {
+          const c = cells[y * scene.cols + x];
+          const set = scene.hdCells?.[`${x},${y}`];
+          if (!c && set === undefined) continue;
+          ctx.fillStyle = !c ? '#e43b4455' : 'face' in c ? '#feae3466' : '#4fa4ff55';
+          ctx.fillRect(sx(x * ts()), sy(y * ts()), px, px);
+          if (set === undefined) continue;
+          // Corrected by hand: outlined, with what was asked.
+          ctx.strokeStyle = '#ffffff';
+          ctx.strokeRect(sx(x * ts()) + 1, sy(y * ts()) + 1, px - 2, px - 2);
+          if (px >= 12) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(set === 0 ? '×' : String(set), sx((x + 0.5) * ts()), sy((y + 0.5) * ts()));
+          }
+        }
+      }
+      ctx.textAlign = 'start';
+      ctx.textBaseline = 'alphabetic';
+      if (hover) {
+        ctx.strokeStyle = wallBrush === null ? '#e43b44' : '#feae34';
+        ctx.strokeRect(sx(hover.x * ts()), sy(hover.y * ts()), px, px);
+      }
+    }
     // Hover / brush ghost.
     if (hover) {
       if (tool === 'scatter' && scatterForm.mode === 'brush') {
@@ -789,7 +821,12 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   };
 
   const setTool = (t: Tool) => {
+    const leftWalls = tool === 'walls' && t !== 'walls';
+    const enteredWalls = tool !== 'walls' && t === 'walls';
     tool = t;
+    if (leftWalls && hdPreview.isDocked) hdPreview.hide();
+    if (enteredWalls) hdPreview.show(true);
+    if (leftWalls || enteredWalls) renderPalette();
     for (const [id, b] of toolBtns) b.classList.toggle('active', id === t);
     canvas.style.cursor = t === 'select' ? 'default' : t === 'place' ? 'copy' : 'crosshair';
     reportContext();
@@ -1005,6 +1042,42 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   let rectDrag: { x0: number; y0: number; x1: number; y1: number; erase: boolean } | null = null;
   let spaceDown = false;
 
+  // The walls of the 2D-HD view: what the map gives by itself, and corrections painted over it.
+  /** What the brush paints: null = back to automatic, 0 = flat, n = wall with a front n tiles high. */
+  let wallBrush: number | null = 3;
+  let wallPainting = false;
+  let wallLast: { x: number; y: number } | null = null;
+  let wallCache: { scene: Scene; rows: number; cells: (WallCell | null)[] } | null = null;
+  function wallCells(): (WallCell | null)[] {
+    const atm = scene.atmosphere;
+    const rows = Math.round(resolveHd(state.game!.hd, atm?.hd && !atm.hd.off ? atm.hd : undefined, atm?.ambient)?.wallRows ?? 3);
+    if (wallCache?.scene !== scene || wallCache.rows !== rows) wallCache = { scene, rows, cells: findWalls(scene.layers, scene.cols, scene.rows, resolverFor(), rows, scene.hdCells) };
+    return wallCache.cells;
+  }
+  const paintWallCell = (x: number, y: number, value: number | null): boolean => {
+    if (x < 0 || y < 0 || x >= scene.cols || y >= scene.rows) return false;
+    const key = `${x},${y}`;
+    if ((scene.hdCells?.[key] ?? null) === value) return false;
+    if (value === null) {
+      delete scene.hdCells![key];
+      if (!Object.keys(scene.hdCells!).length) delete scene.hdCells;
+    } else (scene.hdCells ??= {})[key] = value;
+    return true;
+  };
+  /** Paints from the last cell to this one, so a fast drag leaves no gaps. */
+  const wallStroke = (t: { x: number; y: number }, erase: boolean): boolean => {
+    const from = wallLast ?? t;
+    const steps = Math.max(Math.abs(t.x - from.x), Math.abs(t.y - from.y), 1);
+    let any = false;
+    for (let i = 0; i <= steps; i++) {
+      const x = Math.round(from.x + ((t.x - from.x) * i) / steps);
+      const y = Math.round(from.y + ((t.y - from.y) * i) / steps);
+      if (paintWallCell(x, y, erase ? null : wallBrush)) any = true;
+    }
+    wallLast = t;
+    return any;
+  };
+
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
@@ -1042,6 +1115,14 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         brush = { w: 1, h: 1, tiles: [v] };
         renderPalette();
       }
+      return;
+    }
+    if (tool === 'walls') {
+      snapshot();
+      wallPainting = true;
+      wallLast = null;
+      hdPreview.look((t.x + 0.5) * ts(), (t.y + 0.5) * ts());
+      if (wallStroke(t, e.button === 2)) changed();
       return;
     }
     const erase = tool === 'erase' || e.button === 2;
@@ -1113,6 +1194,11 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         if (dabAt(t)) changed();
       }
       draw();
+      return;
+    }
+    if (wallPainting) {
+      if (wallStroke(t, (e.buttons & 2) !== 0)) changed();
+      else draw();
       return;
     }
     if (painting) {
@@ -1201,6 +1287,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       changed();
     }
     painting = false;
+    wallPainting = false;
     lastTile = null;
     panning = null;
     dragInst = null;
@@ -1349,8 +1436,28 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     );
   }
 
+  function renderWallBrush(): void {
+    const choose = (v: number | null) => { wallBrush = v; renderPalette(); };
+    const chip = (label: string, v: number | null, title: string) => h('button', { type: 'button', class: `chip${wallBrush === v ? ' on' : ''}`, title, onclick: () => choose(v) }, label);
+    const count = Object.keys(scene.hdCells ?? {}).length;
+    const dflt = HD_FIELDS.find((f) => f.key === 'wallRows')!.dflt;
+    paletteBox.append(
+      h('div', { class: 'panel-title' }, '2D-HD walls'),
+      h('p', { class: 'muted small' }, 'Paint on the map and watch the corner view. Right-click puts a cell back to automatic.'),
+      h('div', { class: 'chips' },
+        chip('Automatic', null, 'Removes the correction: the map decides'),
+        chip('Flat', 0, 'This cell stays on the ground, even if it looks like a wall to the automatic detection'),
+      ),
+      h('div', { class: 'panel-title', style: 'margin-top:10px' }, 'Wall, front height'),
+      h('div', { class: 'chips' }, ...Array.from({ length: HD_CELL_MAX_ROWS }, (_, i) => chip(String(i + 1), i + 1, `A wall whose front is ${i + 1} tile${i ? 's' : ''} high. The whole column of wall cells takes this height; the cells above the front become its top`))),
+      h('p', { class: 'muted small', style: 'margin-top:10px' }, h('span', { style: 'color:#feae34' }, '■'), ' front  ', h('span', { style: 'color:#4fa4ff' }, '■'), ' top  ', h('span', { style: 'color:#e43b44' }, '■'), ` kept flat. White outline: corrected by hand. Automatic height: ${dflt} rows, or the scene's Wall rows.`),
+      h('button', { class: 'small', disabled: !count, title: 'Removes every correction of this scene', onclick: () => { snapshot(); delete scene.hdCells; changed(); renderPalette(); } }, count ? `Clear ${count} correction${count === 1 ? '' : 's'}` : 'No corrections yet'),
+    );
+  }
+
   function renderPalette(): void {
     clear(paletteBox);
+    if (tool === 'walls') return renderWallBrush();
     const tilesets = state.sprites.filter((s) => s.grid);
     const tsSel = h('select', { onchange: async () => {
       snapshot();
@@ -1838,7 +1945,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('label', { class: 'inline', title: 'Coming back to this scene (e.g. after a battle) keeps positions, opened chests, defeated enemies and instance properties. Restart Scene forgets.' },
           h('input', { type: 'checkbox', checked: !!scene.persistent, onchange: (e: Event) => { snapshot(); if ((e.target as HTMLInputElement).checked) scene.persistent = true; else delete scene.persistent; changed(); } }),
           'Remember instances when leaving'),
-        atmosphereEditor({ audio: () => state.audio, before: snapshot, changed, get: () => scene.atmosphere, set: (v) => { if (v) scene.atmosphere = v; else delete scene.atmosphere; }, gameHd: () => state.game?.hd,
+        atmosphereEditor({ audio: () => state.audio, before: snapshot, changed, get: () => scene.atmosphere, set: (v) => { if (v) scene.atmosphere = v; else delete scene.atmosphere; }, gameHd: () => state.game?.hd, showHd: () => hdPreview.show(),
           sprites: () => state.sprites.filter((sp) => !sp.grid).map((sp) => sp.name), rerender: () => void loadAssets() }),
         vars,
         componentListCard('Scene components', 'Managers and level logic: a script component here runs for the whole scene (this.self is null), e.g. a battle, a wave spawner, the level HUD.', () => scene.components, (list) => { snapshot(); if (list?.length) scene.components = list; else delete scene.components; }, () => sheetContext(null, []), () => changed()),
@@ -1953,6 +2060,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       unregister();
       unsub();
       stopWatchingPlay();
+      hdPreview.hide();
       ro.disconnect();
       cancelAnimationFrame(raf);
       window.removeEventListener('keydown', onKey);

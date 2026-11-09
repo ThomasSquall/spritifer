@@ -182,6 +182,11 @@ describe('auto 2D-HD through MCP', () => {
     const hd = await call('playtest', { seconds: 0.2, hd: true });
     const shot = (r: ToolResult) => r.content.filter((c) => c.type === 'image').at(-1)!.data;
     expect(shot(hd)).not.toEqual(shot(flat));
+    await call('update_scene', { scene, hd_walls: [{ x: 1, y: 1, w: 2, mode: 'wall', rows: 2 }, { x: 0, y: 0, mode: 'flat' }] });
+    expect(ws.loadScene(scene).hdCells).toEqual({ '1,1': 2, '2,1': 2, '0,0': 0 });
+    expect(textOf(await call('get_scene', { scene }))).toContain('2D-HD wall corrections');
+    await call('update_scene', { scene, hd_walls: [{ x: 0, y: 0, w: 3, h: 2, mode: 'auto' }] });
+    expect(ws.loadScene(scene).hdCells).toBeUndefined();
     await call('set_game', { hd: null });
     expect(ws.loadGame().hd).toBeUndefined();
   });

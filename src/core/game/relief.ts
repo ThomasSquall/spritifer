@@ -224,6 +224,18 @@ export function frameMask(sheet: Uint8ClampedArray, sheetWidth: number, x: numbe
   return out;
 }
 
+/** A frame of a normal sheet, one byte per pixel: 0 = empty, otherwise 1 (faces the viewer) to 255 (turned fully away). */
+export function frameTilt(normals: Uint8ClampedArray, sheetWidth: number, x: number, y: number, w: number, h: number): Uint8Array {
+  const out = new Uint8Array(w * h);
+  for (let fy = 0; fy < h; fy++) {
+    for (let fx = 0; fx < w; fx++) {
+      const i = ((y + fy) * sheetWidth + x + fx) * 4;
+      if (normals[i + 3] >= 128) out[fy * w + fx] = 1 + Math.round(Math.min(1, Math.hypot(normals[i]! / 127.5 - 1, normals[i + 1]! / 127.5 - 1)) * 254);
+    }
+  }
+  return out;
+}
+
 /** The same sheet for mirrored drawing: the x of every normal points the other way. */
 export function flipNormalSheet(sheet: Uint8ClampedArray): Uint8ClampedArray {
   const out = new Uint8ClampedArray(sheet);

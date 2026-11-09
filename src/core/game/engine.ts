@@ -18,7 +18,7 @@ import { type CastShape, MoteField, type ScreenLight, collectLights, drawClouds,
 import { type HdFrame, type HdJut, resolveHd } from './hd.js';
 import { type HdShape, type WallCell, findWalls } from './hd3d.js';
 import { RainField, drawShafts } from './weather.js';
-import { type ReflectionBand, type WaterMap, type WaterPiece, addWaterActors, drawReflections, findWater, reflectionZ } from './reflections.js';
+import { type ReflectionBand, type WaterMap, type WaterPiece, type WaterSheet, addWaterActors, drawReflections, findWater, reflectionZ, waterPieces } from './reflections.js';
 import { type Walker, pushTarget, stepPush, swayBands, swayBase } from './wind.js';
 import type { ResolvedRelief } from './relief.js';
 
@@ -2634,7 +2634,7 @@ export interface Renderer {
   endRelief?(): void;
   /** Like lighting, but per pixel: lights and the sun shape the sprites with their normal maps. */
   reliefLighting?(relief: ResolvedRelief, ambient: string, lights: ScreenLight[], glow: number): void;
-  /** Which pixels of a sprite frame are solid (1 per pixel, row by row), or null when it stays flat. */
+  /** A sprite frame read from its normals, one byte per pixel, row by row: 0 = empty, 1..255 = how far it turns from the viewer. Null when it stays flat. */
   spriteMask?(sprite: string, x: number, y: number, w: number, h: number): Uint8Array | null;
   /** Only the 2D-HD perspective has these. What the next draw calls are, in the world being drawn. */
   mark?(m: WorldMark): void;
@@ -2653,6 +2653,8 @@ export interface Renderer {
   /** Draws a whole cast shadow in one go, or only some of its rows; `shape` is the same object for as long as the shadow doesn't change, so it can be kept ready. */
   /** Mirrored strips, showing only over the water pieces. */
   reflections?(water: WaterPiece[], bands: ReflectionBand[], zoom: number): void;
+  /** Whatever `draw` paints doesn't show over the water pieces (water takes no shadows). */
+  offWater?(water: WaterPiece[], zoom: number, draw: () => void): void;
   stamp?(shape: CastShape, x: number, y: number, zoom: number, color: string, alpha: number, slice?: { row: number; rows: number }): void;
 }
 
@@ -2768,18 +2770,28 @@ export function renderWorld(w: World, r: Renderer): void {
   const atm = scene.atmosphere;
   // Reflections: right on the water, under the shadows and everything standing by it or lying across it.
   const reflect = atm?.reflections;
+  const waterSheet = (): WaterSheet | null => {
+    const grid = tileset ? (tileset.grid ?? { width: ts, height: ts }) : null;
+    const tcols = tileset && grid ? Math.max(1, Math.floor(tileset.width / grid.width)) : 1;
+    const f0 = tileset?.frames[0];
+    return tileset && grid && f0 ? { name: tileset.name, tile: (t) => [f0.x + (t % tcols) * grid.width, f0.y + Math.floor(t / tcols) * grid.height], w: grid.width, h: grid.height } : null;
+  };
   if (reflect && r.reflections) {
     const map = w.waterMap();
     if (map) items.push({ z: reflectionZ(map), order: 0, draw: () => {
       r.mark?.({ kind: 'ground' });
-      const grid = tileset ? (tileset.grid ?? { width: ts, height: ts }) : null;
-      const tcols = tileset && grid ? Math.max(1, Math.floor(tileset.width / grid.width)) : 1;
-      const f0 = tileset?.frames[0];
-      drawReflections(r, reflect, map, w.actors, tileset && grid && f0 ? { name: tileset.name, tile: (t) => [f0.x + (t % tcols) * grid.width, f0.y + Math.floor(t / tcols) * grid.height], w: grid.width, h: grid.height } : null, ts, w.clock, camX, camY, zoom, vw, vh);
+      drawReflections(r, reflect, map, w.actors, waterSheet(), ts, w.clock, camX, camY, zoom, vw, vh);
     } });
   }
-  // Contact shadows: above the ground layers, below everything standing on them.
-  if (atm) items.push({ z: -1.5, order: 0, draw: () => { r.mark?.({ kind: 'ground' }); drawShadows(w, r, atm, camX, camY, zoom); } });
+  // Contact shadows: above the ground layers, below everything standing on them. Water that mirrors takes no shadows.
+  if (atm) items.push({ z: -1.5, order: 0, draw: () => {
+    r.mark?.({ kind: 'ground' });
+    const shadows = () => drawShadows(w, r, atm, camX, camY, zoom);
+    const map = reflect && r.offWater ? w.waterMap() : null;
+    const water = map && reflect ? waterPieces(reflect, map, w.actors, waterSheet(), ts, camX, camY, zoom, vw, vh, r.overscan ?? { left: 0, top: 0, right: 0, bottom: 0 }) : [];
+    if (water.length) r.offWater!(water, zoom, shadows);
+    else shadows();
+  } });
   // Particles: behind the instances (above tiles), and in front of them.
   items.push({ z: -1, order: 1e9, draw: () => { r.mark?.({ kind: 'ground' }); w.particles.draw(r, camX, camY, zoom, true); if (!w.scripts.effectsInUi) w.vfx.draw(r, camX, camY, zoom, true); } });
   items.push({ z: 50, order: 1e9, draw: () => { r.mark?.({ kind: 'air' }); w.particles.draw(r, camX, camY, zoom, false); } });

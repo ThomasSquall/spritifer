@@ -256,6 +256,42 @@ describe('capturing normals while drawing', () => {
   });
 });
 
+describe('ground depth of cast shadows', () => {
+  // A crown on a thin trunk, 40 wide, standing on a 60x80 canvas.
+  function tree(tilt: number): { r: BitmapRenderer; world: never; rows: (x: number) => number[] } {
+    const W = 60;
+    const H = 80;
+    const b: Bitmap = { width: W, height: H, data: new Uint8ClampedArray(W * H * 4) };
+    for (let y = 0; y < 40; y++) for (let x = 10; x < 50; x++) setPixel(b, x, y, [100, 140, 80, 255]);
+    for (let y = 40; y < 80; y++) for (let x = 27; x < 33; x++) setPixel(b, x, y, [90, 70, 50, 255]);
+    const a = { name: 'tree', width: W, height: H, frames: [{ x: 0, y: 0, w: W, h: H, duration: 100 }], animations: {}, relief: { depth: 1 } } as unknown as SpriteAsset;
+    const r = new BitmapRenderer(120, 200, new Map([['tree', b]])).useRelief({ tree: a }, { width: 320, height: 180 });
+    // Replaced so the test states the normals directly: the whole figure tilted by `tilt`.
+    r.spriteMask = () => {
+      const out = new Uint8Array(W * H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (b.data[(y * W + x) * 4 + 3]) out[y * W + x] = 1 + Math.round(tilt * 254);
+      return out;
+    };
+    const actor = { id: 1, x: 30, y: 10, z: 0, opacity: 1, visible: true, destroyed: false, light: undefined, asset: a, type: {}, box: () => ({ x: 30, y: 10, w: W, h: H }) };
+    const world = { clock: 0, game: { width: 120, height: 200 }, actors: [actor], motes: { list: [] } as never, bundle: { sprites: {} } } as never;
+    const rows = (x: number) => { const found: number[] = []; for (let y = 0; y < 200; y++) if (r.out.data[(y * 120 + x) * 4] < 128) found.push(y); return found; };
+    return { r, world, rows };
+  }
+  const shade = (tilt: number) => {
+    const t = tree(tilt);
+    t.r.clear('#808080');
+    drawShadows(t.world, t.r, { shadowOpacity: 0.5, relief: { sun: { angle: -90, elevation: 45 } } }, 0, 0, 1);
+    return t.rows(45);
+  };
+
+  it('brings the shadow of a volume back towards the foot, and leaves a flat figure as it was', () => {
+    const flat = shade(0.2);
+    const round = shade(0.8);
+    expect(flat.length).toBeGreaterThan(0);
+    expect(round[0]).toBeLessThan(flat[0]! - 4);
+  });
+});
+
 describe('relief settings', () => {
   it('keeps sprite settings through saving', () => {
     const s = createSprite({ name: 'a', width: 8, height: 8 });

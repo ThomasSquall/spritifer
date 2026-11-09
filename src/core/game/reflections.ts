@@ -131,9 +131,11 @@ export function reflectionBands(a: AtmosphereActor, cfg: SceneReflections, map: 
 }
 
 /** Everything standing near water, mirrored in it. */
-export function drawReflections(r: Renderer, cfg: SceneReflections, map: WaterMap, actors: readonly AtmosphereActor[], tileset: { name: string; tile(t: number): [number, number]; w: number; h: number } | null, ts: number, clock: number, camX: number, camY: number, zoom: number, vw: number, vh: number): void {
-  if (!r.reflections) return;
-  const over = r.overscan ?? { left: 0, top: 0, right: 0, bottom: 0 };
+/** The tiles of a scene's water sheet, as the reflections need them. */
+export type WaterSheet = { name: string; tile(t: number): [number, number]; w: number; h: number };
+
+/** The patches of water on the screen: what reflections show on, and what shadows stay off. */
+export function waterPieces(cfg: SceneReflections, map: WaterMap, actors: readonly AtmosphereActor[], tileset: WaterSheet | null, ts: number, camX: number, camY: number, zoom: number, vw: number, vh: number, over: { left: number; top: number; right: number; bottom: number }): WaterPiece[] {
   const x0 = Math.floor((camX - over.left / zoom) / ts);
   const y0 = Math.floor((camY - over.top / zoom) / ts);
   const x1 = Math.ceil((camX + (vw + over.right) / zoom) / ts);
@@ -148,14 +150,23 @@ export function drawReflections(r: Renderer, cfg: SceneReflections, map: WaterMa
     }
   }
   const overlays = cfg.sprites ?? [];
+  for (const a of actors) {
+    if (a.destroyed || !a.visible || !a.asset || a.type.hud || a.opacity <= 0 || !a.asset.name || !overlays.includes(a.asset.name)) continue;
+    const f = a.asset.frames?.[a.frameIndex?.() ?? 0] ?? a.asset.frames?.[0];
+    if (f && (a.x + f.w) >= camX - over.left / zoom && a.x <= camX + (vw + over.right) / zoom && (a.y + f.h) >= camY - over.top / zoom && a.y <= camY + (vh + over.bottom) / zoom) water.push({ sprite: a.asset.name, sources: [f.x, f.y], sw: f.w, sh: f.h, x: Math.round((a.x - camX) * zoom), y: Math.round((a.y - camY) * zoom) });
+  }
+  return water;
+}
+
+export function drawReflections(r: Renderer, cfg: SceneReflections, map: WaterMap, actors: readonly AtmosphereActor[], tileset: WaterSheet | null, ts: number, clock: number, camX: number, camY: number, zoom: number, vw: number, vh: number): void {
+  if (!r.reflections) return;
+  const over = r.overscan ?? { left: 0, top: 0, right: 0, bottom: 0 };
+  const water = waterPieces(cfg, map, actors, tileset, ts, camX, camY, zoom, vw, vh, over);
+  const overlays = cfg.sprites ?? [];
   const bands: ReflectionBand[] = [];
   for (const a of actors) {
     if (a.destroyed || !a.visible || !a.asset || a.type.hud || a.opacity <= 0) continue;
-    if (a.asset.name && overlays.includes(a.asset.name)) {
-      const f = a.asset.frames?.[a.frameIndex?.() ?? 0] ?? a.asset.frames?.[0];
-      if (f && (a.x + f.w) >= camX - over.left / zoom && a.x <= camX + (vw + over.right) / zoom && (a.y + f.h) >= camY - over.top / zoom && a.y <= camY + (vh + over.bottom) / zoom) water.push({ sprite: a.asset.name, sources: [f.x, f.y], sw: f.w, sh: f.h, x: Math.round((a.x - camX) * zoom), y: Math.round((a.y - camY) * zoom) });
-      continue;
-    }
+    if (a.asset.name && overlays.includes(a.asset.name)) continue;
     // Decals and small flying things leave no image; neither does whatever is far off the screen.
     if (a.type.shadow === 0) continue;
     if (a.x + a.asset.width < camX - 8 - over.left / zoom || a.x > camX + (vw + over.right) / zoom + 8) continue;

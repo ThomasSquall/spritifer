@@ -11,7 +11,7 @@ import { BUILTIN_FONT, type PixelFont, fontPixelSize, rasterText } from '../core
 import { type Renderer, World, renderWorld } from '../core/game/engine.js';
 import type { ScreenLight } from '../core/game/atmosphere.js';
 import { type HdFrame, applyHdBuffer } from '../core/game/hd.js';
-import { type ResolvedRelief, buildNormalSheet, frameMask, normalSheetFor, reliefKind, resolveRelief, shadeRelief } from '../core/game/relief.js';
+import { type ResolvedRelief, buildNormalSheet, frameTilt, normalSheetFor, reliefKind, resolveRelief, shadeRelief } from '../core/game/relief.js';
 import { type Problem, validateGame } from '../core/game/catalog.js';
 import { type GameBundle, type GameProject, type Scene, type SpriteAsset, type Value, gameSlug, interfaceSize } from '../core/game/types.js';
 import { encodePng } from './png.js';
@@ -217,7 +217,8 @@ export class BitmapRenderer implements Renderer {
     const src = this.sheets.get(sprite);
     const asset = this.relief?.assets[sprite];
     if (!this.relief || !src || !asset || reliefKind(asset, this.relief.view) !== 'shape') return null;
-    return frameMask(src.data, src.width, x, y, w, h);
+    const normals = this.normalsOf(sprite, src);
+    return normals ? frameTilt(normals, src.width, x, y, w, h) : null;
   }
 
   private normalsOf(sprite: string, src: Bitmap): Uint8ClampedArray | null {

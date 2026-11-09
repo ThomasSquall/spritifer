@@ -110,27 +110,92 @@ export interface CastShape {
 /** By sprite asset (a rebuilt sprite is a new object): the shapes for one sun direction, by frame and mirroring. */
 const castShapes = new WeakMap<object, { sun: string; shapes: Map<number, CastShape | null> }>();
 
+/**
+ * How far a stretch of the sprite spreads on the ground towards and away from the viewer. What the sprite shows has
+ * depth, so a crown also reaches back to the foot of the trunk; without this its shadow is a thin strip far from the
+ * tree, and the tree looks as if it were floating. `round` comes from the normals: 0 on a flat wall, 1 on a volume.
+ * Nothing at the foot (rise 0), so what stands on the ground stays pinned to where it touches it.
+ */
+function groundDepth(width: number, rise: number, round: number): number {
+  return Math.min(width * 0.28, rise * 0.6, 32) * round;
+}
+
+/** How much each row of a frame curves, from its normals, 0 (flat) to 1. Smoothed over a few rows: single rows are mostly texture. */
+function rowRoundness(mask: Uint8Array, fw: number, bottom: number): Float32Array {
+  const sum = new Float32Array(bottom + 1);
+  const count = new Float32Array(bottom + 1);
+  for (let y = 0; y <= bottom; y++) {
+    for (let x = 0; x < fw; x++) {
+      const v = mask[y * fw + x]!;
+      if (v) { sum[y] += (v - 1) / 254; count[y]++; }
+    }
+  }
+  const round = new Float32Array(bottom + 1);
+  for (let y = 0; y <= bottom; y++) {
+    let s = 0;
+    let c = 0;
+    for (let r = Math.max(0, y - 6); r <= Math.min(bottom, y + 6); r++) { s += sum[r]!; c += count[r]!; }
+    // Painted detail alone tilts the normals of a flat wall by about 0.3; a crown or a rock is past 0.55.
+    round[y] = c ? Math.max(0, Math.min(1, (s / c - 0.3) / 0.25)) : 0;
+  }
+  return round;
+}
+
 function buildCastShape(mask: Uint8Array, fw: number, flip: boolean, dx: number, dy: number): CastShape | null {
   let bottom = -1;
   for (let i = mask.length - 1; i >= 0 && bottom < 0; i--) if (mask[i]) bottom = Math.floor(i / fw);
   if (bottom < 0) return null;
+  // Each row of the sprite as its stretches of solid pixels: [from, to] pairs.
+  const spans: number[][] = [];
+  const round = rowRoundness(mask, fw, bottom);
+  let depthMax = 0;
+  for (let y = 0; y <= bottom; y++) {
+    const row: number[] = [];
+    for (let x = 0; x < fw; x++) {
+      if (!mask[y * fw + (flip ? fw - 1 - x : x)]) continue;
+      let end = x;
+      while (end + 1 < fw && mask[y * fw + (flip ? fw - 2 - end : end + 1)]) end++;
+      row.push(x, end);
+      depthMax = Math.max(depthMax, groundDepth(end - x + 1, bottom - y, round[y]!));
+      x = end;
+    }
+    spans.push(row);
+  }
   const reachX = Math.ceil(Math.abs(dx) * (bottom + 1)) + 1;
-  const reachY = Math.ceil(Math.abs(dy) * (bottom + 1)) + 1;
+  const reachY = Math.ceil(Math.abs(dy) * (bottom + 1)) + 1 + Math.ceil(depthMax);
   const W = fw + reachX * 2;
   const H = reachY * 2 + 2;
   const ground = new Uint8Array(W * H);
+  const fill = (gy: number, x0: number, x1: number): void => {
+    if (gy < 0 || gy >= H) return;
+    ground.fill(1, gy * W + Math.max(0, x0), gy * W + Math.min(W - 1, x1) + 1);
+  };
   for (let y = bottom; y >= 0; y--) {
     const rise = bottom - y;
     // Half-pixel steps: a long shadow would otherwise show gaps between rows.
     for (let step = 0; step < 2; step++) {
       const h = rise + step * 0.5;
-      const ox = Math.round(h * dx);
-      const oy = Math.round(h * dy);
-      for (let x = 0; x < fw; x++) {
-        if (!mask[y * fw + (flip ? fw - 1 - x : x)]) continue;
-        const gx = x + ox + reachX;
-        const gy = oy + reachY;
-        if (gx >= 0 && gy >= 0 && gx < W && gy < H) ground[gy * W + gx] = 1;
+      const ox = Math.round(h * dx) + reachX;
+      const oy = Math.round(h * dy) + reachY;
+      const row = spans[y]!;
+      for (let i = 0; i < row.length; i += 2) {
+        const x0 = row[i]!;
+        const x1 = row[i + 1]!;
+        const depth = groundDepth(x1 - x0 + 1, rise, round[y]!);
+        if (depth < 1) {
+          fill(oy, x0 + ox, x1 + ox);
+          continue;
+        }
+        // The stretch seen from above: an ellipse as wide as it is, centred where it falls.
+        const mid = (x0 + x1) / 2 + ox;
+        const half = (x1 - x0 + 1) / 2;
+        const top = Math.ceil(depth);
+        for (let d = -top; d <= top; d++) {
+          const t = d / depth;
+          if (t * t > 1) continue;
+          const w = half * Math.sqrt(1 - t * t);
+          fill(oy + d, Math.round(mid - w), Math.round(mid + w));
+        }
       }
     }
   }
@@ -173,7 +238,7 @@ function castShadow(r: Renderer, a: AtmosphereActor, sunKey: string, dx: number,
   if (a.type.sway && Math.abs(dy) >= 0.05 && Number.isInteger(zoom)) {
     const shift = swayShift(a.type.sway, swayBase(a.type, f.h), a.x, a.y, clock);
     const { bottom, reachY } = shape;
-    bands = groupRows(shape.firstRow, shape.endRow, (row) => shift(Math.round(bottom - (row - reachY) / dy)));
+    bands = groupRows(shape.firstRow, shape.endRow, (row) => shift(Math.max(0, Math.round(bottom - (row - reachY) / dy))));
   }
   if (r.stamp) {
     if (!bands) return r.stamp(shape, left, top, zoom, color, opacity);

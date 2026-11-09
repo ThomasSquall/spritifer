@@ -7,7 +7,7 @@ import type { Renderer } from '../core/game/engine.js';
 import type { CastShape, ScreenLight } from '../core/game/atmosphere.js';
 import type { HdFrame } from '../core/game/hd.js';
 import { BUILTIN_FONT, type PixelFont, fontPixelSize, rasterText, textBitmapSize } from '../core/game/font.js';
-import { type ResolvedRelief, frameMask, normalSheetFor, reliefKind, shadeRelief } from '../core/game/relief.js';
+import { type ResolvedRelief, frameTilt, normalSheetFor, reliefKind, shadeRelief } from '../core/game/relief.js';
 import type { ReflectionBand, WaterPiece } from '../core/game/reflections.js';
 import type { SpriteAsset } from '../core/game/types.js';
 
@@ -159,6 +159,36 @@ export class CanvasRenderer implements Renderer {
     this.ctx.drawImage(picture, 0, 0);
   }
 
+  private offWaterLayer: HTMLCanvasElement | null = null;
+
+  offWater(water: WaterPiece[], zoom: number, draw: () => void): void {
+    if (!this.offWaterLayer) {
+      this.offWaterLayer = document.createElement('canvas');
+      this.offWaterLayer.width = this.w;
+      this.offWaterLayer.height = this.h;
+    }
+    const layer = this.offWaterLayer;
+    const g = layer.getContext('2d')!;
+    g.imageSmoothingEnabled = false;
+    g.clearRect(0, 0, this.w, this.h);
+    const main = this.ctx;
+    this.ctx = g;
+    try {
+      draw();
+    } finally {
+      this.ctx = main;
+    }
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'destination-out';
+    for (const p of water) {
+      const tile = this.waterMask(p);
+      if (tile) g.drawImage(tile, p.x, p.y, p.sw * zoom, p.sh * zoom);
+    }
+    g.globalCompositeOperation = 'source-over';
+    main.globalAlpha = 1;
+    main.drawImage(layer, 0, 0);
+  }
+
   rect(x: number, y: number, w: number, h: number, color: string, alpha = 1, blend?: 'add'): void {
     this.ctx.globalAlpha = alpha;
     this.ctx.fillStyle = color;
@@ -300,7 +330,7 @@ export class CanvasRenderer implements Renderer {
     const asset = this.relief.assets[sprite];
     if (!asset || reliefKind(asset, this.relief.view) !== 'shape') return null;
     const sheet = this.normalSheet(sprite);
-    return sheet ? frameMask(sheet.data, sheet.width, x, y, w, h) : null;
+    return sheet ? frameTilt(sheet.data, sheet.width, x, y, w, h) : null;
   }
 
   reliefLighting(relief: ResolvedRelief, ambient: string, lights: ScreenLight[], glow: number): void {

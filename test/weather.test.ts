@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeAtmosphere } from '../src/core/game/types.js';
 import { TileResolver } from '../src/core/game/tilerules.js';
-import { addWaterActors, findWater, reflectionBands, reflectionZ } from '../src/core/game/reflections.js';
+import { addWaterActors, findWater, reflectionBands, reflectionZ, waterPieces } from '../src/core/game/reflections.js';
 import { RainField, drawShafts } from '../src/core/game/weather.js';
 import type { Renderer } from '../src/core/game/engine.js';
 import type { TileLayer } from '../src/core/game/types.js';
@@ -59,6 +59,13 @@ describe('water', () => {
     addWaterActors(canal, [{ ...actor(0, 0), z: -3 }], ['tree'], 16);
     expect(reflectionZ(canal)).toBeGreaterThan(-3);
     expect(reflectionZ(canal)).toBeLessThan(-2);
+  });
+
+  it('finds only the water on the screen, for the shadows to stay off it', () => {
+    const map = { cols: 8, rows: 1, grid: new Uint8Array(8), cells: [{ tx: 1, ty: 0, tiles: [5, 6] }, { tx: 7, ty: 0, tiles: [5, 6] }] };
+    const sheet = { name: 'tiles', tile: (t: number): [number, number] => [t * 16, 0], w: 16, h: 16 };
+    const pieces = waterPieces({}, map, [], sheet, 16, 0, 0, 1, 48, 16, { left: 0, top: 0, right: 0, bottom: 0 });
+    expect(pieces).toEqual([{ sprite: 'tiles', sources: [80, 0, 96, 0], sw: 16, sh: 16, x: 16, y: 0 }]);
   });
 
   it('never draws reflections above the shadows', () => {

@@ -152,7 +152,7 @@ interface Batch {
   normals: WebGLTexture | null;
   size: [number, number];
   blend: 0 | 1 | 2;
-  stencil: 0 | 1 | 2;
+  stencil: 0 | 1 | 2 | 3;
   first: number;
   count: number;
 }
@@ -177,7 +177,7 @@ class DrawList {
     return this.vertices * FLOATS;
   }
 
-  batch(tex: WebGLTexture, normals: WebGLTexture | null, size: [number, number], blend: 0 | 1 | 2, stencil: 0 | 1 | 2): void {
+  batch(tex: WebGLTexture, normals: WebGLTexture | null, size: [number, number], blend: 0 | 1 | 2, stencil: 0 | 1 | 2 | 3): void {
     const last = this.batches[this.batches.length - 1];
     if (last && last.tex === tex && last.normals === normals && last.blend === blend && last.stencil === stencil) last.count += VERTICES_PER_QUAD;
     else this.batches.push({ tex, normals, size, blend, stencil, first: this.vertices, count: VERTICES_PER_QUAD });
@@ -204,7 +204,7 @@ type Quad = {
   /** Draw order of what this belongs to. */
   z?: number;
   /** 1: only marks where water is. 2: shows only over what was marked. */
-  stencil?: 0 | 1 | 2;
+  stencil?: 0 | 1 | 2 | 3;
   /** Upside down. */
   flipV?: boolean;
   /** The side of a wall, facing east (1) or west (-1). */
@@ -372,7 +372,7 @@ export class HdScene implements Renderer {
   // ------------------------------------------------------------------ geometry
 
   private push(list: DrawList, q: Quad): void {
-    list.batch(q.sheet.tex, q.shaped ? q.sheet.normals : null, q.sheet.size, q.blend, q.stencil ?? 0);
+    list.batch(q.sheet.tex, q.shaped ? q.sheet.normals : null, q.sheet.size, q.blend, q.stencil ?? (this.keepOffWater ? 3 : 0));
     const [sx0, sy0, sx1, sy1] = q.src;
     const us = q.mirror ? [sx1, sx0, sx0, sx1] : [sx0, sx1, sx1, sx0];
     const vs = q.flipV ? [sy1, sy1, sy0, sy0] : [sy0, sy0, sy1, sy1];
@@ -594,10 +594,11 @@ export class HdScene implements Renderer {
     this.push(list, { at: corners.map(([px, py]) => point(px, py)), flat: corners, depth: depthOf(top), sheet: entry.sheet, src: [0, row, shape.width, row + rows], mirror: false, color: [1, 1, 1, alpha], lit: false, shaped: false, white: 0, blend: 1 });
   }
 
-  /** Water marks where the reflections may show; the reflections are drawn upside down, only there. */
-  reflections(water: WaterPiece[], bands: ReflectionBand[], zoom: number): void {
+  private keepOffWater = false;
+
+  /** Writes the pixels of the water into the stencil. */
+  private markWater(water: WaterPiece[], zoom: number): void {
     const { list, point, depthOf } = this.placed();
-    const box = (x: number, y: number, w: number, h: number): [number, number][] => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
     for (const piece of water) {
       const mask = this.base.waterMask(piece);
       if (!mask) continue;
@@ -606,9 +607,28 @@ export class HdScene implements Renderer {
         sheet = { tex: this.upload(null, piece.sw, piece.sh, this.gl.NEAREST, mask), size: [piece.sw, piece.sh], normals: null };
         this.waterMasks.set(mask, sheet);
       }
-      const corners = box(piece.x, piece.y, piece.sw * zoom, piece.sh * zoom);
+      const w = piece.sw * zoom;
+      const h = piece.sh * zoom;
+      const corners: [number, number][] = [[piece.x, piece.y], [piece.x + w, piece.y], [piece.x + w, piece.y + h], [piece.x, piece.y + h]];
       this.push(list, { at: corners.map(([x, y]) => point(x, y)), flat: corners, depth: depthOf(piece.y), sheet, src: [0, 0, piece.sw, piece.sh], mirror: false, color: [1, 1, 1, 1], lit: false, shaped: false, white: 0, blend: 0, stencil: 1 });
     }
+  }
+
+  offWater(water: WaterPiece[], zoom: number, draw: () => void): void {
+    this.markWater(water, zoom);
+    this.keepOffWater = true;
+    try {
+      draw();
+    } finally {
+      this.keepOffWater = false;
+    }
+  }
+
+  /** Water marks where the reflections may show; the reflections are drawn upside down, only there. */
+  reflections(water: WaterPiece[], bands: ReflectionBand[], zoom: number): void {
+    const { list, point, depthOf } = this.placed();
+    const box = (x: number, y: number, w: number, h: number): [number, number][] => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+    this.markWater(water, zoom);
     for (const b of bands) {
       const sheet = this.sheet(b.sprite);
       if (!sheet) continue;
@@ -770,7 +790,7 @@ export class HdScene implements Renderer {
           gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
           gl.colorMask(false, false, false, false);
         } else {
-          gl.stencilFunc(gl.EQUAL, 1, 0xff);
+          gl.stencilFunc(b.stencil === 3 ? gl.NOTEQUAL : gl.EQUAL, 1, 0xff);
           gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
         }
       } else gl.disable(gl.STENCIL_TEST);

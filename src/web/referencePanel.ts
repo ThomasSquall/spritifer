@@ -1,6 +1,6 @@
 import type { Bitmap } from '../core/sprite.js';
 import { addLayer, celBitmap } from '../core/sprite.js';
-import { type CropRect, attachReference, preparePicture, referencePixels } from '../core/reference.js';
+import { type CropRect, attachReference, pixelizeToLayer, preparePicture, referencePixels } from '../core/reference.js';
 import { extractPalette } from '../core/shapes.js';
 import type { CanvasInteraction, CanvasView } from './canvas.js';
 import type { Editor } from './editor.js';
@@ -117,6 +117,10 @@ async function referenceDialog(ed: Editor, view: CanvasView) {
     const yIn = h('input', { type: 'number', placeholder: 'bottom', value: stored ? String(stored.y) : '' });
     const palIn = h('input', { type: 'number', min: '2', max: '64', placeholder: 'keep palette' });
     const layerIn = h('input', { type: 'text', placeholder: 'none', spellcheck: false });
+    const pixChk = h('input', { type: 'checkbox', 'data-k': 'ref-pixelize' });
+    const pixColors = h('input', { type: 'number', min: '2', max: '64', placeholder: '24', title: 'Colors extracted from the picture' });
+    const pixOwnPal = h('input', { type: 'checkbox', title: 'Use the palette of the sprite instead of extracting one' });
+    const pixLayer = h('input', { type: 'text', placeholder: 'pixelized', spellcheck: false, title: 'Layer of frame 0 that receives the result (created if missing, replaced otherwise)' });
     const hiResChk = h('input', { type: 'checkbox', checked: ed.refHiRes, onchange: () => { ed.refHiRes = hiResChk.checked; view.requestRender(); } });
 
     // Scale of the crop picker preview.
@@ -306,8 +310,9 @@ async function referenceDialog(ed: Editor, view: CanvasView) {
       const layerName = layerIn.value.trim();
       const err = ed.tryEdit((sp) => {
         const src = preparePicture(full!, crop ?? undefined, bgChk.checked, Number(tolIn.value));
-        attachReference(sp, src, numOr(heightIn), numOr(xIn), numOr(yIn));
+        const placed = attachReference(sp, src, numOr(heightIn), numOr(xIn), numOr(yIn));
         if (pal) sp.palette = extractPalette(src, Math.max(2, Math.min(64, pal)));
+        if (pixChk.checked) pixelizeToLayer(sp, src, { height: placed.h, x: placed.x, y: placed.y, colors: numOr(pixColors), usePalette: pixOwnPal.checked, layer: pixLayer.value.trim() || undefined, keepReference: true });
         if (layerName) {
           const layer = sp.layers.find((l) => l.name === layerName) ?? addLayer(sp, layerName);
           const ref = sp.reference!;
@@ -353,6 +358,8 @@ async function referenceDialog(ed: Editor, view: CanvasView) {
           resultInfo,
           h('div', { class: 'row3' }, h('label', {}, 'Height (canvas px)', heightIn), h('label', {}, 'x', xIn), h('label', {}, 'y', yIn)),
           h('div', { class: 'row2' }, h('label', {}, 'Palette from picture (colors)', palIn), h('label', {}, 'Also copy into layer', layerIn)),
+          h('label', { class: 'inline', title: 'Turn the picture into clean pixel art: colors are reduced, each pixel takes the majority color of its area, outlines are kept' }, pixChk, 'Pixelize it onto a layer'),
+          h('div', { class: 'row3' }, h('label', {}, 'Layer', pixLayer), h('label', {}, 'Colors', pixColors), h('label', { class: 'inline' }, pixOwnPal, 'Own palette')),
           h('label', { class: 'inline' }, hiResChk, 'Show the hi-res picture on the canvas (smooth)'),
         ),
       ),

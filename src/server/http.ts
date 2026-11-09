@@ -7,11 +7,12 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { type CreateSpriteOptions, type SpriteCategory, type SpriteFile, createSprite, deserializeSprite, isSpriteCategory, newId, serializeSprite } from '../core/sprite.js';
 import { type SheetLayout, type SheetOptions, buildSpritesheet } from '../core/sheet.js';
 import { encodePng } from './png.js';
-import { exportSpritesheet, previewPng, spriteFromPng } from './ops.js';
+import { exportSpritesheet, previewPng, renameSpriteEverywhere, spriteFromPng } from './ops.js';
+import { listVersions, restoreVersion, saveVersion, silhouetteReport } from './spriteVersions.js';
 import { spriteFromArt } from '../core/artImport.js';
 import type { Workspace } from './store.js';
 import { ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
-import { assertIdentifier, createScene, normalizeGame, normalizeScene, normalizeTable } from '../core/game/types.js';
+import { type Value, assertIdentifier, createScene, normalizeGame, normalizeScene, normalizeTable } from '../core/game/types.js';
 import { buildGameHtml, exportGame, loadGameBundle, loadRuntime, renderScenePreview } from './game.js';
 import { renameObjectRefs, renameSceneRefs } from '../core/game/refactor.js';
 import { addLibraryComponents, checkScriptSyntax, inspectScripts, refreshScriptTypes, scriptTemplate } from './scripts.js';
@@ -195,6 +196,7 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
     const operation = parts[2];
     if (method === 'GET') {
       if (operation === 'config') return sendJson(res, 200, { configured: provider.configured });
+      if (operation === 'balance') return sendJson(res, 200, await provider.balance());
       if (operation === 'character') return sendJson(res, 200, await provider.describe(parts[3]));
       if (operation === 'job') return sendJson(res, 200, await provider.job(parts[3]));
     }
@@ -325,8 +327,8 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
 
   if (sub === 'rename' && method === 'POST') {
     const body = (await readJson(req)) as { to: string };
-    const sprite = ws.rename(name, body.to);
-    return sendJson(res, 200, { name: sprite.name, rev: sprite.rev });
+    const { sprite, scripts } = renameSpriteEverywhere(ws, name, body.to, 'editor');
+    return sendJson(res, 200, { name: sprite.name, rev: sprite.rev, scripts });
   }
 
   if (sub === 'duplicate' && method === 'POST') {
@@ -336,6 +338,30 @@ async function handle(ws: Workspace, req: http.IncomingMessage, res: http.Server
     sprite.name = body.to;
     ws.save(sprite, 'editor');
     return sendJson(res, 201, { name: sprite.name, rev: sprite.rev });
+  }
+
+  if (sub === 'versions') {
+    if (!ws.exists(name)) throw new HttpError(404, `Sprite "${name}" not found`);
+    if (!parts[4]) {
+      const brief = () => listVersions(ws, name).map(({ file: _file, ...v }) => v);
+      if (method === 'GET') return sendJson(res, 200, brief());
+      if (method === 'POST') {
+        saveVersion(ws, name, ws.readRaw(name), null);
+        return sendJson(res, 201, brief());
+      }
+      throw new HttpError(405, 'Method not allowed');
+    }
+    // Not "editor": the open tab has to reload what was restored.
+    if (parts[5] === 'restore' && method === 'POST') {
+      restoreVersion(ws, name, parts[4], 'version');
+      return sendJson(res, 200, { ok: true, rev: ws.readRaw(name).rev });
+    }
+    throw new HttpError(404, 'Not found');
+  }
+
+  if (sub === 'silhouette' && method === 'GET') {
+    const { summary, png } = silhouetteReport(ws, ws.load(name), { frame: num(url.searchParams.get('frame')), guide: url.searchParams.has('guide'), scale: num(url.searchParams.get('scale')) });
+    return sendJson(res, 200, { summary, png: png.toString('base64') });
   }
 
   const sheetOpts = (): SheetOptions => ({
@@ -718,6 +744,12 @@ async function handleScenes(ws: Workspace, req: http.IncomingMessage, res: http.
   if (sub === 'preview.png' && method === 'GET') {
     const { png } = renderScenePreview(loadGameBundle(ws), name, { scale: num(url.searchParams.get('scale')), grid: url.searchParams.has('grid') });
     return sendBuffer(res, png, 'image/png');
+  }
+  // The scene as it looks with these global variables: what the conditional instances (activeIf) do.
+  if (sub === 'preview-state' && method === 'POST') {
+    const body = (await readJson(req)) as { vars?: Record<string, Value>; scale?: number };
+    const { png, hidden } = renderScenePreview(loadGameBundle(ws), name, { scale: body.scale, vars: body.vars ?? {} });
+    return sendJson(res, 200, { png: png.toString('base64'), hidden });
   }
   throw new HttpError(404, 'Not found');
 }

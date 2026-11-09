@@ -8,6 +8,7 @@ import { base64ToBytes } from '../core/base64.js';
 import { scaleBitmap } from '../core/draw.js';
 import { type SheetOptions, buildSpritesheet, sliceImage } from '../core/sheet.js';
 import { decodePng, encodePng } from './png.js';
+import { renameSpriteRefs } from '../core/game/refactor.js';
 import type { Workspace } from './store.js';
 
 export interface ImportOptions {
@@ -392,4 +393,36 @@ function drawPixelGrid(img: Bitmap, ox: number, oy: number, fw: number, fh: numb
 
 export function previewPng(sprite: Sprite, opts: PreviewOptions = {}): Buffer {
   return encodePng(renderPreview(sprite, opts).image);
+}
+
+/** Renames a sprite and points the game at the new name (scripts are code, and are reported rather than rewritten). */
+export function renameSpriteEverywhere(ws: Workspace, from: string, to: string, updatedBy: string): { sprite: Sprite; scenes: string[]; effects: string[]; scripts: string[] } {
+  const sprite = ws.rename(from, to);
+  const scenes = ws.listScenes().map((x) => ws.loadScene(x.name));
+  let sceneNames: string[] = [];
+  if (ws.hasGame()) {
+    const game = ws.loadGame();
+    const changed = renameSpriteRefs(game, scenes, from, to);
+    if (changed.game) ws.saveGame(game, updatedBy);
+    for (const sc of changed.scenes) ws.saveScene(sc, updatedBy);
+    sceneNames = changed.scenes.map((sc) => sc.name);
+  }
+  const effects: string[] = [];
+  for (const { name } of ws.listVfx()) {
+    const g = ws.loadVfx(name);
+    let touched = false;
+    for (const n of g.nodes) {
+      if ((n.params as Record<string, unknown>).sprite === from) {
+        (n.params as Record<string, unknown>).sprite = to;
+        touched = true;
+      }
+    }
+    if (touched) {
+      ws.saveVfx(g, updatedBy);
+      effects.push(name);
+    }
+  }
+  const quoted = new RegExp(`(["'\`])${from}\\1`);
+  const scripts = Object.entries(ws.loadScripts()).filter(([, code]) => quoted.test(code)).map(([file]) => file);
+  return { sprite, scenes: sceneNames, effects, scripts };
 }

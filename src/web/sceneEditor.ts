@@ -62,6 +62,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   let panY = 20;
   let showGrid = true;
   let dimOthers = false;
+  let lastStateVars = '';
   let hover: { x: number; y: number } | null = null;
   let tileset: LoadedAsset | undefined;
   /** Loaded sprites by sprite name (object sprites and per-instance overrides). */
@@ -185,6 +186,27 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     }
   } }, scene.name);
 
+  async function previewState(): Promise<void> {
+    const typed = await promptText('Preview state', 'Global variables, comma separated (e.g. inn_lv=2, town_rank=10). Empty = the initial ones', lastStateVars);
+    if (typed === null) return;
+    lastStateVars = typed;
+    const vars: Record<string, Value> = {};
+    for (const part of typed.split(',')) {
+      const [k, v] = part.split('=');
+      if (k?.trim() && v !== undefined) vars[k.trim()] = parseValue(v);
+    }
+    try {
+      await flush();
+      const r = await gameApi.sceneState(scene.name, vars);
+      await modal(`Preview state · ${scene.name}`, () => h('div', { class: 'form' },
+        h('img', { src: `data:image/png;base64,${r.png}`, alt: 'The scene with these variables', style: 'max-width:100%;image-rendering:pixelated' }),
+        h('p', { class: 'muted small' }, r.hidden.length ? `Hidden (Active if is false): ${r.hidden.join(', ')}` : 'No instance is hidden with these variables.'),
+      ), { wide: true });
+    } catch (err) {
+      toast((err as Error).message, 'error');
+    }
+  }
+
   root.append(h('div', { class: 'editor scene-editor' },
     h('header', { class: 'topbar' },
       iconButton('back', 'Back to scenes', async () => { await flush(); onBack(); }),
@@ -203,6 +225,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       lookBtn,
       h('span', { class: 'sep' }),
       h('button', { class: 'small', onclick: () => void openEvents() }, icon('tag', 14), 'Scene events'),
+      h('button', { class: 'small', 'data-k': 'scene-state', title: 'See the scene with some global variables: what the conditional instances (Active if) do at a later stage of the game', onclick: () => void previewState() }, icon('eye', 14), 'Preview state'),
       h('span', { class: 'spacer' }),
       h('span', { class: 'status-pill' }, saveLabel),
       h('button', { class: 'small', title: 'Play starting from this scene', onclick: () => void openPlay(scene.name) }, icon('play', 13), 'Play scene'),

@@ -274,7 +274,12 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
           numberField('Drops', rain.count, '140', o, (v) => { if (v === undefined) delete rain.count; else rain.count = Math.max(0, Math.min(800, Math.round(v))); }, { min: '0', max: '800', step: '10' }),
           numberField('Slant°', rain.angle, '12', o, (v) => { if (v === undefined) delete rain.angle; else rain.angle = Math.max(-60, Math.min(60, v)); }, { min: '-60', max: '60' }),
           numberField('Lightning/min', rain.lightning, '0', o, (v) => { if (v === undefined) delete rain.lightning; else rain.lightning = Math.max(0, Math.min(30, v)); }, { min: '0', max: '30', step: '0.5' }),
-          h('label', { title: 'Played a moment after each flash' }, 'Thunder', thunder)) : null,
+          h('label', { title: 'Played a moment after each flash' }, 'Thunder', thunder),
+          numberField('Speed', rain.speed, '420', o, (v) => { if (v === undefined) delete rain.speed; else rain.speed = Math.max(50, Math.min(1500, v)); }, { min: '50', max: '1500', step: '10' }),
+          colorField('Color', rain.color, '#a8c4e8', o, (v) => { rain.color = v; }),
+          colorField('Flash', rain.flashColor, '#ffffff', o, (v) => { rain.flashColor = v; }, 'Color of the flash of lightning'),
+          h('label', { class: 'inline', title: 'Little splashes where the drops land' }, h('input', { type: 'checkbox', checked: rain.splashes !== false, 'data-k': 'rain-splashes', onchange: (e: Event) => { o.before(); if ((e.target as HTMLInputElement).checked) delete rain.splashes; else rain.splashes = false; o.changed(); } }), 'Splashes')) : null,
+        rain ? slider('Strength', rain.opacity ?? 0.42, 0, 1, 0.01, o, (v) => { rain.opacity = v; }) : null,
         toggle('shafts', 'Shafts of light', 'Light slanting through the air; floating particles catch it'),
         shafts ? h('div', { class: 'row2' },
           numberField('Per screen', shafts.count, '5', o, (v) => { if (v === undefined) delete shafts.count; else shafts.count = Math.max(1, Math.min(24, v)); }, { min: '1', max: '24' }),
@@ -284,6 +289,7 @@ export function atmosphereEditor(o: AtmosphereEditorOptions): HTMLElement {
         shafts ? slider('Strength', shafts.opacity ?? 0.14, 0, 1, 0.01, o, (v) => { shafts.opacity = v; }) : null,
         toggle('reflections', 'Reflections in water', 'Water mirrors what stands by it. Tiles that animate count as water by themselves'),
         reflect ? slider('Strength', reflect.opacity ?? 0.32, 0, 1, 0.01, o, (v) => { reflect.opacity = v; }) : null,
+        reflect ? slider('Wobble', reflect.wobble ?? 1, 0, 8, 0.25, o, (v) => { reflect.wobble = v; }, 'Pixels the image trembles sideways') : null,
         reflect ? h('label', { title: 'Sprites of instances that are water too (a canal laid over a dry bed), comma separated' }, 'Water sprites', waterSprites) : null,
       );
     };

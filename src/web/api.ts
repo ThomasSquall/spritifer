@@ -2,6 +2,15 @@ import type { PixelLabCharacter } from '../core/pixellab.js';
 import type { CreateSpriteOptions, SpriteCategory, SpriteFile } from '../core/sprite.js';
 import type { SheetOptions } from '../core/sheet.js';
 
+export interface VersionSummary {
+  id: string;
+  time: string;
+  /** Overlap with the reference in %, -1 for a manual save. */
+  iou: number;
+  advice: number;
+  rev: string;
+}
+
 export interface SpriteSummary {
   name: string;
   width: number;
@@ -50,6 +59,7 @@ export function currentProjectId(): string | null {
 export const api = {
   pixelLab: {
     config: (base: string) => req<{ configured: boolean }>('GET', `${base}/pixellab/config`),
+    balance: (base: string) => req<{ credits: { usd: number }; subscription: { status: string; plan?: string | null; generations: number; total: number } }>('GET', `${base}/pixellab/balance`),
     create: (base: string, body: { name: string; description: string; size: number; view: string; reference?: { mode: string; png: string } }) =>
       req<{ character_id: string; background_job_id: string }>('POST', `${base}/pixellab/create`, body),
     character: (base: string, id: string) => req<PixelLabCharacter>('GET', `${base}/pixellab/character/${enc(id)}`),
@@ -74,7 +84,11 @@ export const api = {
   setCategory: (name: string, category: SpriteCategory | null) =>
     req<{ ok: true }>('PUT', `${apiBase()}/sprites/${enc(name)}/category`, { category }),
   remove: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/sprites/${enc(name)}`),
-  rename: (name: string, to: string) => req<{ name: string; rev: string }>('POST', `${apiBase()}/sprites/${enc(name)}/rename`, { to }),
+  versions: (name: string) => req<VersionSummary[]>('GET', `${apiBase()}/sprites/${enc(name)}/versions`),
+  saveVersion: (name: string) => req<VersionSummary[]>('POST', `${apiBase()}/sprites/${enc(name)}/versions`, {}),
+  restoreVersion: (name: string, id: string) => req<{ ok: true; rev: string }>('POST', `${apiBase()}/sprites/${enc(name)}/versions/${enc(id)}/restore`, {}),
+  silhouette: (name: string, frame: number) => req<{ summary: string; png: string }>('GET', `${apiBase()}/sprites/${enc(name)}/silhouette?frame=${frame}`),
+  rename: (name: string, to: string) => req<{ name: string; rev: string; scripts: string[] }>('POST', `${apiBase()}/sprites/${enc(name)}/rename`, { to }),
   duplicate: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/sprites/${enc(name)}/duplicate`, { to }),
   importArt: (body: { sprites: { name: string; width: number; height: number; frames: string[]; tags: (string | null)[] }[]; overwrite?: boolean }) => req<{ names: string[] }>('POST', `${apiBase()}/art`, body),
   importPng: (body: { name: string; png: string; frameWidth?: number; frameHeight?: number; category?: SpriteCategory }) => req<{ name: string }>('POST', `${apiBase()}/import`, body),

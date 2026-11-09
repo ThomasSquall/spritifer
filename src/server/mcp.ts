@@ -15,6 +15,7 @@ import {
   addFrame,
   addLayer,
   celBitmap,
+  celKey,
   compositeFrame,
   createSprite,
   getCel,
@@ -22,6 +23,7 @@ import {
   moveFrame,
   moveLayer,
   newId,
+  SPRITE_CATEGORIES,
   removeFrame,
   removeLayer,
   removeTag,
@@ -38,26 +40,24 @@ import {
   renderPose,
   restPose,
   viewKey,
-  lowerSegmentName,
 } from '../core/rig.js';
 import { checkAnimation, formatAnimReport, renderMotionMap } from '../core/animCheck.js';
 import { type AnimName, type AnimStyle, type IKTarget, type Keyframe } from '../core/animate.js';
-import { animateRig, facingsOf, keyframeRig, poseFrames, removeRigPart, setRigFinish, setRigPart, splitLimb } from '../core/rigEdit.js';
-import { attachReference, describeGuide, editGuide, preparePicture, setRamp } from '../core/reference.js';
-import { kmeansPalette, pixelize, pixelizeAuto } from '../core/pixelize.js';
+import { animateRig, facingsOf, keyframeRig, poseFrames, removeRigPart, renameRigPart, setRigFinish, setRigPart, splitLimb, splittableLimbs } from '../core/rigEdit.js';
+import { attachReference, describeGuide, editGuide, pixelizeToLayer, preparePicture, setRamp } from '../core/reference.js';
 import {
   type Mask,
   type ShadeOptions,
   type Shape,
   type Vec,
   darkestColor,
-  downscale,
   extractPalette,
   findJaggies,
   findNoisePixels,
   fixPixels,
   generateRamp,
   lintBitmap,
+  formatLintReport,
   maskBorder,
   maskCount,
   maskFromBitmap,
@@ -66,15 +66,10 @@ import {
   selout,
   shadeMask,
   shapeMask,
-  type SilhouetteDiff,
-  silhouetteDiff,
   castShadow,
   shapeCoverage,
   antialiasEdge,
   maskFromCoverage,
-  valueAdvice,
-  valueStats,
-  luminance,
 } from '../core/shapes.js';
 import type { Bitmap } from '../core/sprite.js';
 import {
@@ -98,11 +93,12 @@ import {
   shift,
   transform,
 } from '../core/draw.js';
-import { exportSpritesheet, previewPng, readPicture, referenceBitmap, referenceCoverage, renderBitmapRows, spriteFromPng } from './ops.js';
+import { exportSpritesheet, previewPng, readPicture, referenceBitmap, renameSpriteEverywhere, renderBitmapRows, spriteFromPng } from './ops.js';
 import { artContactSheet, cleanArt, cropBitmap, spriteFromArt } from '../core/artImport.js';
 import { decodePng, encodePng } from './png.js';
 import type { Workspace } from './store.js';
 import { buildAsset, renderReliefPreview } from './game.js';
+import { listVersions as versionsOf, restoreVersion, saveVersion as storeVersion, silhouetteReport } from './spriteVersions.js';
 import { GAME_INSTRUCTIONS, registerGameTools } from './mcpGame.js';
 import { type ProjectInfo, ProjectRegistry, TEMPLATES, defaultProjectsRoot } from './projects.js';
 
@@ -306,8 +302,41 @@ export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string 
   tool('list_sprites', 'List the sprites in the workspace.', {}, () => {
     const list = ws.list();
     if (!list.length) return text(`No sprites yet in ${ws.dir}. Use create_sprite.`);
-    return text(list.map((s) => `${s.name}: ${s.width}x${s.height}, ${s.frames} frames, ${s.layers} layers${s.tags.length ? `, tags: ${s.tags.join(', ')}` : ''}`).join('\n'));
+    return text(list.map((s) => `${s.name}: ${s.width}x${s.height}, ${s.frames} frames, ${s.layers} layers${s.grid ? `, ${s.grid.width}x${s.grid.height} tiles` : ''}${s.category ? `, category ${s.category}` : ''}${s.tags.length ? `, tags: ${s.tags.join(', ')}` : ''}`).join('\n'));
   }, { readOnlyHint: true });
+
+  tool(
+    'update_sprite',
+    'Rename a sprite (object types, tile rules, scenes, instances, events and effects follow; scripts that name it are listed for you to fix), set its gallery category, or change its tile grid.',
+    {
+      sprite: P.sprite,
+      new_name: z.string().optional(),
+      category: z.enum(SPRITE_CATEGORIES).nullable().optional().describe('Gallery section; null = uncategorized'),
+      tile_width: z.number().int().min(0).optional().describe('Tile grid width (0 removes the grid)'),
+      tile_height: z.number().int().min(1).optional().describe('Default: same as the width'),
+    },
+    (a) => {
+      if (a.tile_width !== undefined || a.tile_height !== undefined) {
+        mutate(a.sprite, (s) => {
+          const w = a.tile_width ?? s.grid?.width ?? a.tile_height!;
+          s.grid = w > 0 ? { width: w, height: a.tile_height ?? (a.tile_width !== undefined ? w : s.grid?.height ?? w) } : null;
+        });
+      }
+      if (a.category !== undefined) ws.setSpriteCategory(a.sprite, a.category, AUTHOR);
+      const notes: string[] = [];
+      let name = a.sprite;
+      if (a.new_name && a.new_name !== a.sprite) {
+        const r = renameSpriteEverywhere(ws, a.sprite, a.new_name, AUTHOR);
+        // Undo snapshots belong to the old file name.
+        history.delete(a.sprite);
+        name = a.new_name;
+        if (r.scenes.length) notes.push(`Scenes updated: ${r.scenes.join(', ')}.`);
+        if (r.effects.length) notes.push(`Effects updated: ${r.effects.join(', ')}.`);
+        if (r.scripts.length) notes.push(`These scripts mention "${a.sprite}" in a string and were NOT changed: ${r.scripts.join(', ')}.`);
+      }
+      return text([`Updated.\n${describe(ws.load(name))}`, ...notes].join('\n'));
+    },
+  );
 
   tool(
     'create_sprite',
@@ -395,12 +424,24 @@ export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string 
 
   // ------------------------------------------------------------------ layers
 
-  tool('add_layer', 'Add a layer (e.g. "outline", "shading", "background", "props").', {
+  tool('add_layer', 'Add a layer (e.g. "outline", "shading", "background", "props"), empty or as a copy of another.', {
     sprite: P.sprite,
     name: z.string().optional(),
     index: z.number().int().min(0).optional().describe('Insert position (default: on top)'),
+    copy_from: z.union([z.number().int().min(0), z.string()]).optional().describe('Duplicate this layer: pixels of every frame and opacity'),
   }, (a) => {
-    const { result: layer, sprite } = mutate(a.sprite, (s) => addLayer(s, a.name, a.index));
+    const { result: layer, sprite } = mutate(a.sprite, (s) => {
+      const src = a.copy_from !== undefined ? resolveLayer(s, a.copy_from) : undefined;
+      const l = addLayer(s, a.name ?? (src ? `${src.name} copy` : undefined), a.index);
+      if (src) {
+        l.opacity = src.opacity;
+        for (const f of s.frames) {
+          const c = getCel(s, src.id, f.id);
+          if (c) s.cels.set(celKey(l.id, f.id), new Uint8ClampedArray(c));
+        }
+      }
+      return l;
+    });
     return text(`Added layer "${layer.name}" at index ${sprite.layers.indexOf(sprite.layers.find((l) => l.id === layer.id)!)}.\n${describe(sprite)}`);
   });
 
@@ -525,8 +566,9 @@ export function createMcpServer(ws: Workspace, opts: { editorUrl?: () => string 
     from: z.number().int().min(0),
     to: z.number().int().min(0),
     direction: z.enum(['forward', 'reverse', 'pingpong']).optional(),
+    color: z.string().optional().describe('Color of the tag in the editor timeline, "#rrggbb"'),
   }, (a) => {
-    const { sprite } = mutate(a.sprite, (s) => setTag(s, { name: a.name, from: a.from, to: a.to, direction: a.direction }));
+    const { sprite } = mutate(a.sprite, (s) => setTag(s, { name: a.name, from: a.from, to: a.to, direction: a.direction, ...(a.color ? { color: normalizeHex(a.color) } : {}) }));
     return text(describe(sprite));
   });
 
@@ -664,6 +706,11 @@ Tips: give limbs a 1px overlap with the body so joints never open when rotating;
     { destructiveHint: true },
   );
 
+  tool('rig_rename_part', 'Rename a rig part; its children and the posed frames follow.', { sprite: P.sprite, name: z.string(), to: z.string() }, (a) => {
+    const { sprite } = mutate(a.sprite, (s) => renameRigPart(s, a.name, a.to));
+    return text(`Renamed "${a.name}" to "${a.to}".\n${describeRig(sprite)}`);
+  });
+
   tool(
     'rig_preview',
     'Render the character rig in rest pose (or with test offsets) for several facings side by side, with the pivots marked. Use it to check the turnaround and the joints before animating.',
@@ -746,8 +793,7 @@ Limbs must hang straight down from their pivot in the drawing. Run it once befor
     (a) => {
       const { sprite, result } = mutate(a.sprite, (s) => {
         if (!s.rig) throw new Error('This sprite has no rig. Use create_character / rig_part.');
-        const parts = s.rig.parts;
-        const targets = a.limbs ?? parts.filter((p) => /^(arm|leg)_/.test(p.name) && !parts.some((q) => q.parent === p.name && q.name === lowerSegmentName(p.name))).map((p) => p.name);
+        const targets = a.limbs ?? splittableLimbs(s);
         if (!targets.length) throw new Error('No limb to split: name them arm_* / leg_* or pass limbs.');
         return targets.map((name) => ({ name, ...splitLimb(s, name, { ratio: a.ratio, foot: a.foot }) }));
       });
@@ -1091,19 +1137,7 @@ Returns the sprite, its normal map and how it looks lit from the left, the right
       const s = ws.load(a.sprite);
       const bmp = a.layer !== undefined ? celBitmap(s, resolveLayer(s, a.layer).id, resolveFrame(s, a.frame).id) : compositeFrame(s, a.frame ?? 0);
       const r = lintBitmap(bmp, a.outline ? color(s, a.outline) : undefined);
-      const pts = (v: Vec[], max = 24) => (v.length ? v.slice(0, max).map(([x, y]) => `(${x},${y})`).join(' ') + (v.length > max ? ` …+${v.length - max}` : '') : 'none');
-      const pct = r.silhouette ? Math.round((r.unoutlined.length / r.silhouette) * 100) : 0;
-      return text(
-        [
-          `Colors: ${r.colors}${r.nearDuplicates.length ? `; near-duplicates (merge them): ${r.nearDuplicates.map((p) => p.join('≈')).join(', ')}` : ''}`,
-          `Noise pixels — isolated and close in color to their surroundings (${r.orphans.length}): ${pts(r.orphans)}`,
-          `Accent pixels — isolated, high contrast (eye glints, sparkles; usually deliberate, leave them): ${r.accents.length}`,
-          `Outline jaggies / L-corners (${r.jaggies.length}): ${pts(r.jaggies)}`,
-          `Outline 2x2 doubles (${r.doubles.length}): ${pts(r.doubles)}`,
-          `Style note — silhouette pixels lighter than the outline color: ${r.unoutlined.length}/${r.silhouette} (${pct}%)${pct > 0 ? `: ${pts(r.unoutlined, 12)}. Normal for colored/selective outlines and pixelized or painterly art; only change them if this sprite should have a closed dark outline.` : ''}`,
-          `Low-contrast neighbors (colors too close to read): ${r.lowContrast.length ? r.lowContrast.slice(0, 8).map(([c1, c2, n]) => `${c1}/${c2}×${n}`).join(', ') : 'none'}`,
-        ].join('\n'),
-      );
+      return text(formatLintReport(r));
     },
     { readOnlyHint: true },
   );
@@ -1139,33 +1173,8 @@ The picture also becomes the sprite's reference (unless keep_reference), so prev
     (a) => {
       const { sprite, result } = mutate(a.sprite, (s) => {
         const { src, full } = loadPicture(a.path, a.crop, a.remove_background ?? true, a.tolerance);
-        const h = a.height ?? Math.min(s.height, Math.floor((src.height * s.width) / src.width));
-        const w = Math.max(1, Math.round((src.width * h) / src.height));
-        const palette = a.use_palette ? s.palette.map((c) => parseColor(c)) : kmeansPalette(src, a.colors ?? 24);
-        if (!palette.length) throw new Error('No palette: give colors or set a palette first');
-        const base = { width: w, height: h, palette, lineLightness: a.line_lightness, despeckle: a.despeckle };
-        // Without an explicit line_bias, pick the one that keeps the source's light/dark balance.
-        const auto = a.line_bias === undefined ? pixelizeAuto(src, base, downscale(src, w, h)) : null;
-        const px = auto ? auto.image : pixelize(src, { ...base, lineBias: a.line_bias });
-        const biasNote = auto ? `line_bias ${auto.lineBias} (auto)` : `line_bias ${a.line_bias}`;
-        const x = a.x ?? Math.floor((s.width - w) / 2);
-        const y = a.y ?? s.height - h;
-        const layer = s.layers.find((l) => l.name === (a.layer ?? 'pixelized')) ?? addLayer(s, a.layer ?? 'pixelized');
-        const bmp = celBitmap(s, layer.id, resolveFrame(s, 0).id);
-        bmp.data.fill(0);
-        pasteBitmap(bmp, px, x, y, 'over');
-        const used = [...new Set(colorHistogram(px).map((c) => c.color))];
-        if (a.use_palette) {
-          for (const c of used) if (!s.palette.includes(c)) s.palette.push(c);
-        } else {
-          // Replace the palette with what the sprite actually uses (all layers and frames) plus the ramps,
-          // so leftovers such as the default palette do not linger.
-          const inUse = new Set<string>(Object.values(s.ramps).flat());
-          for (const l of s.layers) for (const f of s.frames) for (const h of colorHistogram(celBitmap(s, l.id, f.id))) inUse.add(h.color);
-          s.palette = [...inUse].sort((x, y) => luminance(parseColor(x)) - luminance(parseColor(y)));
-        }
-        if (!a.keep_reference) attachReference(s, src, h, x, y);
-        return `Pixelized ${full.width}x${full.height}${a.crop ? ` (crop ${a.crop.width}x${a.crop.height})` : ''} → ${w}x${h} at (${x},${y}) on layer "${layer.name}", ${biasNote}, ${used.length} colors: ${used.join(' ')}`;
+        const r = pixelizeToLayer(s, src, { height: a.height, x: a.x, y: a.y, colors: a.colors, usePalette: a.use_palette, layer: a.layer, lineBias: a.line_bias, lineLightness: a.line_lightness, despeckle: a.despeckle, keepReference: a.keep_reference });
+        return `Pixelized ${full.width}x${full.height}${a.crop ? ` (crop ${a.crop.width}x${a.crop.height})` : ''} → ${r.width}x${r.height} at (${r.x},${r.y}) on layer "${r.layer}", line_bias ${r.lineBias}${r.autoBias ? ' (auto)' : ''}, ${r.colors.length} colors: ${r.colors.join(' ')}`;
       });
       return [...text(result), image(previewPng(sprite, { compare: !!sprite.reference, rulers: true }))];
     },
@@ -1295,37 +1304,8 @@ Creates/replaces tag <name> (frames are rendered from the rig). Check with previ
 
   // ------------------------------------------------------------------ versions (scored snapshots on disk)
 
-  type VersionInfo = { id: string; file: string; time: string; iou: number; advice: number; rev: string };
-  const versionDir = (name: string) => path.join(ws.dir, '.versions', name);
-
-  /** Versions newest first. File names: <timestamp>_<overlap%|manual>_<value warnings>_<rev>.sprite.json */
-  const listVersions = (name: string): VersionInfo[] => {
-    const dir = versionDir(name);
-    if (!fs.existsSync(dir)) return [];
-    return fs
-      .readdirSync(dir)
-      .filter((f) => f.endsWith('.sprite.json'))
-      .map((f) => {
-        const [ts, iou, advice, rev] = f.replace('.sprite.json', '').split('_');
-        return { id: ts, file: path.join(dir, f), time: new Date(Number(ts)).toLocaleTimeString(), iou: iou === 'manual' ? -1 : Number(iou), advice: Number(advice) || 0, rev };
-      })
-      .sort((x, y) => Number(y.id) - Number(x.id));
-  };
-
-  const saveVersion = (name: string, raw: SpriteFile, iou: number | null, advice = 0): VersionInfo => {
-    const dir = versionDir(name);
-    fs.mkdirSync(dir, { recursive: true });
-    const id = String(Date.now());
-    const file = path.join(dir, `${id}_${iou === null ? 'manual' : iou}_${advice}_${raw.rev}.sprite.json`);
-    fs.writeFileSync(file, JSON.stringify(raw));
-    // Keep the 40 newest plus the best-scoring one.
-    const all = listVersions(name);
-    const keep = new Set(all.slice(0, 40).map((v) => v.file));
-    const top = all.filter((v) => v.iou >= 0).sort((x, y) => y.iou - x.iou)[0];
-    if (top) keep.add(top.file);
-    for (const v of all) if (!keep.has(v.file)) fs.rmSync(v.file);
-    return listVersions(name).find((v) => v.file === file)!;
-  };
+  const listVersions = (name: string) => versionsOf(ws, name);
+  const saveVersion = (name: string, raw: SpriteFile, iou: number | null, advice = 0) => storeVersion(ws, name, raw, iou, advice);
 
   tool(
     'versions',
@@ -1355,15 +1335,9 @@ Creates/replaces tag <name> (frames are rendered from the rig). Check with previ
     'Restore a saved version of a sprite (see versions). The current state is saved as a version first, so nothing is lost.',
     { sprite: P.sprite, id: z.string().describe('Version id from versions / silhouette_check') },
     (a) => {
-      const v = listVersions(a.sprite).find((x) => x.id === a.id);
-      if (!v) throw new Error(`No version ${a.id} for "${a.sprite}". Use versions to list them.`);
       const current = ws.readRaw(a.sprite);
-      saveVersion(a.sprite, current, null);
+      const v = restoreVersion(ws, a.sprite, a.id, AUTHOR);
       remember(a.sprite, current);
-      const file = JSON.parse(fs.readFileSync(v.file, 'utf8')) as SpriteFile;
-      file.rev = newId();
-      file.updatedBy = AUTHOR;
-      ws.writeRaw(file);
       return text(`Restored version ${v.id} (${v.iou >= 0 ? `overlap ${v.iou}%` : 'manual save'}). The previous state was saved as a version.`);
     },
   );
@@ -1413,72 +1387,9 @@ Image: reference | art | diff (gray = both, green = missing, light green = missi
     },
     (a) => {
       const s = ws.load(a.sprite);
-      if (!s.reference) throw new Error('This sprite has no reference (use set_reference with remove_background: true)');
-      const ref = referenceBitmap(s);
       const layerIds = a.layers?.map((l) => resolveLayer(s, l).id);
-      const art = compositeFrame(s, a.frame ?? 0, layerIds ? { layerIds, includeHidden: true } : {});
-      const d = silhouetteDiff(ref, art, {
-        band: a.band,
-        coverage: referenceCoverage(s),
-        threshold: a.coverage,
-        colorBlock: a.colors === false ? 0 : a.color_block,
-      });
-      const box = (b: SilhouetteDiff['ref']) => (b ? `x ${b.left}..${b.right}, y ${b.top}..${b.bottom}, center (${b.cx},${b.cy})` : 'empty');
-      const reg = (r: { x0: number; y0: number; x1: number; y1: number; pixels: number; thin: boolean }) =>
-        `x ${r.x0}..${r.x1} y ${r.y0}..${r.y1} (${r.pixels}px${r.thin ? ', thin detail' : ''})`;
-      const rows = d.bands
-        .map((b) => {
-          const r = b.ref ? `${b.ref[0]}..${b.ref[1]}` : '—';
-          const t = b.art ? `${b.art[0]}..${b.art[1]}` : '—';
-          const notes: string[] = [];
-          if (b.ref && b.art) {
-            const dl = b.art[0] - b.ref[0];
-            const dr = b.art[1] - b.ref[1];
-            if (Math.abs(dl) >= 2) notes.push(dl > 0 ? `left edge ${dl}px inside` : `left edge ${-dl}px outside`);
-            if (Math.abs(dr) >= 2) notes.push(dr < 0 ? `right edge ${-dr}px inside` : `right edge ${dr}px outside`);
-          } else notes.push(b.ref ? 'missing in art' : 'not in reference');
-          return notes.length ? `y ${b.y0}-${b.y1}: ref x ${r} | art x ${t} → ${notes.join(', ')}` : null;
-        })
-        .filter(Boolean);
-      const big = (list: typeof d.missingRegions) => list.filter((r) => r.pixels >= 3).slice(0, 10);
-      const add = big(d.missingRegions);
-      const trim = big(d.extraRegions);
-      const rvStats = valueStats(ref);
-      const avStats = valueStats(art);
-      const adviceCount = rvStats && avStats ? valueAdvice(rvStats, avStats).length : 0;
-      const iouPct = Math.round(d.iou * 100);
-      // Score history: every check saves a version, so a pass that made things worse can be undone at any time.
-      const history = listVersions(a.sprite);
-      const best = history.filter((v) => v.iou >= 0).sort((x, y) => y.iou - x.iou || x.advice - y.advice)[0];
-      const raw = ws.readRaw(a.sprite);
-      const saved = history[0]?.rev === raw.rev ? history[0] : saveVersion(a.sprite, raw, iouPct, adviceCount);
-      let trend = '';
-      if (best && (iouPct < best.iou - 2 || (iouPct <= best.iou && adviceCount > best.advice))) {
-        trend = `⚠ WORSE than your best version: overlap ${iouPct}% vs ${best.iou}%${adviceCount > best.advice ? `, ${adviceCount} value warnings vs ${best.advice}` : ''} (version ${best.id}, ${best.time}). Unless this pass added something you need, restore it: restore_version sprite="${a.sprite}" id="${best.id}".`;
-      } else if (best && iouPct > best.iou) trend = `✓ New best (previous best ${best.iou}%). Saved as version ${saved.id}.`;
-      else trend = `Saved as version ${saved.id}.`;
-      const summary = [
-        `Overlap (IoU): ${iouPct}% — ${d.overlap} px shared, ${d.missing} missing (${d.thinMissing} of them thin details), ${d.extra} extra`,
-        trend,
-        `Reference: ${box(d.ref)}`,
-        `Art:       ${box(d.art)}`,
-        add.length ? `ADD (in the reference, missing in the art):\n${add.map((r) => '  ' + reg(r)).join('\n')}` : 'Nothing significant to add.',
-        trim.length ? `TRIM (in the art, not in the reference):\n${trim.map((r) => '  ' + reg(r)).join('\n')}` : 'Nothing significant to trim.',
-        rows.length ? `Edges that differ by 2px or more:\n${rows.join('\n')}` : 'All bands match within 1px.',
-        (() => {
-          const rv = rvStats;
-          const av = avStats;
-          if (!rv || !av) return '';
-          const fmt = (v: typeof rv) => `dark ${Math.round(v.dark * 100)}% / mid ${Math.round(v.mid * 100)}% / light ${Math.round(v.light * 100)}%, L p10 ${v.p10} p50 ${v.p50} p90 ${v.p90}, chroma ${v.chroma}`;
-          const advice = valueAdvice(rv, av);
-          return `Values — ref: ${fmt(rv)}\n         art: ${fmt(av)}\n${advice.length ? advice.map((x) => '  → ' + x).join('\n') : '  → values match the reference'}`;
-        })(),
-        d.colors.length
-          ? `Colors that differ (ΔE OKLab ≥ 0.06), worst first — where the reference has a different material in that zone (e.g. hair over a cheek) fix the shape, not the color:\n${d.colors.slice(0, 10).map((c) => `  x ${c.x0}..${c.x1} y ${c.y0}..${c.y1}: art ${c.art} vs ref ${c.ref} (Δ${c.delta}) → art is ${c.notes.join(', ') || 'off'}`).join('\n')}`
-          : a.colors === false ? '' : 'Colors match the reference zone by zone.',
-      ].filter(Boolean).join('\n');
-      const pic = renderBitmapRows(s, [[ref, art, d.image]], { scale: a.scale, rulers: true, guide: a.guide && s.guide ? s.guide : undefined });
-      return [...text(summary), image(encodePng(pic.image))];
+      const { summary, png } = silhouetteReport(ws, s, { frame: a.frame, layerIds, coverage: a.coverage, band: a.band, colors: a.colors, colorBlock: a.color_block, guide: a.guide, scale: a.scale });
+      return [...text(summary), image(png)];
     },
     {},
   );
@@ -1958,6 +1869,13 @@ Use it to stamp tiles into an environment, copy a body part between frames, or a
     { name: z.string().describe('Game title, e.g. "Dungeon Quest"'), template: z.enum(['empty', 'platformer', 'rpg']).optional() },
     (a) => switchTo(registry.create(a.name, a.template ?? 'empty')),
   );
+
+  tool('forget_project', 'Remove a project opened from an outside folder from the list. No file is deleted; projects inside the projects folder cannot be forgotten.', { project: z.string().describe('Id, title or folder path') }, (a) => {
+    const p = registry.resolve(a.project);
+    if (p.id === projectId) throw new Error('This is the current project: switch to another one first (open_project).');
+    registry.forget(p.id);
+    return text(`Forgot project ${p.id} (${p.dir}). Its files are untouched.`);
+  }, { destructiveHint: true });
 
   return server;
 }

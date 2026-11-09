@@ -3,10 +3,11 @@
  * Pure and browser-safe.
  */
 import { base64ToBytes, bytesToBase64 } from './base64.js';
-import { normalizeHex } from './color.js';
-import { extractRegion } from './draw.js';
-import { downscale, removeBackground } from './shapes.js';
-import type { Bitmap, PoseGuide, Reference, Sprite } from './sprite.js';
+import { normalizeHex, parseColor } from './color.js';
+import { colorHistogram, extractRegion, pasteBitmap } from './draw.js';
+import { kmeansPalette, pixelize, pixelizeAuto } from './pixelize.js';
+import { downscale, luminance, removeBackground } from './shapes.js';
+import { type Bitmap, type PoseGuide, type Reference, type Sprite, addLayer, celBitmap } from './sprite.js';
 
 // ---------------------------------------------------------------------------
 // Reference pictures
@@ -36,6 +37,52 @@ export function attachReference(s: Sprite, src: Bitmap, height?: number, px?: nu
   const y = py ?? s.height - h;
   s.reference = { width: w, height: h, pixels: bytesToBase64(scaled.data), x, y, source: { width: hi.width, height: hi.height, pixels: bytesToBase64(hi.data) } };
   return { w, h, x, y };
+}
+
+export interface PixelizeToLayerOptions {
+  /** Height of the result on the canvas (default: fit the canvas). */
+  height?: number;
+  x?: number;
+  y?: number;
+  /** Colors extracted from the picture (default 24). */
+  colors?: number;
+  /** Quantize to the sprite's own palette instead of extracting one. */
+  usePalette?: boolean;
+  /** Target layer (default "pixelized"; created if missing, replaced otherwise). */
+  layer?: string;
+  /** Automatic when omitted: the value that keeps the picture's light/dark balance. */
+  lineBias?: number;
+  lineLightness?: number;
+  despeckle?: boolean;
+  keepReference?: boolean;
+}
+
+/** Converts a picture into clean pixel art on a layer of frame 0 and, unless told otherwise, makes it the sprite's reference. */
+export function pixelizeToLayer(s: Sprite, src: Bitmap, o: PixelizeToLayerOptions = {}): { width: number; height: number; x: number; y: number; layer: string; lineBias: number; autoBias: boolean; colors: string[] } {
+  const h = o.height ?? Math.min(s.height, Math.floor((src.height * s.width) / src.width));
+  const w = Math.max(1, Math.round((src.width * h) / src.height));
+  const palette = o.usePalette ? s.palette.map((c) => parseColor(c)) : kmeansPalette(src, o.colors ?? 24);
+  if (!palette.length) throw new Error('No palette: give colors or set a palette first');
+  const base = { width: w, height: h, palette, lineLightness: o.lineLightness, despeckle: o.despeckle };
+  const auto = o.lineBias === undefined ? pixelizeAuto(src, base, downscale(src, w, h)) : null;
+  const px = auto ? auto.image : pixelize(src, { ...base, lineBias: o.lineBias });
+  const x = o.x ?? Math.floor((s.width - w) / 2);
+  const y = o.y ?? s.height - h;
+  const layer = s.layers.find((l) => l.name === (o.layer ?? 'pixelized')) ?? addLayer(s, o.layer ?? 'pixelized');
+  const bmp = celBitmap(s, layer.id, s.frames[0].id);
+  bmp.data.fill(0);
+  pasteBitmap(bmp, px, x, y, 'over');
+  const used = [...new Set(colorHistogram(px).map((c) => c.color))];
+  if (o.usePalette) {
+    for (const c of used) if (!s.palette.includes(c)) s.palette.push(c);
+  } else {
+    // Replace the palette with what the sprite actually uses plus the ramps, so leftovers such as the default palette do not linger.
+    const inUse = new Set<string>(Object.values(s.ramps).flat());
+    for (const l of s.layers) for (const f of s.frames) for (const c of colorHistogram(celBitmap(s, l.id, f.id))) inUse.add(c.color);
+    s.palette = [...inUse].sort((p, q) => luminance(parseColor(p)) - luminance(parseColor(q)));
+  }
+  if (!o.keepReference) attachReference(s, src, h, x, y);
+  return { width: w, height: h, x, y, layer: layer.name, lineBias: auto ? auto.lineBias : o.lineBias!, autoBias: !!auto, colors: used };
 }
 
 /** The reference picture at canvas resolution (its own size, not placed). */

@@ -27,6 +27,7 @@ import { mountReferenceControls } from './referencePanel.js';
 import { mountGuide } from './guidePanel.js';
 import { mountRig } from './rigPanel.js';
 import { mountRelief } from './reliefPanel.js';
+import { mountPixelTools } from './pixelToolsPanel.js';
 
 const TOOLS: { id: ToolName; label: string; key: string }[] = [
   { id: 'pencil', label: 'Pencil', key: 'B' },
@@ -66,6 +67,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
   const guide = mountGuide(ed, view);
   const rig = mountRig(ed, view);
   const relief = mountRelief(ed);
+  const pixelTools = mountPixelTools(ed);
   const DOCK_KEY = 'spritifer.characterDock';
   let dockOpen = (() => {
     try {
@@ -74,11 +76,11 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
     } catch { /* storage unavailable */ }
     return !!(ed.sprite.rig || ed.sprite.guide);
   })();
-  const dockBtn = h('button', { class: 'ghost small', title: 'Pose guide & character rig panel', onclick: () => {
+  const dockBtn = h('button', { class: 'ghost small', 'data-k': 'dock-toggle', title: 'Pixel tools, versions, pose guide, character rig and relief', onclick: () => {
     dockOpen = !dockOpen;
     try { localStorage.setItem(DOCK_KEY, dockOpen ? '1' : '0'); } catch { /* storage unavailable */ }
     renderDock();
-  } }, icon('rig', 15), 'Rig & guide');
+  } }, icon('rig', 15), 'Tools & rig');
   const guideBtn = iconButton('skeleton', 'Show / hide the pose guide', () => { ed.guideShow = !ed.guideShow; ed.emit('view'); });
   const saveLabel = h('span', { class: 'save-label' });
 
@@ -577,7 +579,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
   root.append(
     h('div', { class: 'editor' },
       topbar,
-      h('div', { class: 'workspace' }, toolbar, h('main', { class: 'center' }, view.el, statusbar), sidebar, h('aside', { class: 'sprite-dock' }, guide.el, rig.el, relief.el)),
+      h('div', { class: 'workspace' }, toolbar, h('main', { class: 'center' }, view.el, statusbar), sidebar, h('aside', { class: 'sprite-dock' }, pixelTools.el, guide.el, rig.el, relief.el)),
       timeline,
     ),
   );
@@ -589,7 +591,8 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
     if (!to || to === ed.sprite.name) return;
     try {
       await ed.flush();
-      await api.rename(ed.sprite.name, to);
+      const { scripts } = await api.rename(ed.sprite.name, to);
+      if (scripts.length) toast(`These scripts still say "${ed.sprite.name}": ${scripts.join(', ')}`, 'error');
       location.hash = `#/edit/${encodeURIComponent(to)}`;
     } catch (err) {
       toast((err as Error).message, 'error');
@@ -827,6 +830,7 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
           thumbTimer = window.setTimeout(renderThumbs, 120);
           break;
         case 'structure':
+          pixelTools.render();
           renderHeader();
           renderPalette();
           renderLayers();
@@ -871,7 +875,8 @@ export function mountEditor(root: HTMLElement, ed: Editor, opts: EditorViewOptio
   renderStatus();
   refControls.render();
   guide.render();
-          relief.render();
+  relief.render();
+  pixelTools.render();
   rig.render('structure');
   renderDock();
 

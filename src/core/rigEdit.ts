@@ -284,6 +284,12 @@ function rowCenter(b: Bitmap, y: number, fallback: number): number {
   return n ? Math.round(sum / n) : fallback;
 }
 
+/** Parts named arm_* or leg_* that have not been cut into segments yet. */
+export function splittableLimbs(s: Sprite): string[] {
+  const parts = s.rig?.parts ?? [];
+  return parts.filter((p) => /^(arm|leg)_/.test(p.name) && !parts.some((q) => q.parent === p.name && q.name === lowerSegmentName(p.name))).map((p) => p.name);
+}
+
 /**
  * Cuts a one-piece limb hanging from its pivot into segments that bend: arm_l → arm_l + forearm_l, leg_r → leg_r + shin_r + foot_r.
  * One row is shared at each cut so joints never open, the rest pose does not change, and parts held at the end of the limb (a weapon) move to the lower segment.

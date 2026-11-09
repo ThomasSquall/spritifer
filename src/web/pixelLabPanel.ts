@@ -339,6 +339,9 @@ export function openPixelLab(openSprite: (name: string) => void): void {
       }
       try { id.value = localStorage.getItem(storageKey) ?? ''; } catch { /* Browser storage can be unavailable. */ }
       status.textContent = 'Create a character or load an existing PixelLab ID.';
+      void api.pixelLab.balance(base).then((b) => {
+        if (!closed) status.textContent = `${status.textContent} · Credits: $${b.credits.usd.toFixed(2)}, ${b.subscription.generations}/${b.subscription.total} generations.`;
+      }).catch(() => { /* The credits are only informative. */ });
       if (id.value) await refresh(id.value);
     });
 

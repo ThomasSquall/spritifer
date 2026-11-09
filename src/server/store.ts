@@ -121,10 +121,10 @@ export class Workspace {
     }
   }
 
-  setSpriteCategory(name: string, category: SpriteCategory | null): void {
+  setSpriteCategory(name: string, category: SpriteCategory | null, updatedBy = 'editor'): void {
     const file = this.readRaw(name);
     if (file.category === category) return;
-    this.writeRaw({ ...file, category, rev: newId(), updatedBy: 'editor' });
+    this.writeRaw({ ...file, category, rev: newId(), updatedBy });
   }
 
   remove(name: string): void {
@@ -137,6 +137,9 @@ export class Workspace {
     sprite.name = to;
     this.save(sprite, 'rename');
     this.remove(from);
+    // Saved versions follow the sprite.
+    const versions = path.join(this.dir, '.versions');
+    if (fs.existsSync(path.join(versions, from)) && !fs.existsSync(path.join(versions, to))) fs.renameSync(path.join(versions, from), path.join(versions, to));
     return sprite;
   }
 

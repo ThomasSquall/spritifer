@@ -2,7 +2,7 @@ import { checkAnimation, formatAnimReport, renderMotionMap } from '../core/animC
 import { ANIMS, ANIM_DEFAULTS, ANIM_STYLES, type AnimName, type AnimStyle, type Ease, type Keyframe } from '../core/animate.js';
 import { extractRegion } from '../core/draw.js';
 import { type PlacedPart, ensureRig, layoutPose, limbChain, lowerSegmentName, partDepth, renderPose, resolveView, restPose, rigFacings, topoParts, viewBitmap, viewKey } from '../core/rig.js';
-import { animateRig, keyframeRig, movePivot, poseFrames, removeRigPart, renameRigPart, reparentPart, setPartPose, setRigFinish, setRigPart, splitLimb } from '../core/rigEdit.js';
+import { animateRig, keyframeRig, movePivot, poseFrames, removeRigPart, renameRigPart, reparentPart, setPartPose, setRigFinish, setRigPart, splitLimb, splittableLimbs } from '../core/rigEdit.js';
 import { type Bitmap, type Facing, type PartPose, type Pose, type RigPart, FACINGS, celBitmap, compositeFrame } from '../core/sprite.js';
 import type { CanvasInteraction, CanvasMetrics, CanvasView, FPoint } from './canvas.js';
 import type { Editor } from './editor.js';
@@ -816,6 +816,7 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
           h('div', { class: 'spacer' }), h('button', { class: 'small primary', onclick: generate }, 'Generate')),
         h('p', { class: 'muted small' }, 'Creates (or replaces) tags "<animation>_<facing>" from key poses, with planted feet when the legs are split. Uses part names body, head, arm_l/r, forearm_l/r, leg_l/r, shin_l/r, foot_l/r, weapon, cape…'),
       ),
+      buildSplit(),
       buildFinish(),
       buildMotionCheck(),
       h('details', { class: 'card anim-card', open: kf.keys.length > 0 },
@@ -831,6 +832,29 @@ export function mountRig(ed: Editor, view: CanvasView): { el: HTMLElement; rende
         h('div', { class: 'row-inline wrap' }, h('label', { class: 'inline small' }, 'frames', kFrames), h('label', { class: 'inline small' }, 'ms', kDur), h('label', { class: 'inline small' }, kLoop, 'loop'),
           h('div', { class: 'spacer' }), h('button', { class: 'small primary', onclick: buildKeys, disabled: !kf.keys.length }, 'Build tag')),
       ),
+    );
+  }
+
+  function buildSplit() {
+    const sp = s();
+    const limbs = splittableLimbs(sp);
+    const ratio = h('input', { type: 'number', class: 'num tiny-num', min: '0.2', max: '0.8', step: '0.05', value: '0.5', 'data-k': 'split-ratio', title: 'Where the elbow or knee falls along the limb' });
+    const foot = h('input', { type: 'checkbox', checked: true, 'data-k': 'split-foot', title: 'Also cut feet from legs of at least 6 rows' });
+    const run = () => {
+      let done: string[] = [];
+      const err = ed.tryEdit((sx) => {
+        done = splittableLimbs(sx).map((name) => {
+          const r = splitLimb(sx, name, { ratio: Math.max(0.2, Math.min(0.8, Number(ratio.value) || 0.5)), foot: foot.checked });
+          return `${name} → ${r.lower}${r.tip ? ` + ${r.tip}` : ''}${r.skipped.length ? ` (not split: ${r.skipped.join(', ')})` : ''}`;
+        });
+      });
+      if (err) toast(err.message, 'error');
+      else toast(`${done.join('; ')}. Generate the animations again to use the new joints.`);
+    };
+    return h('details', { class: 'card anim-card' },
+      h('summary', {}, 'Split limbs'),
+      h('p', { class: 'muted small' }, limbs.length ? `Cuts one-piece limbs into segments that bend: ${limbs.join(', ')}. They must hang straight down from their pivot. The rest pose does not change.` : 'No limb to split: name the parts arm_* and leg_*. Limbs already split are skipped.'),
+      h('div', { class: 'row-inline wrap' }, h('label', { class: 'inline small' }, 'at', ratio), h('label', { class: 'inline small' }, foot, 'Feet'), h('div', { class: 'spacer' }), h('button', { class: 'small', 'data-k': 'split-run', disabled: !limbs.length, onclick: run }, 'Split')),
     );
   }
 

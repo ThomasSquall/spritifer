@@ -574,6 +574,21 @@ export function lintBitmap(b: Bitmap, outline?: RGBA | null): LintReport {
   };
 }
 
+/** The lint report as text, shared by the MCP tool and the editor. */
+export function formatLintReport(r: LintReport): string {
+  const pts = (v: Vec[], max = 24) => (v.length ? v.slice(0, max).map(([x, y]) => `(${x},${y})`).join(' ') + (v.length > max ? ` …+${v.length - max}` : '') : 'none');
+  const pct = r.silhouette ? Math.round((r.unoutlined.length / r.silhouette) * 100) : 0;
+  return [
+      `Colors: ${r.colors}${r.nearDuplicates.length ? `; near-duplicates (merge them): ${r.nearDuplicates.map((p) => p.join('≈')).join(', ')}` : ''}`,
+      `Noise pixels — isolated and close in color to their surroundings (${r.orphans.length}): ${pts(r.orphans)}`,
+      `Accent pixels — isolated, high contrast (eye glints, sparkles; usually deliberate, leave them): ${r.accents.length}`,
+      `Outline jaggies / L-corners (${r.jaggies.length}): ${pts(r.jaggies)}`,
+      `Outline 2x2 doubles (${r.doubles.length}): ${pts(r.doubles)}`,
+      `Style note — silhouette pixels lighter than the outline color: ${r.unoutlined.length}/${r.silhouette} (${pct}%)${pct > 0 ? `: ${pts(r.unoutlined, 12)}. Normal for colored/selective outlines and pixelized or painterly art; only change them if this sprite should have a closed dark outline.` : ''}`,
+      `Low-contrast neighbors (colors too close to read): ${r.lowContrast.length ? r.lowContrast.slice(0, 8).map(([c1, c2, n]) => `${c1}/${c2}×${n}`).join(', ') : 'none'}`,
+  ].join('\n');
+}
+
 /** Area-average downscale (for references). */
 export function downscale(src: Bitmap, w: number, h: number): Bitmap {
   const out: Bitmap = { width: w, height: h, data: new Uint8ClampedArray(w * h * 4) };

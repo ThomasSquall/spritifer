@@ -107,3 +107,44 @@ export function renameComponentRefs(game: GameProject, scenes: Scene[], from: st
   }
   return { game: g, scenes: changed };
 }
+
+/** Points every use of a sprite at its new name: object types, tile rules, scenes, instances, atmosphere and events. */
+export function renameSpriteRefs(game: GameProject, scenes: Scene[], from: string, to: string): { game: boolean; scenes: Scene[] } {
+  let g = false;
+  for (const o of game.objects) {
+    if (o.sprite === from) {
+      o.sprite = to;
+      g = true;
+    }
+    g = renameInEvents(o.events, ['sprite'], from, to) || g;
+  }
+  if (game.tilesets?.[from]) {
+    game.tilesets[to] = game.tilesets[from];
+    delete game.tilesets[from];
+    g = true;
+  }
+  const changed: Scene[] = [];
+  for (const s of scenes) {
+    let c = renameInEvents(s.events, ['sprite'], from, to);
+    const put = (holder: { sprite?: string }) => {
+      if (holder.sprite === from) {
+        holder.sprite = to;
+        c = true;
+      }
+    };
+    if (s.tileset === from) {
+      s.tileset = to;
+      c = true;
+    }
+    s.backgrounds.forEach(put);
+    s.instances.forEach(put);
+    if (s.atmosphere?.clouds) put(s.atmosphere.clouds);
+    const water = s.atmosphere?.reflections?.sprites;
+    if (water?.includes(from)) {
+      s.atmosphere!.reflections!.sprites = water.map((n) => (n === from ? to : n));
+      c = true;
+    }
+    if (c) changed.push(s);
+  }
+  return { game: g, scenes: changed };
+}

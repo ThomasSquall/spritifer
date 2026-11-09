@@ -316,10 +316,10 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 
 | Categoria | Strumenti |
 | --- | --- |
-| Sprite | `list_sprites`, `create_sprite`, `get_sprite`, `duplicate_sprite`, `delete_sprite`, `set_palette`, `resize_canvas` |
+| Sprite | `list_sprites`, `create_sprite`, `get_sprite`, `duplicate_sprite`, `update_sprite` (nome, categoria, griglia), `delete_sprite`, `set_palette`, `resize_canvas` |
 | Livelli | `add_layer`, `update_layer`, `delete_layer`, `merge_layer_down` |
 | Animazione | `add_frames` (con `copy_from`), `delete_frames`, `move_frame`, `set_frame_duration`, `set_tag`, `delete_tag` |
-| Personaggi (rig) | `create_character`, `rig_part`, `rig_remove_part`, `rig_preview`, `rig_pose`, `rig_split_limbs` (gomiti, ginocchia, caviglie), `rig_finish` (giunti e contorni puliti), `rig_animate`, `rig_keyframes` (pose chiave + easing + IK), `anim_check` (misura il movimento) |
+| Personaggi (rig) | `create_character`, `rig_part`, `rig_rename_part`, `rig_remove_part`, `rig_preview`, `rig_pose`, `rig_split_limbs` (gomiti, ginocchia, caviglie), `rig_finish` (giunti e contorni puliti), `rig_animate`, `rig_keyframes` (pose chiave + easing + IK), `anim_check` (misura il movimento) |
 | Luce per pixel | `update_scene` con `atmosphere.relief` (luci e sole modellano i volumi, ombre proiettate), `set_relief` (profondità e colori luminosi di uno sprite) |
 | Forme e materiali | `draw_shapes` (capsule, ellissi, poligoni, spline, linee pixel-perfect, archi per le scie), `set_ramp` (rampe hue-shifted in OKLCH, colori `nome.N`), `shade`, `selout`, `cleanup` |
 | Da concept a pixel art | `pixelize` (converte un'immagine ad alta risoluzione in pixel art pulita su un livello) |
@@ -330,11 +330,11 @@ Quando Claude Code avvia il server MCP, parte anche l'editor su http://localhost
 | Gioco | `game_reference` (vocabolario completo di trigger, condizioni, azioni, comportamenti ed espressioni), `get_game`, `set_game`, `set_object`, `delete_object`, `set_events` |
 | Effetti visivi | `vfx_reference`, `list_vfx`, `read_vfx`, `write_vfx`, `update_vfx`, `delete_vfx`, `preview_vfx` (grafi in `vfx/`) |
 | Dati | `list_data`, `read_data`, `write_data`, `update_data`, `delete_data` (tabelle in `data/`); `place_instances` / `update_instances` con `active_if` |
-| Scene | `create_scene`, `get_scene` (anche la mappa come griglia di caratteri), `update_scene`, `delete_scene`, `set_tile_layer`, `paint_tiles` (righe + legenda come `draw_pixels`, o rettangoli), `place_instances`, `update_instances`, `tileset_preview` (indici dei tile) |
-| Dialoghi | `dialogue_reference`, `list_dialogues`, `read_dialogue`, `write_dialogue` (controllato prima di salvare), `edit_dialogue`, `delete_dialogue`; `place_instances` / `update_instances` con nome, sprite e `props.dialogue` per istanza |
+| Scene | `create_scene`, `get_scene` (anche la mappa come griglia di caratteri), `update_scene`, `duplicate_scene`, `delete_scene`, `set_tile_layer`, `paint_tiles` (righe + legenda come `draw_pixels`, o rettangoli), `place_instances`, `update_instances`, `tileset_preview` (indici dei tile) |
+| Dialoghi | `dialogue_reference`, `list_dialogues`, `read_dialogue`, `write_dialogue` (controllato prima di salvare), `edit_dialogue`, `rename_dialogue`, `delete_dialogue`; `place_instances` / `update_instances` con nome, sprite e `props.dialogue` per istanza |
 | Audio e input | `list_audio`, `import_audio` (da un file sul computer), `delete_audio`; `update_scene` con `music`; `set_game` con `actions`; `set_frame_events` (eventi sui frame) |
 | Script | `set_object` / `place_instances` / `update_instances` con `tags`; `component_library` / `add_library_component` (componenti pronti), `script_reference` (componenti, ciclo di vita, API completa con esempio), `list_scripts` (cartelle, componenti con parametri/hook/metodi), `read_script`, `write_script` (percorsi con cartelle, controllo della sintassi), `edit_script`, `move_script` (sposta/rinomina file e cartelle aggiornando i riferimenti), `delete_script`; `place_instances`/`update_instances` (`components`), `update_scene` e `set_game` (`components`) attaccano i componenti |
-| Progetti | `list_projects`, `open_project`, `create_project` (vuoto, platformer, rpg) |
+| Progetti | `list_projects`, `open_project`, `forget_project`, `create_project` (vuoto, platformer, rpg) |
 | Verifica ed export del gioco | `validate_game`, `preview_scene`, `playtest` (gioco headless con input scriptati e risposte ai menu: log, dialoghi, stato, screenshot), `export_game` (HTML unico per il web), `undo_game_change` |
 | Altro | `undo`, `editor_url` |
 

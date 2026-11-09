@@ -206,6 +206,7 @@ export function drawShadows(w: AtmosphereWorld, r: Renderer, atm: SceneAtmospher
   const sun = atm.relief?.sun;
   const viewW = w.game.width;
   const viewH = w.game.height;
+  let casting = false;
   if (sun) {
     const angle = ((sun.angle ?? -135) * Math.PI) / 180;
     const elevation = (Math.max(15, sun.elevation ?? 50) * Math.PI) / 180;
@@ -215,6 +216,7 @@ export function drawShadows(w: AtmosphereWorld, r: Renderer, atm: SceneAtmospher
     const dy = -Math.sin(angle) * length * 0.55;
     const sunKey = `${sun.angle}|${sun.elevation}`;
     const opacity = Math.min(0.8, op * 1.5 * (sun.intensity ?? 1));
+    casting = opacity > 0 && !!r.spriteMask;
     for (const a of w.actors) {
       if (a.destroyed || !a.visible || a.type.hud || !a.asset || a.opacity <= 0 || a.type.shadow === 0 || a.z < 0) continue;
       // A shadow reaches at most as far as the sprite is tall, times the length of the shadow.
@@ -224,6 +226,8 @@ export function drawShadows(w: AtmosphereWorld, r: Renderer, atm: SceneAtmospher
   }
   for (const a of w.actors) {
     if (a.destroyed || !a.visible || a.type.hud || !a.asset || a.opacity <= 0) continue;
+    // It already casts its silhouette: an ellipse too would be a second shadow.
+    if (casting && a.z >= 0) continue;
     const sw = shadowWidth(a);
     if (sw <= 0 || offView(a, camX, camY, zoom, viewW, viewH, sw)) continue;
     const box = a.box();

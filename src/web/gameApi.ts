@@ -1,6 +1,6 @@
 /** Client for the game project, scenes and sprite assets used by the game editors. */
 
-import type { DataTable, GameProject, Scene, SpriteAsset } from '../core/game/types.js';
+import type { DataTable, GameProject, Scene, SpriteAsset, Value } from '../core/game/types.js';
 import type { Problem } from '../core/game/catalog.js';
 import type { VfxGraph } from '../core/game/vfxGraph.js';
 import type { ScriptInfo } from '../core/game/script.js';
@@ -101,6 +101,7 @@ export const gameApi = {
   deleteScene: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/scenes/${enc(name)}`),
   renameScene: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/scenes/${enc(name)}/rename`, { to }),
   duplicateScene: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/scenes/${enc(name)}/duplicate`, { to }),
+  sceneState: (name: string, vars: Record<string, Value>, scale = 1) => req<{ png: string; hidden: string[] }>('POST', `${apiBase()}/scenes/${enc(name)}/preview-state`, { vars, scale }),
   scenePreviewUrl: (name: string, rev: string, scale = 1) => `${apiBase()}/scenes/${enc(name)}/preview.png?scale=${scale}&r=${enc(rev)}`,
   listScripts: () => req<{ name: string; size: number; updatedAt: number }[]>('GET', `${apiBase()}/scripts`),
   getScript: (name: string) => req<{ name: string; code: string }>('GET', `${apiBase()}/scripts/${enc(name)}`),

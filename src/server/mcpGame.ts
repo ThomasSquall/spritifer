@@ -170,7 +170,7 @@ export function registerGameTools(ws: Workspace, h: ToolHelpers): { reset(): voi
 const atmosphereSchema = z.object({
   ambient: z.string().optional().describe('Multiplied over the world. "#ffffff" plain day, "#fff0dc" warm day, "#c8d0ff" overcast, "#8a7ab8" dusk, "#3a3c70" night, "#2a2440" dark cave. Lights cut through it.'),
   glow: z.number().min(0).max(2).optional().describe('Bloom added by lights (default 0.6)'),
-  shadows: z.boolean().optional().describe('Soft contact shadows under instances (default true): width = object hitbox width, or the object type "shadow"'),
+  shadows: z.boolean().optional().describe('Soft contact shadows under instances (default true): width = object hitbox width, or the object type "shadow". With a relief sun, instances cast their silhouette instead'),
   shadow_color: z.string().optional(),
   shadow_opacity: z.number().min(0).max(1).optional().describe('Default 0.38'),
   vignette: z.number().min(0).max(1).optional().describe('Darken screen edges, ~0.3'),
@@ -351,6 +351,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     {
       name: z.string(),
       new_name: z.string().optional(),
+      copy_from: z.string().optional().describe('Create it as a full copy of this object type (name must be new). For a type that keeps following the original, use extends'),
       sprite: z.string().nullable().optional().describe('Sprite drawn for instances (null = none, e.g. for text objects)'),
       animation: z.string().optional().describe('Default animation tag ("" = all frames)'),
       hitbox: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).nullable().optional().describe('Collision box relative to the sprite top-left (null = whole frame). Make it a bit smaller than the art for fair collisions.'),
@@ -378,8 +379,11 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       const { game, result: created } = mutateGame((g) => {
         let o = g.objects.find((x) => x.name === a.name);
         const created = !o;
+        if (o && a.copy_from) throw new Error(`Object type "${a.name}" already exists`);
         if (!o) {
-          o = normalizeObject({ name: a.name });
+          const source = a.copy_from ? g.objects.find((x) => x.name === a.copy_from) : undefined;
+          if (a.copy_from && !source) throw new Error(`No object type "${a.copy_from}" to copy`);
+          o = normalizeObject(source ? { ...JSON.parse(JSON.stringify(source)), name: a.name } : { name: a.name });
           g.objects.push(o);
         }
         if (a.sprite !== undefined) {
@@ -674,6 +678,16 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     },
   );
 
+  tool('duplicate_scene', 'Copy a scene under a new name: tiles, instances, events, atmosphere and all.', { scene: z.string(), new_name: z.string() }, (a) => {
+    assertIdentifier('scene', a.new_name);
+    if (ws.sceneExists(a.new_name)) throw new Error(`Scene "${a.new_name}" already exists`);
+    const copy = ws.loadScene(a.scene);
+    remember('scene', a.new_name);
+    copy.name = a.new_name;
+    ws.saveScene(copy, AUTHOR);
+    return text(`Created.\n${describeScene(copy)}`);
+  });
+
   tool('delete_scene', 'Delete a scene file.', { scene: z.string() }, (a) => {
     remember('scene', a.scene);
     ws.removeScene(a.scene);
@@ -682,7 +696,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
 
   tool(
     'set_tile_layer',
-    'Create or change a tile layer: solid (collides), visible, parallax, z (draw order; > 0 draws in front of objects), rename, or delete.',
+    'Create or change a tile layer: solid (collides), visible, parallax, z (draw order; > 0 draws in front of objects), position among the layers, rename, or delete.',
     {
       scene: z.string(),
       layer: z.string(),
@@ -691,6 +705,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       visible: z.boolean().optional(),
       parallax: z.number().optional(),
       z: z.number().optional(),
+      move_to: z.number().int().min(0).optional().describe('New position in the layer list (0 = drawn first)'),
       delete: z.boolean().optional(),
     },
     (a) => {
@@ -710,6 +725,10 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         if (a.visible !== undefined) l.visible = a.visible;
         if (a.parallax !== undefined) l.parallax = a.parallax;
         if (a.z !== undefined) l.z = a.z;
+        if (a.move_to !== undefined) {
+          s.layers.splice(s.layers.indexOf(l), 1);
+          s.layers.splice(Math.min(a.move_to, s.layers.length), 0, l);
+        }
       });
       return text(`Saved.\n${describeScene(scene)}`);
     },
@@ -813,11 +832,12 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
 
   tool(
     'update_instances',
-    'Move, flip, rename, re-skin (sprite override), change props (e.g. dialogue) of, or remove instances in a scene (by id, or every instance of an object type).',
+    'Move, flip, rename, re-skin (sprite override), change the object type or props (e.g. dialogue) of, or remove instances in a scene (by id, or every instance of an object type).',
     {
       scene: z.string(),
       ids: z.array(z.string()).optional(),
       object: z.string().optional().describe('Apply to all instances of this object type'),
+      new_object: z.string().optional().describe('Turn the instances into this object type (position, name and overrides are kept)'),
       remove: z.boolean().optional(),
       x: z.number().optional(),
       y: z.number().optional(),
@@ -835,6 +855,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     },
     (a) => {
       let n = 0;
+      if (a.new_object && !ws.loadGame().objects.some((o) => o.name === a.new_object)) throw new Error(`No object type "${a.new_object}"`);
       const { scene } = mutateScene(a.scene, (s) => {
         const sel = (i: Scene['instances'][number]) => (a.ids ? a.ids.includes(i.id) : a.object ? i.object === a.object : false);
         if (a.remove) {
@@ -846,6 +867,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         for (const i of s.instances) {
           if (!sel(i)) continue;
           n++;
+          if (a.new_object) i.object = a.new_object;
           if (a.x !== undefined) i.x = a.x;
           if (a.y !== undefined) i.y = a.y;
           i.x += a.dx ?? 0;
@@ -1095,6 +1117,11 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     return text(`Moved ${a.from} → ${a.to}.\n${scriptSummary()}`);
   }, { destructiveHint: true });
 
+  tool('create_script_folder', 'Create an empty folder in scripts/ (write_script and move_script create folders by themselves).', { name: z.string().describe('e.g. "enemies" or "ui/menus"') }, (a) => {
+    ws.createScriptFolder(a.name);
+    return text(`Created scripts/${a.name}/.`);
+  });
+
   tool('delete_script', 'Delete a script file (or a folder with everything in it, with folder: true).', { name: z.string(), folder: z.boolean().optional() }, (a) => {
     if (a.folder) ws.removeScriptFolder(a.name);
     else ws.removeScript(a.name);
@@ -1140,6 +1167,13 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     const n = code.split(a.find).length - 1;
     if (n !== 1) throw new Error(n ? `The snippet appears ${n} times; include more context` : 'Snippet not found (read_dialogue shows the current text)');
     return saveDialogue(a.file, code.replace(a.find, () => a.replace));
+  });
+
+  tool('rename_dialogue', 'Rename a dialogue file. The dialogues inside keep their names, so NPCs that use them are not affected.', { file: z.string(), to: z.string() }, (a) => {
+    if (ws.dialogueExists(a.to)) throw new Error(`Dialogue file "${a.to}" already exists`);
+    ws.writeDialogue(a.to, ws.readDialogue(a.file));
+    ws.removeDialogue(a.file);
+    return text(`Renamed dialogues/${a.file}.dialogue to ${a.to}.dialogue.\n${dialogueSummary()}`);
   });
 
   tool('delete_dialogue', 'Delete a dialogue file.', { file: z.string() }, (a) => {
@@ -1188,7 +1222,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
 
   tool(
     'update_data',
-    'Change part of a data table: upsert rows by id (only the given columns change; null clears a cell), delete rows, add or remove columns, set the description.',
+    'Change part of a data table: upsert rows by id (only the given columns change; null clears a cell), delete rows, add or remove columns, set the description, rename the table.',
     {
       table: z.string(),
       upsert: z.array(z.record(z.string(), cellSchema)).optional().describe('Rows with an "id": existing ids are merged, new ids appended'),
@@ -1196,9 +1230,15 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       add_columns: z.array(columnSchema).optional(),
       remove_columns: z.array(z.string()).optional(),
       description: z.string().optional(),
+      rename_to: z.string().optional().describe('New table name. db("old", ...) in scripts, events and dialogues is not rewritten'),
     },
     (a) => {
       const t = ws.loadTable(a.table);
+      if (a.rename_to && a.rename_to !== a.table) {
+        assertIdentifier('data table', a.rename_to);
+        if (ws.tableExists(a.rename_to)) throw new Error(`Data table "${a.rename_to}" already exists`);
+        t.name = a.rename_to;
+      }
       if (a.description !== undefined) t.description = a.description;
       for (const c of a.add_columns ?? []) {
         if (t.columns.some((x) => x.name === c.name)) t.columns = t.columns.map((x) => (x.name === c.name ? { ...x, ...c, type: c.type ?? x.type } : x));
@@ -1227,6 +1267,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         }
       }
       const saved = ws.saveTable(t, AUTHOR);
+      if (saved.name !== a.table) ws.removeTable(a.table);
       return text(`Updated data/${saved.name}.json: ${added} added, ${changed} changed, ${a.delete_ids?.length ?? 0} deleted. ${saved.rows.length} rows, columns ${saved.columns.map((c) => c.name).join(', ')}.`);
     },
   );
@@ -1284,6 +1325,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       effect: z.string().describe('Name, e.g. "fireball"'),
       description: z.string().optional(),
       template: z.enum(VFX_TEMPLATE_IDS as [string, ...string[]]).optional(),
+      copy_from: z.string().optional().describe('Start as a copy of this effect'),
       nodes: z.array(vfxNodeSchema).optional(),
       edges: z.array(vfxEdgeSchema).optional(),
       preview: z.boolean().optional().describe('Also return the filmstrip'),
@@ -1291,9 +1333,10 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     (a) => {
       if (!VFX_NAME_RE.test(a.effect)) throw new Error(`Invalid effect name "${a.effect}". Use letters, digits, "_" and "-".`);
       const tpl = VFX_TEMPLATES.find((t) => t.id === a.template);
-      if (!tpl && !a.nodes) throw new Error('Give nodes (and edges), or a template.');
+      const source = a.copy_from ? ws.loadVfx(a.copy_from) : undefined;
+      if (!tpl && !a.nodes && !source) throw new Error('Give nodes (and edges), a template, or copy_from.');
       failOnInputErrors(a.nodes ?? []);
-      const out = saveVfxChecked(a.nodes ? { description: a.description ?? tpl?.description, nodes: a.nodes, edges: a.edges ?? [] } : { description: a.description ?? tpl?.description, ...tpl!.graph }, a.effect);
+      const out = saveVfxChecked(a.nodes ? { description: a.description ?? tpl?.description, nodes: a.nodes, edges: a.edges ?? [] } : source ? { description: a.description ?? source.description, nodes: source.nodes, edges: source.edges } : { description: a.description ?? tpl?.description, ...tpl!.graph }, a.effect);
       return a.preview ? [...out, ...vfxPreview(ws.loadVfx(a.effect))] : out;
     },
   );

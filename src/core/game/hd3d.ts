@@ -6,7 +6,7 @@
  * Perspective is therefore something added to the game's picture, and at zero it is the game's picture.
  */
 
-import type { HdCells } from './hd.js';
+import type { HdCells, HdJut } from './hd.js';
 import { findWater } from './reflections.js';
 import type { TileResolver } from './tilerules.js';
 import type { TileLayer } from './types.js';
@@ -76,19 +76,88 @@ export function overscanOf(cam: Camera3d): { left: number; top: number; right: n
   return { left: side, right: side, top, bottom: 0 };
 }
 
+/** The solids a standing sprite can be wrapped on, seen from above. */
+export const HD_SHAPES = ['round', 'octagon', 'hexagon', 'square'] as const;
+export type HdShape = (typeof HD_SHAPES)[number];
+
+/** Right half of each cross-section as [across, towards the camera], with a half width of 1; `square` shows a corner. */
+const FACETS: Record<Exclude<HdShape, 'round'>, readonly (readonly [number, number])[]> = {
+  octagon: [[0, 1], [0.414, 1], [1, 0.414]],
+  hexagon: [[0, 0.866], [0.5, 0.866], [1, 0]],
+  square: [[0, 1], [1, 0]],
+};
+
+/** How far forward a solid's surface is at `t` across it (-1..1), and the sideways part of the direction it faces there. */
+export function shapeSurface(shape: HdShape, t: number): { forward: number; side: number } {
+  const a = Math.min(1, Math.abs(t));
+  const sign = t < 0 ? -1 : 1;
+  if (shape === 'round') return { forward: Math.sqrt(Math.max(0, 1 - a * a)), side: sign * a };
+  const points = FACETS[shape];
+  let i = 0;
+  while (i < points.length - 2 && a > points[i + 1]![0]) i++;
+  const [x0, z0] = points[i]!;
+  const [x1, z1] = points[i + 1]!;
+  const dx = x1 - x0;
+  const dz = z1 - z0;
+  const length = Math.hypot(dx, dz) || 1;
+  return { forward: z0 + (dz * (a - x0)) / (dx || 1), side: (sign * -dz) / length };
+}
+
+/** The silhouette of a frame row by row: the axis it turns around, and how far from it each row reaches. */
+export interface SpriteProfile {
+  axis: number;
+  radius: Float32Array;
+  largest: number;
+}
+
+export function spriteProfile(alpha: Uint8Array, sheetWidth: number, frame: { x: number; y: number; w: number; h: number }): SpriteProfile {
+  const lefts = new Int32Array(frame.h).fill(-1);
+  const rights = new Int32Array(frame.h).fill(-1);
+  const middles: number[] = [];
+  for (let y = 0; y < frame.h; y++) {
+    for (let x = 0; x < frame.w; x++) {
+      if (!alpha[(frame.y + y) * sheetWidth + frame.x + x]) continue;
+      if (lefts[y]! < 0) lefts[y] = x;
+      rights[y] = x + 1;
+    }
+    if (lefts[y]! >= 0) middles.push((lefts[y]! + rights[y]!) / 2);
+  }
+  middles.sort((p, q) => p - q);
+  const axis = middles.length ? middles[middles.length >> 1]! : frame.w / 2;
+  const radius = new Float32Array(frame.h);
+  let largest = 0;
+  for (let y = 0; y < frame.h; y++) {
+    if (lefts[y]! < 0) continue;
+    radius[y] = Math.max(axis - lefts[y]!, rights[y]! - axis);
+    largest = Math.max(largest, radius[y]!);
+  }
+  return { axis, radius, largest };
+}
+
 /**
  * A wall cell: part of the vertical front, or part of the top. `stretch` makes a front taller than the rows it has.
+ * `juts` are the parts of a front cell standing forward of the wall; `top` tells a front cell is the highest of its column.
  * `sides` are the map cells whose art covers the side of a top cell, from the foot up: nobody paints the side of a wall
  * in a map seen from the south, so it borrows a stretch of the fronts.
  */
-export type WallCell = { face: number; stretch?: number } | { cap: number; left: boolean; right: boolean; sides?: number[] };
+export type WallCell = { face: number; stretch?: number; juts?: JutSpan[]; top?: boolean } | { cap: number; left: boolean; right: boolean; sides?: number[]; sideJuts?: JutSpan[] };
 
 /**
  * Which cells stand up, read from the map as it is. A solid cell is a wall when the ground art under it is used only under
- * solid cells (so it is painted masonry, not grass under a tree trunk) and doesn't animate (water blocks the way too).
+ * solid cells (so it is painted masonry, not grass under a tree trunk) and isn't water, animated or laid over it as
+ * instances (`moreWater`).
  * A map where such cells are a minority has no walls. In a column of wall cells the lowest `wallRows` are the front; the ones above are the top.
  */
-export function findWalls(layers: readonly TileLayer[], cols: number, rows: number, resolver: TileResolver, wallRows: number, corrections?: HdCells): (WallCell | null)[] {
+/** The part of a front tile that stands forward: `from` and `to` across the tile, 0..1, and whether the jut begins or ends in it. */
+export interface JutSpan {
+  from: number;
+  to: number;
+  depth: number;
+  starts: boolean;
+  ends: boolean;
+}
+
+export function findWalls(layers: readonly TileLayer[], cols: number, rows: number, resolver: TileResolver, wallRows: number, corrections?: HdCells, moreWater?: Uint8Array, juts?: readonly HdJut[], tileSize = 32): (WallCell | null)[] {
   const total = cols * rows;
   const out: (WallCell | null)[] = new Array(total).fill(null);
   const solid = layers.filter((l) => l.solid);
@@ -102,7 +171,7 @@ export function findWalls(layers: readonly TileLayer[], cols: number, rows: numb
   let blockedCells = 0;
   let wallCells = 0;
   for (let i = 0; i < total; i++) {
-    if (!blocked(i) || water[i]) continue;
+    if (!blocked(i) || water[i] || moreWater?.[i]) continue;
     blockedCells++;
     const painted = solid.some((l) => l.visible && l.tiles[i]! >= 0);
     if (painted || (ground && !open.has(ground.tiles[i]!))) {
@@ -153,8 +222,28 @@ export function findWalls(layers: readonly TileLayer[], cols: number, rows: numb
     }
   }
   exposeSides(out, cols, rows);
+  for (const jut of juts ?? []) standOut(out, cols, rows, tileSize, jut);
   dressSides(out, cols, rows);
   return out;
+}
+
+/** Hands a jut to the front cells it crosses, tile by tile, from the foot of the wall up. */
+function standOut(cells: (WallCell | null)[], cols: number, rows: number, ts: number, jut: HdJut): void {
+  if (jut.foot >= rows) return;
+  const end = jut.x + jut.w;
+  for (let tx = Math.floor(jut.x / ts); tx < cols && tx * ts < end; tx++) {
+    const from = Math.max(0, (jut.x - tx * ts) / ts);
+    const to = Math.min(1, (end - tx * ts) / ts);
+    if (to <= from) continue;
+    const span: JutSpan = { from, to, depth: jut.depth, starts: jut.x >= tx * ts, ends: end <= (tx + 1) * ts };
+    for (let row = 0; jut.foot - row >= 0; row++) {
+      const c = cells[(jut.foot - row) * cols + tx];
+      if (!c || !('face' in c) || c.face !== row) break;
+      (c.juts ??= []).push(span);
+      const above = jut.foot - row - 1 >= 0 ? cells[(jut.foot - row - 1) * cols + tx] : null;
+      c.top = !(above && 'face' in above && above.face === row + 1);
+    }
+  }
 }
 
 /**
@@ -228,7 +317,8 @@ function dressSides(cells: (WallCell | null)[], cols: number, rows: number): voi
       let bestScore = Infinity;
       for (const s of strips) {
         const dx = x < s.x0 ? s.x0 - x : x > s.x1 ? x - s.x1 : 0;
-        const score = dx + Math.abs(y - s.foot) + (s.rows === c.cap ? 0 : 1000);
+        // A short stretch of front, unrolled over and over, would stack its piers side by side like the rungs of a ladder.
+        const score = dx + Math.abs(y - s.foot) + (s.rows === c.cap ? 0 : 1000) + (s.x1 - s.x0 + 1 < 6 ? 40 : 0);
         if (score < bestScore) {
           bestScore = score;
           best = s;
@@ -237,6 +327,9 @@ function dressSides(cells: (WallCell | null)[], cols: number, rows: number): voi
       const length = best.x1 - best.x0 + 1;
       const column = best.x0 + (((y - best.foot) % length) + length) % length;
       c.sides = Array.from({ length: Math.min(best.rows, c.cap) }, (_, r) => (best.foot - r) * cols + column);
+      // A pier on the stretch of front it borrows comes along, standing out of the side.
+      const source = cells[best.foot * cols + column];
+      if (source && 'face' in source && source.juts) c.sideJuts = source.juts;
     }
   }
 }

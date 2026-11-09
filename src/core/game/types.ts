@@ -7,7 +7,8 @@ import { type TilesetRules, normalizeTilesetRules } from './tilerules.js';
 import type { SpriteRelief } from '../sprite.js';
 import type { VfxGraph } from './vfxGraph.js';
 import { BUILTIN_FONT, FONTS } from './font.js';
-import { type GameHd, type HdCells, type SceneHd, normalizeHd, normalizeHdCells } from './hd.js';
+import { HD_SHAPES, type HdShape } from './hd3d.js';
+import { type GameHd, type HdCells, type HdJut, type SceneHd, normalizeHd, normalizeHdCells, normalizeHdJuts } from './hd.js';
 import type { ScatterRecipe, SceneGroup } from './sceneOps.js';
 
 export type Value = number | string | boolean;
@@ -85,6 +86,10 @@ export interface ObjectType {
   shadow?: number;
   /** In the 2D-HD perspective: lies on the ground or stands up. Absent = flat when its z is below 0. */
   hdPose?: 'flat' | 'stand';
+  /** In the 2D-HD perspective, pixels a sprite hung on a wall stands out from it (a relief, a statue in a niche). */
+  hdRelief?: number;
+  /** In the 2D-HD perspective, the solid a standing sprite is wrapped on: a column is round, a pillar has corners. */
+  hdShape?: HdShape;
   /** Moved by the wind when drawn (trees, tall plants): the hitbox and the art don't change. */
   sway?: ObjectSway;
   /** Sound looping around the instance (fires, fountains): louder the closer the camera is. */
@@ -320,6 +325,8 @@ export interface Scene {
   persistent?: boolean;
   /** Corrections to the automatic walls of the 2D-HD perspective. */
   hdCells?: HdCells;
+  /** Stretches of wall fronts that stand forward in the 2D-HD perspective (piers). */
+  hdJuts?: HdJut[];
   /** Music when the scene starts: an audio file name, "-" for silence; absent = keep what plays. */
   music?: string;
   /** Sounds that loop while the scene lasts (wind, crickets, dripping): they fade across scene changes. */
@@ -501,6 +508,8 @@ export function normalizeObject(v: unknown): ObjectType {
   if (light) obj.light = light;
   if (typeof o.shadow === 'number' && Number.isFinite(o.shadow)) obj.shadow = Math.max(0, Math.round(o.shadow));
   if (o.hdPose === 'flat' || o.hdPose === 'stand') obj.hdPose = o.hdPose;
+  if (typeof o.hdRelief === 'number' && o.hdRelief > 0) obj.hdRelief = Math.min(40, Math.round(o.hdRelief));
+  if ((HD_SHAPES as readonly unknown[]).includes(o.hdShape)) obj.hdShape = o.hdShape as HdShape;
   const sway = normalizeSway(o.sway);
   if (sway) obj.sway = sway;
   const ambientSound = normalizeAmbientSound(o.ambientSound);
@@ -737,6 +746,7 @@ export function normalizeScene(v: unknown): Scene {
     ...(o.ySort === true ? { ySort: true } : {}),
     ...(o.persistent === true ? { persistent: true } : {}),
     ...(normalizeHdCells(o.hdCells) ? { hdCells: normalizeHdCells(o.hdCells) } : {}),
+    ...(normalizeHdJuts(o.hdJuts) ? { hdJuts: normalizeHdJuts(o.hdJuts) } : {}),
     ...(typeof o.music === 'string' && o.music ? { music: o.music } : {}),
     ...(normalizeAmbience(o.ambience) ? { ambience: normalizeAmbience(o.ambience) } : {}),
     variables: vars(o.variables),

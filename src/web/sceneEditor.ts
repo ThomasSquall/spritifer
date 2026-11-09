@@ -3,7 +3,7 @@
 import { TileResolver, type TilesetRules, tilesetFrame } from '../core/game/tilerules.js';
 import { swayBands, swayBase } from '../core/game/wind.js';
 import { RainField, drawShafts } from '../core/game/weather.js';
-import { type WaterMap, addWaterActors, drawReflections, findWater } from '../core/game/reflections.js';
+import { type WaterMap, addWaterActors, drawReflections, findWater, reflectionZ } from '../core/game/reflections.js';
 import { type AtmosphereActor, type AtmosphereWorld, MoteField, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
 import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
 import { CanvasRenderer } from '../runtime/canvasRenderer.js';
@@ -135,6 +135,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   });
   const changed = () => {
     dirty = true;
+    wallCache = null;
     hdPreview.invalidate();
     saveLabel.textContent = 'Unsaved';
     saveLabel.dataset.state = 'dirty';
@@ -504,20 +505,21 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     if (atm?.reflections && tileset) {
       const cfg = atm.reflections;
       const sheet = tileset;
-      items.push({ z: -1.8, o: 0, d: () => {
-        // Painting tiles changes the water, so it is looked for again now and then rather than once.
-        if (!waterPreview || now - waterPreview.at > 1000) {
-          const map = findWater(scene.layers, scene.cols, scene.rows, resolverFor());
-          addWaterActors(map, actors, cfg.sprites ?? [], ts());
-          waterPreview = { at: now, map };
-        }
+      // Painting tiles changes the water, so it is looked for again now and then rather than once.
+      if (!waterPreview || now - waterPreview.at > 1000) {
+        const map = findWater(scene.layers, scene.cols, scene.rows, resolverFor());
+        addWaterActors(map, actors, cfg.sprites ?? [], ts());
+        waterPreview = { at: now, map };
+      }
+      const preview = waterPreview;
+      items.push({ z: reflectionZ(preview.map), o: 0, d: () => {
         const grid = sheet.grid ?? { width: ts(), height: ts() };
         const tcols = Math.max(1, Math.floor(sheet.width / grid.width));
         const f0 = sheet.frames[0]!;
         const tileRect = (t: number): [number, number] => [f0.x + (t % tcols) * grid.width, f0.y + Math.floor(t / tcols) * grid.height];
         ctx.save();
         ctx.translate(view.x, view.y);
-        drawReflections(rendererFor(view.w, view.h), cfg, waterPreview.map, actors, { name: sheet.name, tile: tileRect, w: grid.width, h: grid.height }, ts(), clock, view.x, view.y, 1, view.w, view.h);
+        drawReflections(rendererFor(view.w, view.h), cfg, preview.map, actors, { name: sheet.name, tile: tileRect, w: grid.width, h: grid.height }, ts(), clock, view.x, view.y, 1, view.w, view.h);
         ctx.restore();
         ctx.globalAlpha = 1;
       } });
@@ -746,6 +748,25 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       }
       ctx.textAlign = 'start';
       ctx.textBaseline = 'alphabetic';
+      // Stretches standing forward, and the one being dragged out.
+      const frontRows = (x: number, foot: number) => {
+        let n = 0;
+        for (let y = foot; y >= 0; y--) {
+          const c = cells[y * scene.cols + x];
+          if (!c || !('face' in c) || c.face !== foot - y) break;
+          n++;
+        }
+        return Math.max(1, n);
+      };
+      const jutRect = (x: number, w: number, foot: number, color: string) => {
+        const n = frontRows(Math.min(scene.cols - 1, Math.floor((x + w / 2) / ts())), foot);
+        ctx.fillStyle = color;
+        ctx.fillRect(sx(x), sy((foot + 1 - n) * ts()), w * zoom, n * px);
+        ctx.strokeStyle = '#7dff9a';
+        ctx.strokeRect(sx(x), sy((foot + 1 - n) * ts()), w * zoom, n * px);
+      };
+      for (const j of scene.hdJuts ?? []) jutRect(j.x, j.w, j.foot, '#5fd35f55');
+      if (jutDrag) jutRect(Math.min(jutDrag.x0, jutDrag.x1), Math.abs(jutDrag.x1 - jutDrag.x0), jutDrag.foot, '#7dff9a88');
       if (hover) {
         ctx.strokeStyle = wallBrush === null ? '#e43b44' : '#feae34';
         ctx.strokeRect(sx(hover.x * ts()), sy(hover.y * ts()), px, px);
@@ -1046,12 +1067,20 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   /** What the brush paints: null = back to automatic, 0 = flat, n = wall with a front n tiles high. */
   let wallBrush: number | null = 3;
   let wallPainting = false;
+  /** What the wall tool is doing: cells, or stretches of a front that stand forward. */
+  let wallMode: 'cells' | 'jut' = 'cells';
+  let jutDepth = 10;
+  let jutDrag: { foot: number; x0: number; x1: number; cell: number } | null = null;
   let wallLast: { x: number; y: number } | null = null;
   let wallCache: { scene: Scene; rows: number; cells: (WallCell | null)[] } | null = null;
   function wallCells(): (WallCell | null)[] {
     const atm = scene.atmosphere;
     const rows = Math.round(resolveHd(state.game!.hd, atm?.hd && !atm.hd.off ? atm.hd : undefined, atm?.ambient)?.wallRows ?? 3);
-    if (wallCache?.scene !== scene || wallCache.rows !== rows) wallCache = { scene, rows, cells: findWalls(scene.layers, scene.cols, scene.rows, resolverFor(), rows, scene.hdCells) };
+    if (wallCache?.scene !== scene || wallCache.rows !== rows) {
+      const water = atm?.reflections?.sprites?.length ? { cols: scene.cols, rows: scene.rows, grid: new Uint8Array(scene.cols * scene.rows), cells: [] } : null;
+      if (water) addWaterActors(water, previewActors(), atm!.reflections!.sprites!, ts());
+      wallCache = { scene, rows, cells: findWalls(scene.layers, scene.cols, scene.rows, resolverFor(), rows, scene.hdCells, water?.grid, scene.hdJuts, ts()) };
+    }
     return wallCache.cells;
   }
   const paintWallCell = (x: number, y: number, value: number | null): boolean => {
@@ -1115,6 +1144,27 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         brush = { w: 1, h: 1, tiles: [v] };
         renderPalette();
       }
+      return;
+    }
+    if (tool === 'walls' && wallMode === 'jut') {
+      const inMap = t.x >= 0 && t.y >= 0 && t.x < scene.cols && t.y < scene.rows;
+      const c = inMap ? wallCells()[t.y * scene.cols + t.x] : null;
+      if (!c || !('face' in c)) return;
+      const foot = t.y + c.face;
+      hdPreview.look((t.x + 0.5) * ts(), (foot + 0.5) * ts());
+      if (e.button === 2) {
+        const kept = (scene.hdJuts ?? []).filter((j) => !(j.foot === foot && p.x >= j.x && p.x < j.x + j.w));
+        if (kept.length !== (scene.hdJuts ?? []).length) {
+          snapshot();
+          if (kept.length) scene.hdJuts = kept;
+          else delete scene.hdJuts;
+          changed();
+          renderPalette();
+        }
+        return;
+      }
+      jutDrag = { foot, x0: p.x, x1: p.x, cell: t.x };
+      draw();
       return;
     }
     if (tool === 'walls') {
@@ -1193,6 +1243,11 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         dabbing = t;
         if (dabAt(t)) changed();
       }
+      draw();
+      return;
+    }
+    if (jutDrag) {
+      jutDrag.x1 = p.x;
       draw();
       return;
     }
@@ -1288,6 +1343,18 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     }
     painting = false;
     wallPainting = false;
+    if (jutDrag) {
+      const d = jutDrag;
+      jutDrag = null;
+      // A click takes the whole cell; a drag, what was dragged over.
+      const dragged = Math.abs(d.x1 - d.x0) >= 2;
+      const x = Math.max(0, Math.round(dragged ? Math.min(d.x0, d.x1) : d.cell * ts()));
+      const w = Math.round(dragged ? Math.abs(d.x1 - d.x0) : ts());
+      snapshot();
+      (scene.hdJuts ??= []).push({ x, w, foot: d.foot, depth: jutDepth });
+      changed();
+      renderPalette();
+    }
     lastTile = null;
     panning = null;
     dragInst = null;
@@ -1441,9 +1508,20 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     const chip = (label: string, v: number | null, title: string) => h('button', { type: 'button', class: `chip${wallBrush === v ? ' on' : ''}`, title, onclick: () => choose(v) }, label);
     const count = Object.keys(scene.hdCells ?? {}).length;
     const dflt = HD_FIELDS.find((f) => f.key === 'wallRows')!.dflt;
+    const mode = (m: typeof wallMode, label: string, title: string) => h('button', { type: 'button', class: `chip${wallMode === m ? ' on' : ''}`, title, onclick: () => { wallMode = m; renderPalette(); } }, label);
+    paletteBox.append(h('div', { class: 'panel-title' }, '2D-HD walls'), h('div', { class: 'chips' }, mode('cells', 'Height', 'Which cells are walls, and how tall'), mode('jut', 'Protrusion', 'Parts of a wall front that stand forward of it: piers and buttresses')));
+    if (wallMode === 'jut') {
+      const juts = scene.hdJuts?.length ?? 0;
+      paletteBox.append(
+        h('p', { class: 'muted small', style: 'margin-top:8px' }, 'Drag across a wall front (orange cells in Height) to make that stretch stand forward; a click takes a whole cell. Right-click removes one.'),
+        h('div', { class: 'panel-title', style: 'margin-top:10px' }, 'Stands forward by (px)'),
+        h('div', { class: 'chips' }, ...[4, 6, 10, 14, 20, 28].map((d) => h('button', { type: 'button', class: `chip${jutDepth === d ? ' on' : ''}`, onclick: () => { jutDepth = d; renderPalette(); } }, String(d)))),
+        h('button', { class: 'small', style: 'margin-top:10px', disabled: !juts, title: 'Removes every protrusion of this scene', onclick: () => { snapshot(); delete scene.hdJuts; changed(); renderPalette(); } }, juts ? `Clear ${juts} protrusion${juts === 1 ? '' : 's'}` : 'No protrusions yet'),
+      );
+      return;
+    }
     paletteBox.append(
-      h('div', { class: 'panel-title' }, '2D-HD walls'),
-      h('p', { class: 'muted small' }, 'Paint on the map and watch the corner view. Right-click puts a cell back to automatic.'),
+      h('p', { class: 'muted small', style: 'margin-top:8px' }, 'Paint on the map and watch the corner view. Right-click puts a cell back to automatic.'),
       h('div', { class: 'chips' },
         chip('Automatic', null, 'Removes the correction: the map decides'),
         chip('Flat', 0, 'This cell stays on the ground, even if it looks like a wall to the automatic detection'),

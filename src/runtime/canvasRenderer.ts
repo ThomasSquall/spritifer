@@ -85,7 +85,7 @@ export class CanvasRenderer implements Renderer {
   private sheetPixels = new Map<string, { data: Uint8ClampedArray; width: number } | null>();
 
   /** Which pixels of a patch of the sheet are water. */
-  private waterMask(piece: WaterPiece): HTMLCanvasElement | null {
+  waterMask(piece: WaterPiece): HTMLCanvasElement | null {
     const key = `${piece.sprite}|${piece.sources.join()}`;
     let mask = this.waterMasks.get(key);
     if (mask) return mask;
@@ -234,7 +234,7 @@ export class CanvasRenderer implements Renderer {
   }
 
   /** Which pixels of a sprite without normals are solid: it erases the normals under them. */
-  private alphaMask(sprite: string): { mask: Uint8Array; width: number } | null {
+  alphaMask(sprite: string): { mask: Uint8Array; width: number } | null {
     let found = this.alphaMasks.get(sprite);
     if (found !== undefined) return found;
     found = null;

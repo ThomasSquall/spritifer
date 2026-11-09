@@ -33,6 +33,8 @@ export interface HdSettings {
   wallRows?: number;
   /** Multiplies how tall walls are. */
   wallHeight?: number;
+  /** Painted pixels to leave out at the foot of wall fronts (a baked plinth or shadow): the art above reaches the ground instead. */
+  wallTrim?: number;
 }
 
 /** Game-wide settings. `enabled` is how the game starts for a player who never chose. */
@@ -65,6 +67,7 @@ export const HD_FIELDS: readonly HdField[] = [
   { key: 'elevation', mcp: 'elevation', label: 'Camera angle°', min: 20, max: 75, step: 1, dflt: 50, hint: 'Higher = the camera looks more from above, and walls lean out more' },
   { key: 'wallRows', mcp: 'wall_rows', label: 'Wall rows', min: 0, max: 6, step: 1, dflt: 3, hint: 'How many tiles of a wall, counting up from its foot, are its vertical front. 0 = walls stay flat' },
   { key: 'wallHeight', mcp: 'wall_height', label: 'Wall height', min: 0.2, max: 3, step: 0.05, dflt: 1, hint: 'Makes every wall taller or shorter than it is painted' },
+  { key: 'wallTrim', mcp: 'wall_foot_trim', label: 'Wall foot trim', min: 0, max: 24, step: 1, dflt: 0, hint: 'Pixels of the art to leave out at the foot of wall fronts, when a plinth or a shadow is painted there: the masonry above is stretched to the ground' },
   { key: 'bloom', mcp: 'bloom', label: 'Bloom', min: 0, max: 2, step: 0.05, dflt: 0.55, hint: 'Glow bleeding out of the brightest parts of the picture' },
   { key: 'bloomThreshold', mcp: 'bloom_threshold', label: 'Bloom from', min: 0.2, max: 1, step: 0.01, dflt: 0.72, hint: 'How bright a pixel must be to glow: lower = more of the picture blooms' },
   { key: 'blurFar', mcp: 'blur_far', label: 'Blur far', min: 0, max: 2, step: 0.05, dflt: 1.1, hint: 'Depth of field above the sharp band (what is far away)' },
@@ -96,6 +99,27 @@ export interface HdFrame {
 
 /** Corrections to the automatic walls, by "x,y" of the cell: 0 = stays flat, n = wall with a front n tiles high. */
 export type HdCells = Record<string, number>;
+
+/** A stretch of a wall's front that stands forward of it (a pier, a buttress). Pixels of the map, `foot` is the row of the front's foot. */
+export interface HdJut {
+  x: number;
+  w: number;
+  foot: number;
+  depth: number;
+}
+
+export function normalizeHdJuts(v: unknown): HdJut[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: HdJut[] = [];
+  for (const j of v as Record<string, unknown>[]) {
+    if (!j || typeof j !== 'object') continue;
+    const { x, w, foot, depth } = j;
+    if (typeof x !== 'number' || typeof w !== 'number' || typeof foot !== 'number' || typeof depth !== 'number') continue;
+    if (!(x >= 0) || !(w >= 1) || !(foot >= 0) || !(depth >= 1)) continue;
+    out.push({ x: Math.round(x), w: Math.round(w), foot: Math.round(foot), depth: Math.min(64, Math.round(depth)) });
+  }
+  return out.length ? out : undefined;
+}
 export const HD_CELL_MAX_ROWS = 8;
 
 export function normalizeHdCells(v: unknown): HdCells | undefined {

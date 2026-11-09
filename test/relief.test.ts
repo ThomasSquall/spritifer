@@ -70,6 +70,8 @@ describe('normal sheets', () => {
     expect(reliefKind({ width: 32, height: 32, grid: null }, view)).toBe('shape');
     expect(reliefKind({ width: 320, height: 320, grid: { width: 16, height: 16 } }, view)).toBe('surface');
     expect(reliefKind({ width: 320, height: 180, grid: null }, view)).toBeNull();
+    expect(reliefKind({ width: 96, height: 192, grid: null }, view)).toBe('shape');
+    expect(reliefKind({ width: 300, height: 64, grid: null }, view)).toBeNull();
     expect(reliefKind({ width: 32, height: 32, grid: null, relief: { off: true } }, view)).toBeNull();
   });
 

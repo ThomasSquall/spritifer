@@ -15,10 +15,10 @@ import { ParticleSystem } from './particles.js';
 import { type VfxAnchor, type VfxPoint, VfxSystem } from './vfx.js';
 import { TileResolver, tilesetFrame } from './tilerules.js';
 import { type CastShape, MoteField, type ScreenLight, collectLights, drawClouds, drawShadows, postProcess } from './atmosphere.js';
-import { type HdFrame, resolveHd } from './hd.js';
-import { type WallCell, findWalls } from './hd3d.js';
+import { type HdFrame, type HdJut, resolveHd } from './hd.js';
+import { type HdShape, type WallCell, findWalls } from './hd3d.js';
 import { RainField, drawShafts } from './weather.js';
-import { type ReflectionBand, type WaterMap, type WaterPiece, addWaterActors, drawReflections, findWater } from './reflections.js';
+import { type ReflectionBand, type WaterMap, type WaterPiece, addWaterActors, drawReflections, findWater, reflectionZ } from './reflections.js';
 import { type Walker, pushTarget, stepPush, swayBands, swayBase } from './wind.js';
 import type { ResolvedRelief } from './relief.js';
 
@@ -429,10 +429,32 @@ export class World {
   }
 
   /** Where the water of this scene is. */
+  /** Is something hung on the wall in front of this stretch of it? */
+  private hangsOver(jut: HdJut, cells: readonly (WallCell | null)[]): boolean {
+    const s = this.scene;
+    const ts = s.tileSize;
+    return this.actors.some((a) => {
+      if (a.destroyed || a.type.hud || !a.asset) return false;
+      const b = a.box();
+      const tx = Math.floor((b.x + b.w / 2) / ts);
+      const ty = Math.floor((b.y + b.h - 1) / ts);
+      if (tx < 0 || ty < 0 || tx >= s.cols || ty >= s.rows) return false;
+      const cell = cells[ty * s.cols + tx];
+      if (!cell || !('face' in cell) || ty + cell.face !== jut.foot) return false;
+      const left = a.x + (a.type.spriteOffset?.x ?? 0);
+      return left < jut.x + jut.w && left + a.asset.width > jut.x;
+    });
+  }
+
   /** Which cells of the map stand up in the 2D-HD perspective. */
   wallMap(rows: number): (WallCell | null)[] {
     if (this.walls?.scene !== this.scene || this.walls.rows !== rows) {
-      this.walls = { scene: this.scene, rows, cells: findWalls(this.scene.layers, this.scene.cols, this.scene.rows, this.tileResolver(this.scene.tileset ?? ''), rows, this.scene.hdCells) };
+      const s = this.scene;
+      const build = (juts?: readonly HdJut[]) => findWalls(s.layers, s.cols, s.rows, this.tileResolver(s.tileset ?? ''), rows, s.hdCells, this.waterMap()?.grid, juts, s.tileSize);
+      const plain = build();
+      // What hangs on a wall hides the pier behind it: the pier mustn't stand out through it.
+      const juts = s.hdJuts?.filter((j) => !this.hangsOver(j, plain));
+      this.walls = { scene: s, rows, cells: juts?.length ? build(juts) : plain };
     }
     return this.walls.cells;
   }
@@ -1302,31 +1324,47 @@ export class World {
   }
 
   /** The player pressed action: talk to / use the instance next to it (or in front of it). */
+  /** What the action key would reach for this player right now: the closest thing in front that reacts to it. */
+  private interactTargetOf(p: Actor): Actor | undefined {
+    const b = p.box();
+    const reach = this.scene.tileSize / 2;
+    const dir = p.behavior('topdown') ? p.facing : p.flipX ? 'left' : 'right';
+    const probe = {
+      x: b.x - (dir === 'left' ? reach : 1),
+      y: b.y - (dir === 'up' ? reach : 1),
+      w: b.w + 2 + (dir === 'left' || dir === 'right' ? reach : 0),
+      h: b.h + 2 + (dir === 'up' || dir === 'down' ? reach : 0),
+    };
+    let best: Actor | undefined;
+    let bd = Infinity;
+    for (const o of this.actors) {
+      if (o === p || o.destroyed || o.type.hud || !overlap(probe, o.box())) continue;
+      const hasHook = o.type.events.some((e) => !e.disabled && e.trigger.type === 'interact') || !!o.behavior('dialogue') || o.components.some((c) => this.scripts.has(c, 'onInteract'));
+      if (!hasHook) continue;
+      const ob = o.box();
+      const d = Math.hypot(ob.x + ob.w / 2 - (b.x + b.w / 2), ob.y + ob.h / 2 - (b.y + b.h / 2));
+      if (d < bd) {
+        bd = d;
+        best = o;
+      }
+    }
+    return best;
+  }
+
+  /** What the action key would reach right now, for the first player that has something in front of it. */
+  interactTarget(): Actor | undefined {
+    for (const p of this.actors) {
+      if (p.destroyed || !p.behaviors.some((b) => (b.type === 'topdown' || b.type === 'platformer') && b.controls !== false)) continue;
+      const found = this.interactTargetOf(p);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
   private interact(): void {
     const players = this.actors.filter((a) => !a.destroyed && a.behaviors.some((b) => (b.type === 'topdown' || b.type === 'platformer') && b.controls !== false));
     for (const p of players) {
-      const b = p.box();
-      const reach = this.scene.tileSize / 2;
-      const dir = p.behavior('topdown') ? p.facing : p.flipX ? 'left' : 'right';
-      const probe = {
-        x: b.x - (dir === 'left' ? reach : 1),
-        y: b.y - (dir === 'up' ? reach : 1),
-        w: b.w + 2 + (dir === 'left' || dir === 'right' ? reach : 0),
-        h: b.h + 2 + (dir === 'up' || dir === 'down' ? reach : 0),
-      };
-      let best: Actor | undefined;
-      let bd = Infinity;
-      for (const o of this.actors) {
-        if (o === p || o.destroyed || o.type.hud) continue;
-        const hasHook = o.type.events.some((e) => !e.disabled && e.trigger.type === 'interact') || !!o.behavior('dialogue') || o.components.some((c) => this.scripts.has(c, 'onInteract'));
-        if (!hasHook || !overlap(probe, o.box())) continue;
-        const ob = o.box();
-        const d = Math.hypot(ob.x + ob.w / 2 - (b.x + b.w / 2), ob.y + ob.h / 2 - (b.y + b.h / 2));
-        if (d < bd) {
-          bd = d;
-          best = o;
-        }
-      }
+      const best = this.interactTargetOf(p);
       if (!best) continue;
       this.fireObject(best, 'interact', undefined, p);
       const talk = best.behavior('dialogue');
@@ -2575,8 +2613,11 @@ export class World {
 // ---------------------------------------------------------------------------
 // Rendering (renderer-agnostic)
 
-/** ground: lies on the floor. stand: upright with its feet at x, y (view pixels). air: over everything. */
-export type WorldMark = { kind: 'backdrop' | 'ground' | 'air' | 'screen' } | { kind: 'stand'; x: number; y: number };
+/**
+ * ground: lies on the floor. stand: upright with its feet at x, y (view pixels). air: over everything. wall: stuck on the
+ * front of a wall whose foot is at `foot`. top: lying on top of a wall `h` high. `z` is the object's draw order.
+ */
+export type WorldMark = { kind: 'backdrop' | 'ground' | 'air' | 'screen' } | { kind: 'stand'; x: number; y: number; z: number; solid?: { shape: HdShape; frame: { x: number; y: number; w: number; h: number } } } | { kind: 'wall'; foot: number; z: number; relief?: number } | { kind: 'top'; h: number; z: number };
 
 export interface Renderer {
   clear(color: string): void;
@@ -2725,11 +2766,12 @@ export function renderWorld(w: World, r: Renderer): void {
   });
 
   const atm = scene.atmosphere;
-  // Reflections: over the water, under the shadows and everything standing by it.
+  // Reflections: right on the water, under the shadows and everything standing by it or lying across it.
   const reflect = atm?.reflections;
   if (reflect && r.reflections) {
     const map = w.waterMap();
-    if (map) items.push({ z: -1.8, order: 0, draw: () => {
+    if (map) items.push({ z: reflectionZ(map), order: 0, draw: () => {
+      r.mark?.({ kind: 'ground' });
       const grid = tileset ? (tileset.grid ?? { width: ts, height: ts }) : null;
       const tcols = tileset && grid ? Math.max(1, Math.floor(tileset.width / grid.width)) : 1;
       const f0 = tileset?.frames[0];
@@ -2758,10 +2800,7 @@ export function renderWorld(w: World, r: Renderer): void {
     // y-sort: within the same z, instances lower on screen are drawn in front (top-down / RPG depth).
     const order = scene.ySort ? 1000 + a.box().y + a.box().h + i / 10000 : 1000 + i;
     items.push({ z: a.z, order, draw: () => {
-      if (r.mark) {
-        const b = a.box();
-        r.mark((a.type.hdPose ?? (a.z < 0 ? 'flat' : 'stand')) === 'flat' ? { kind: 'ground' } : { kind: 'stand', x: (b.x + b.w / 2 - camX) * zoom, y: (b.y + b.h - camY) * zoom });
-      }
+      if (r.mark) r.mark(actorMark(w, r, a, camX, camY, zoom));
       drawActor(w, r, a, camX, camY, zoom);
     } });
   });
@@ -2871,6 +2910,28 @@ function drawDialog(w: World, r: Renderer): void {
     r.rect(bx + bw - 9, by + bh - 7, 3, 2, '#f4f4f4');
     r.rect(bx + bw - 8, by + bh - 5, 1, 1, '#f4f4f4');
   }
+}
+
+/** Where an instance goes in the perspective. What is painted on a wall (a window, a relief) stays on it, as it is seen. */
+function actorMark(w: World, r: Renderer, a: Actor, camX: number, camY: number, zoom: number): WorldMark {
+  const b = a.box();
+  const flat = (a.type.hdPose ?? (a.z < 0 ? 'flat' : 'stand')) === 'flat';
+  const s = w.scene;
+  const ts = s.tileSize;
+  const middle = b.x + b.w / 2;
+  const tx = Math.floor(middle / ts);
+  const ty = Math.floor((flat ? b.y + b.h / 2 : b.y + b.h - 1) / ts);
+  const inMap = tx >= 0 && ty >= 0 && tx < s.cols && ty < s.rows;
+  const cell = r.wallRows && inMap ? w.wallMap(r.wallRows)[ty * s.cols + tx] : null;
+  const x = (middle - camX) * zoom;
+  const y = (b.y + b.h - camY) * zoom;
+  if (cell && 'face' in cell) return { kind: 'wall', foot: ((ty + cell.face + 1) * ts - camY) * zoom, z: a.z, relief: (a.type.hdRelief ?? 0) * zoom };
+  if (cell) {
+    const h = cell.cap * ts * zoom;
+    return flat ? { kind: 'top', h, z: a.z } : { kind: 'stand', x, y: y + h, z: a.z };
+  }
+  const frame = a.asset?.frames[a.frameIndex()] ?? a.asset?.frames[0];
+  return flat ? { kind: 'ground' } : { kind: 'stand', x, y, z: a.z, ...(a.type.hdShape && frame && !a.angle ? { solid: { shape: a.type.hdShape, frame } } : {}) };
 }
 
 function drawActor(w: World, r: Renderer, a: Actor, camX: number, camY: number, zoom = 1): void {

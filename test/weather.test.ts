@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeAtmosphere } from '../src/core/game/types.js';
 import { TileResolver } from '../src/core/game/tilerules.js';
-import { addWaterActors, findWater, reflectionBands } from '../src/core/game/reflections.js';
+import { addWaterActors, findWater, reflectionBands, reflectionZ } from '../src/core/game/reflections.js';
 import { RainField, drawShafts } from '../src/core/game/weather.js';
 import type { Renderer } from '../src/core/game/engine.js';
 import type { TileLayer } from '../src/core/game/types.js';
@@ -50,6 +50,20 @@ describe('water', () => {
     addWaterActors(map, [actor(16, 16, 16)], ['tree'], 16);
     expect(map.grid[5]).toBe(1);
     expect(map.grid.reduce((a, b) => a + b, 0)).toBe(1);
+  });
+
+  it('draws reflections below a decal lying across the water', () => {
+    const tiles = findWater([layer([5, 5])], 2, 1, animated);
+    expect(reflectionZ(tiles)).toBeLessThan(-2);
+    const canal = { cols: 4, rows: 4, grid: new Uint8Array(16), cells: [] };
+    addWaterActors(canal, [{ ...actor(0, 0), z: -3 }], ['tree'], 16);
+    expect(reflectionZ(canal)).toBeGreaterThan(-3);
+    expect(reflectionZ(canal)).toBeLessThan(-2);
+  });
+
+  it('never draws reflections above the shadows', () => {
+    const high = findWater([layer([5, 5], { z: 10 })], 2, 1, animated);
+    expect(reflectionZ(high)).toBe(-1.8);
   });
 });
 

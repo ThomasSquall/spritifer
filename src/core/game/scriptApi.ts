@@ -188,6 +188,7 @@ export const GLOBALS: ApiEntry[] = [
   fn('stopMusic', 'stopMusic(fade?: number): void', 'Fades the music out (seconds).'),
   fn('ambience', 'ambience(sounds: AudioName | (AudioName | { sound: AudioName; volume?: number })[], fade?: number): void', 'Replaces the looping background sounds of the scene (wind, crickets, dripping); [] = silence. Scenes can also set them in the Scene tab; objects that loop a sound are added on top.', "ambience('$0')"),
   fn('setVolume', "setVolume(channel: 'music' | 'sfx', value: number): void", 'Volume 0..1 for music or sound effects (options menus).', "setVolume('$0', 1)"),
+  fn('interactTarget', 'interactTarget(): Instance | null', 'What the action key would reach right now: the closest thing in front of the player that reacts to it. Use it to show a prompt.', 'interactTarget()'),
   fn('setDialogSpeed', 'setDialogSpeed(speed: number): void', 'Typewriter speed of dialog boxes: 1 = normal, 2 = twice as fast (options menus).', 'setDialogSpeed(${1:2})'),
   fn('setDialogSkip', 'setDialogSkip(on?: boolean): void', 'While on, dialog lines close by themselves and what they set still happens; choices still wait for the player (skipping a cutscene).', 'setDialogSkip(${1:true})'),
   fn('pause', 'pause(on?: boolean): void', 'Pauses the game (pause menus, inventories): nothing moves, timers stop; onDraw and pausedUpdate keep running. Changing scene resumes.'),

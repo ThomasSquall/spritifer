@@ -8,15 +8,20 @@
 import type { CastShape, ScreenLight } from '../core/game/atmosphere.js';
 import type { Renderer, WorldMark } from '../core/game/engine.js';
 import type { PixelFont } from '../core/game/font.js';
+import type { ReflectionBand, WaterPiece } from '../core/game/reflections.js';
 import type { HdFrame, ResolvedHd } from '../core/game/hd.js';
-import { type Camera3d, type WallCell, cameraMatrix, flatMatrix, makeCamera, overscanOf, projectWorld, worldPoint } from '../core/game/hd3d.js';
+import { type Camera3d, type HdShape, type SpriteProfile, type WallCell, cameraMatrix, flatMatrix, makeCamera, overscanOf, projectWorld, shapeSurface, spriteProfile, worldPoint } from '../core/game/hd3d.js';
 import type { ResolvedRelief } from '../core/game/relief.js';
 import type { CanvasRenderer } from './canvasRenderer.js';
 import type { HdCompositor, ProgramInfo } from './hdCompositor.js';
 
 const MAX_LIGHTS = 16;
-/** position 3, uv 2, rect 4, color 4, flat position 2, depth 1, misc 4. */
-const FLOATS = 20;
+/** position 3, uv 2, rect 4, color 4, flat position 2, depth 1, misc 4, sort 1, bend 1. */
+const FLOATS = 22;
+/** Bend of everything that isn't wrapped on a solid. */
+const NO_BEND = 2;
+/** Highest draw order that still counts: above this, everything is just in front. */
+const MAX_Z = 40;
 const VERTICES_PER_QUAD = 6;
 
 const VERTEX = `#version 300 es
@@ -27,6 +32,8 @@ layout(location=3) in vec4 aColor;
 layout(location=4) in vec2 aFlat;
 layout(location=5) in float aDepth;
 layout(location=6) in vec4 aMisc;
+layout(location=7) in float aSort;
+layout(location=8) in float aBend;
 uniform mat4 matrix;
 out vec2 vUv;
 flat out vec4 vRect;
@@ -34,9 +41,14 @@ out vec4 vColor;
 out vec2 vFlat;
 out float vDepth;
 flat out vec4 vMisc;
+flat out float vBend;
 void main() {
+  vBend = aBend;
   vUv = aUv; vRect = aRect; vColor = aColor; vFlat = aFlat; vDepth = aDepth; vMisc = aMisc;
   gl_Position = matrix * vec4(aPos, 1.0);
+  // Who covers whom follows the game's own order, the one the flat picture is painted in, not the distance from the
+  // camera: otherwise a wall that leans towards the camera would cut the head off whoever stands in front of it.
+  gl_Position.z = (1.0 - 2.0 * aSort) * gl_Position.w;
 }`;
 
 const FRAGMENT = `#version 300 es
@@ -47,10 +59,11 @@ in vec4 vColor;
 in vec2 vFlat;
 in float vDepth;
 flat in vec4 vMisc;
+flat in float vBend;
 uniform sampler2D albedo;
 uniform sampler2D normals;
 uniform vec2 texSize;
-uniform float blended, hasNormals, relief, strength, bands, rim, lightHeight, sunOn, sunIntensity, glow;
+uniform float blended, hasNormals, relief, strength, bands, rimLight, lightHeight, sunOn, sunIntensity, glow;
 uniform vec3 ambient, sunDir, sunColor, sunShade;
 uniform int lightCount;
 uniform vec4 lights[${MAX_LIGHTS}];
@@ -73,9 +86,15 @@ void main() {
     vec3 nv = vec3(0.0, 0.0, 1.0);
     if (shaped) {
       nv.xy = n.rg * 255.0 / 127.5 - 1.0;
-      if (vMisc.z > 0.5) nv.x = -nv.x;
+      if (vMisc.z > 0.5 && vMisc.z < 1.5) nv.x = -nv.x;
       nv.z = sqrt(max(0.0, 1.0 - dot(nv.xy, nv.xy)));
+      // The side of a wall: its art runs along the depth, and it faces east or west instead of the camera.
+      if (vMisc.z > 1.5) nv = vec3((vMisc.z > 2.5 ? -1.0 : 1.0) * nv.z, nv.x, -nv.y);
+      // Wrapped on a solid: the surface turns away, and what is painted on it only adds its detail.
+      if (vBend < 1.5) nv = normalize(vec3(vBend + nv.x * 0.35, nv.y, sqrt(max(0.0, 1.0 - vBend * vBend))));
     }
+    // A surface turned sideways is all "edge" to the rim light: only a trace of it, or the whole wall would shine.
+    float rim = vMisc.z > 1.5 ? rimLight * 0.2 : rimLight;
     vec3 light = ambient;
     if (shaped && strength > 0.0) light *= max(0.3, 1.0 + band(-nv.y * 0.75 * strength));
     vec3 added = vec3(0.0);
@@ -133,6 +152,7 @@ interface Batch {
   normals: WebGLTexture | null;
   size: [number, number];
   blend: 0 | 1 | 2;
+  stencil: 0 | 1 | 2;
   first: number;
   count: number;
 }
@@ -157,10 +177,10 @@ class DrawList {
     return this.vertices * FLOATS;
   }
 
-  batch(tex: WebGLTexture, normals: WebGLTexture | null, size: [number, number], blend: 0 | 1 | 2): void {
+  batch(tex: WebGLTexture, normals: WebGLTexture | null, size: [number, number], blend: 0 | 1 | 2, stencil: 0 | 1 | 2): void {
     const last = this.batches[this.batches.length - 1];
-    if (last && last.tex === tex && last.normals === normals && last.blend === blend) last.count += VERTICES_PER_QUAD;
-    else this.batches.push({ tex, normals, size, blend, first: this.vertices, count: VERTICES_PER_QUAD });
+    if (last && last.tex === tex && last.normals === normals && last.blend === blend && last.stencil === stencil) last.count += VERTICES_PER_QUAD;
+    else this.batches.push({ tex, normals, size, blend, stencil, first: this.vertices, count: VERTICES_PER_QUAD });
   }
 }
 
@@ -181,6 +201,16 @@ type Quad = {
   shaped: boolean;
   white: number;
   blend: 0 | 1 | 2;
+  /** Draw order of what this belongs to. */
+  z?: number;
+  /** 1: only marks where water is. 2: shows only over what was marked. */
+  stencil?: 0 | 1 | 2;
+  /** Upside down. */
+  flipV?: boolean;
+  /** The side of a wall, facing east (1) or west (-1). */
+  sideOf?: 1 | -1;
+  /** Wrapped on a solid: the sideways part of the direction it faces. */
+  bend?: number;
 };
 
 const parseColor = (c: string): [number, number, number] => {
@@ -201,6 +231,8 @@ export class HdScene implements Renderer {
   private readonly white: Sheet;
   private readonly sheets = new Map<string, Sheet | null>();
   private readonly stamps = new WeakMap<CastShape, { color: string; sheet: Sheet }>();
+  private readonly waterMasks = new WeakMap<HTMLCanvasElement, Sheet>();
+  private readonly profiles = new Map<string, SpriteProfile | null>();
   private readonly backdrop = new DrawList();
   private readonly ground = new DrawList();
   private readonly stand = new DrawList();
@@ -239,7 +271,7 @@ export class HdScene implements Renderer {
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     let offset = 0;
-    [3, 2, 4, 4, 2, 1, 4].forEach((n, i) => {
+    [3, 2, 4, 4, 2, 1, 4, 1, 1].forEach((n, i) => {
       gl.enableVertexAttribArray(i);
       gl.vertexAttribPointer(i, n, gl.FLOAT, false, FLOATS * 4, offset);
       offset += n * 4;
@@ -340,11 +372,12 @@ export class HdScene implements Renderer {
   // ------------------------------------------------------------------ geometry
 
   private push(list: DrawList, q: Quad): void {
-    list.batch(q.sheet.tex, q.shaped ? q.sheet.normals : null, q.sheet.size, q.blend);
+    list.batch(q.sheet.tex, q.shaped ? q.sheet.normals : null, q.sheet.size, q.blend, q.stencil ?? 0);
     const [sx0, sy0, sx1, sy1] = q.src;
     const us = q.mirror ? [sx1, sx0, sx0, sx1] : [sx0, sx1, sx1, sx0];
-    const vs = [sy0, sy0, sy1, sy1];
+    const vs = q.flipV ? [sy1, sy1, sy0, sy0] : [sy0, sy0, sy1, sy1];
     const depth = Math.min(1, Math.max(0, ((q.depth + this.vh / 2) / this.vh + 1) / 3));
+    const sort = (depth + Math.min(MAX_Z, Math.max(0, q.z ?? 0))) / (MAX_Z + 1);
     const put = (d: Float32Array, o: number, c: number) => {
       const p = q.at[c]!;
       const f = q.flat[c]!;
@@ -354,7 +387,9 @@ export class HdScene implements Renderer {
       d[o + 9] = q.color[0]; d[o + 10] = q.color[1]; d[o + 11] = q.color[2]; d[o + 12] = q.color[3];
       d[o + 13] = f[0]; d[o + 14] = f[1];
       d[o + 15] = depth;
-      d[o + 16] = q.lit ? 1 : 0; d[o + 17] = q.shaped ? 1 : 0; d[o + 18] = q.mirror ? 1 : 0; d[o + 19] = q.white;
+      d[o + 16] = q.lit ? 1 : 0; d[o + 17] = q.shaped ? 1 : 0; d[o + 18] = q.sideOf ? (q.sideOf > 0 ? 2 : 3) : q.mirror ? 1 : 0; d[o + 19] = q.white;
+      d[o + 20] = sort;
+      d[o + 21] = q.bend ?? NO_BEND;
     };
     for (const c of [0, 1, 2, 0, 2, 3]) {
       const o = list.room();
@@ -376,6 +411,15 @@ export class HdScene implements Renderer {
       case 'screen': return { list: this.screen, point: flat, depthOf: (y) => y - cy };
       case 'air': return { list: this.air, point: onGround, depthOf: (y) => y - cy };
       case 'ground': return { list: this.ground, point: onGround, depthOf: (y) => y - cy };
+      case 'wall': {
+        // On the plane of the wall's front, leaning as it leans, a hair in front of it.
+        const raise = this.hd.wallHeight;
+        return { list: this.stand, depthOf: () => m.foot - cy + 1, point: (x, y) => worldPoint(cam, x - cx, m.foot - cy, (m.foot - y) * raise) };
+      }
+      case 'top': {
+        const raise = this.hd.wallHeight;
+        return { list: this.stand, depthOf: (y) => y + m.h - cy, point: (x, y) => worldPoint(cam, x - cx, y + m.h - cy, m.h * raise) };
+      }
       case 'stand': {
         // Upright and facing the camera, on the spot of the feet: a sprite stays the drawing it is.
         const base = worldPoint(cam, m.x - cx, m.y - cy);
@@ -410,9 +454,30 @@ export class HdScene implements Renderer {
         c[1] = cy + x * Math.sin(a) + y * Math.cos(a);
       }
     }
+    const hung = this.mark_;
+    if (hung.kind === 'wall' && hung.relief) {
+      // Copies of the drawing one behind the other: its own outline, extruded out of the wall. The ones behind are in shade.
+      const cam = this.cam;
+      const cx = this.vw / 2;
+      const cy = this.vh / 2;
+      const raise = this.hd.wallHeight;
+      const slices = Math.max(1, Math.ceil(hung.relief / 0.75));
+      for (let s = 1; s <= slices; s++) {
+        const out = 1 + (hung.relief * s) / slices;
+        const front = s === slices;
+        const tone = front ? 1 : 0.42 + (0.3 * s) / slices;
+        this.push(this.stand, {
+          at: corners.map(([x, y]) => worldPoint(cam, x - cx, hung.foot - cy + out, (hung.foot - y) * raise)),
+          flat: corners, depth: hung.foot - cy + out, sheet, src: [sx, sy, sx + sw, sy + sh], mirror: o.flipX, color: [tone, tone, tone, o.opacity],
+          lit: true, shaped: front && !o.flat && !!sheet.normals && this.relief0(), white: Math.min(1, o.white ?? 0), blend: o.opacity < 1 ? 1 : 0, z: hung.z,
+        });
+      }
+      return;
+    }
+    if (hung.kind === 'stand' && hung.solid && !o.angle && this.wrapOnSolid(sprite, sheet, sx, sy, sw, sh, dx, dy, k, o, hung.solid, hung.z)) return;
     const { list, point, depthOf } = this.placed();
     const kind = this.mark_.kind;
-    const lit = kind === 'ground' || kind === 'stand';
+    const lit = kind === 'ground' || kind === 'stand' || kind === 'wall' || kind === 'top';
     this.push(list, {
       at: corners.map(([x, y]) => point(x, y)),
       flat: corners,
@@ -425,7 +490,68 @@ export class HdScene implements Renderer {
       shaped: lit && !o.flat && !!sheet.normals && !!this.relief0(),
       white: Math.min(1, o.white ?? 0),
       blend: o.opacity < 1 || kind === 'air' || kind === 'screen' ? 1 : 0,
+      z: 'z' in this.mark_ ? this.mark_.z : 0,
     });
+  }
+
+  private profileOf(sprite: string, frame: { x: number; y: number; w: number; h: number }): SpriteProfile | null {
+    const key = `${sprite}|${frame.x}|${frame.y}|${frame.w}|${frame.h}`;
+    let p = this.profiles.get(key);
+    if (p === undefined) {
+      const alpha = this.base.alphaMask(sprite);
+      p = alpha ? spriteProfile(alpha.mask, alpha.width, frame) : null;
+      this.profiles.set(key, p);
+    }
+    return p;
+  }
+
+  /**
+   * A standing sprite on a solid: strips down its height and bands across it, each pushed towards the camera as far as the
+   * solid's surface is there. The feet stay on the spot, because the surface is measured back from the frontmost point.
+   */
+  private wrapOnSolid(sprite: string, sheet: Sheet, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, k: number, o: { flipX: boolean; opacity: number; flat?: boolean; white?: number }, solid: { shape: HdShape; frame: { x: number; y: number; w: number; h: number } }, z: number): boolean {
+    const profile = this.profileOf(sprite, solid.frame);
+    if (!profile || profile.largest <= 0) return false;
+    const { point, depthOf } = this.placed();
+    const firstRow = sy - solid.frame.y;
+    const radius = (row: number) => profile.radius[Math.max(0, Math.min(profile.radius.length - 1, row))]!;
+    const screen = (u: number) => dx + (o.flipX ? sw - u : u) * k;
+    const surface = (u: number, r: number) => (r > 0 && Math.abs(u - profile.axis) < r ? shapeSurface(solid.shape, (u - profile.axis) / r).forward * r : 0);
+    const front = (u: number, r: number) => (surface(u, r) - profile.largest) * k;
+    const shaped = !o.flat && !!sheet.normals && this.relief0();
+    const depth = depthOf(dy + sh * k);
+    let row = 0;
+    while (row < sh) {
+      const r0 = radius(firstRow + row);
+      let next = row + 1;
+      while (next < sh && next - row < 6 && Math.abs(radius(firstRow + next) - r0) <= 1) next++;
+      const r1 = radius(firstRow + Math.min(sh - 1, next));
+      for (let u = 0; u < sw; u += 2) {
+        const v = Math.min(sw, u + 2);
+        // Nothing of this frame reaches these columns on these rows.
+        if (Math.max(r0, r1) <= 0 || Math.max(Math.abs(u - profile.axis), Math.abs(v - profile.axis)) > Math.max(r0, r1) + 2) continue;
+        const left = Math.min(screen(u), screen(v));
+        const right = Math.max(screen(u), screen(v));
+        const top = dy + row * k;
+        const bottom = dy + next * k;
+        const uL = o.flipX ? v : u;
+        const uR = o.flipX ? u : v;
+        const lift = (x: number, y: number, by: number) => {
+          const p = point(x, y);
+          return [p[0], p[1], p[2] + by] as const;
+        };
+        const middle = (u + v) / 2;
+        const side = shapeSurface(solid.shape, Math.max(-1, Math.min(1, (middle - profile.axis) / Math.max(1, Math.max(r0, r1))))).side;
+        this.push(this.stand, {
+          at: [lift(left, top, front(uL, r0)), lift(right, top, front(uR, r0)), lift(right, bottom, front(uR, r1)), lift(left, bottom, front(uL, r1))],
+          flat: [[left, top], [right, top], [right, bottom], [left, bottom]],
+          depth, sheet, src: [sx + u, sy + row, sx + v, sy + next], mirror: o.flipX, color: [1, 1, 1, o.opacity], lit: true, shaped, white: Math.min(1, o.white ?? 0), blend: o.opacity < 1 ? 1 : 0, z,
+          bend: o.flipX ? -side : side,
+        });
+      }
+      row = next;
+    }
+    return true;
   }
 
   /** Relief lighting arrives after the sprites: what counts while they are placed is whether the scene will have it. */
@@ -468,6 +594,29 @@ export class HdScene implements Renderer {
     this.push(list, { at: corners.map(([px, py]) => point(px, py)), flat: corners, depth: depthOf(top), sheet: entry.sheet, src: [0, row, shape.width, row + rows], mirror: false, color: [1, 1, 1, alpha], lit: false, shaped: false, white: 0, blend: 1 });
   }
 
+  /** Water marks where the reflections may show; the reflections are drawn upside down, only there. */
+  reflections(water: WaterPiece[], bands: ReflectionBand[], zoom: number): void {
+    const { list, point, depthOf } = this.placed();
+    const box = (x: number, y: number, w: number, h: number): [number, number][] => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+    for (const piece of water) {
+      const mask = this.base.waterMask(piece);
+      if (!mask) continue;
+      let sheet = this.waterMasks.get(mask);
+      if (!sheet) {
+        sheet = { tex: this.upload(null, piece.sw, piece.sh, this.gl.NEAREST, mask), size: [piece.sw, piece.sh], normals: null };
+        this.waterMasks.set(mask, sheet);
+      }
+      const corners = box(piece.x, piece.y, piece.sw * zoom, piece.sh * zoom);
+      this.push(list, { at: corners.map(([x, y]) => point(x, y)), flat: corners, depth: depthOf(piece.y), sheet, src: [0, 0, piece.sw, piece.sh], mirror: false, color: [1, 1, 1, 1], lit: false, shaped: false, white: 0, blend: 0, stencil: 1 });
+    }
+    for (const b of bands) {
+      const sheet = this.sheet(b.sprite);
+      if (!sheet) continue;
+      const corners = box(b.dx, b.dy, b.sw * zoom, b.sh * zoom);
+      this.push(list, { at: corners.map(([x, y]) => point(x, y)), flat: corners, depth: depthOf(b.dy), sheet, src: [b.sx, b.sy, b.sx + b.sw, b.sy + b.sh], mirror: b.flipX, flipV: true, color: [1, 1, 1, b.alpha], lit: true, shaped: false, white: 0, blend: 1, stencil: 2 });
+    }
+  }
+
   /** One map tile standing up, per its place in the wall. `x` and `y` are where it is in the flat picture. */
   tileWall(sprite: string, sx: number, sy: number, sw: number, sh: number, x: number, y: number, size: number, cell: WallCell, sides: ([number, number] | null)[] | null): void {
     if (!this.inWorld) return;
@@ -478,7 +627,8 @@ export class HdScene implements Renderer {
     const cy = this.vh / 2;
     const raise = this.hd.wallHeight;
     const flat: [number, number][] = [[x, y], [x + size, y], [x + size, y + size], [x, y + size]];
-    const base = { sheet, mirror: false, color: [1, 1, 1, 1] as const, lit: true, shaped: false, white: 0, blend: 0 as const };
+    // Walls take the light through the normals of their tiles; the stretched edges below have none worth using.
+    const base = { sheet, mirror: false, color: [1, 1, 1, 1] as const, lit: true, shaped: !!sheet.normals && this.relief0(), white: 0, blend: 0 as const };
     const src = [sx, sy, sx + sw, sy + sh] as const;
     const P = (px: number, py: number, h: number) => worldPoint(cam, px - cx, py - cy, h);
     if ('face' in cell) {
@@ -486,17 +636,41 @@ export class HdScene implements Renderer {
       const tall = size * raise * (cell.stretch ?? 1);
       const h0 = cell.face * tall;
       const h1 = (cell.face + 1) * tall;
-      this.push(this.stand, { ...base, src, flat, depth: foot - cy, at: [P(x, foot, h1), P(x + size, foot, h1), P(x + size, foot, h0), P(x, foot, h0)] });
+      // What is painted at the foot (a plinth) stays out, and the masonry reaches the ground. Piers are painted all the way down.
+      const trim = cell.face === 0 ? Math.min(sh - 1, Math.round(this.hd.wallTrim)) : 0;
+      const front = (from: number, to: number, depth: number) => {
+        const a = x + from * size;
+        const b = x + to * size;
+        const z = foot + depth;
+        this.push(this.stand, { ...base, src: [sx + from * sw, sy, sx + to * sw, sy + sh - (depth ? 0 : trim)], flat: [[a, y], [b, y], [b, y + size], [a, y + size]], depth: z - cy, at: [P(a, z, h1), P(b, z, h1), P(b, z, h0), P(a, z, h0)] });
+      };
+      const juts = [...(cell.juts ?? [])].sort((p, q) => p.from - q.from);
+      let along = 0;
+      for (const j of juts) {
+        if (j.from > along) front(along, j.from, 0);
+        front(j.from, j.to, j.depth);
+        along = j.to;
+        const a = x + j.from * size;
+        const b = x + j.to * size;
+        const z = foot + j.depth;
+        const dark = { ...base, shaped: false, flat, depth: z - cy, color: [0.72, 0.72, 0.78, 1] as const };
+        const inside = (k: number) => Math.floor(sx + (j.from + (j.to - j.from) * k) * sw);
+        const flank = (at: number, u: number) => this.push(this.stand, { ...dark, src: [u, sy, u + 1, sy + sh], at: [P(at, foot, h1), P(at, z, h1), P(at, z, h0), P(at, foot, h0)] });
+        if (j.starts) flank(a, inside(0.3));
+        if (j.ends) flank(b, inside(0.7));
+        if (cell.top) this.push(this.stand, { ...dark, color: [0.85, 0.85, 0.9, 1], src: [sx + j.from * sw, sy, sx + j.to * sw, sy + 1], at: [P(a, foot, h1), P(b, foot, h1), P(b, z, h1), P(a, z, h1)] });
+      }
+      if (along < 1) front(along, 1, 0);
       return;
     }
     // The top of the wall sits as far south as it is high, which is where the flat picture shows it.
     const height = cell.cap * size;
     const top = height * raise;
     const near = y + height;
-    this.push(this.stand, { ...base, src, flat, depth: near + size - cy, at: [P(x, near, top), P(x + size, near, top), P(x + size, near + size, top), P(x, near + size, top)] });
+    this.push(this.stand, { ...base, src, flat, depth: near - cy, at: [P(x, near, top), P(x + size, near, top), P(x + size, near + size, top), P(x, near + size, top)] });
     if (!sides) return;
-    const shaded = { ...base, flat, depth: near + size - cy };
-    const side = (at: number, u: number) => {
+    const shaded = { ...base, flat, depth: near - cy };
+    const side = (at: number, u: number, sideOf: 1 | -1) => {
       if (sides.length && sides.every(Boolean)) {
         // The masonry of a front, turned to run along the side, a little in shade.
         const rowHeight = top / sides.length;
@@ -504,15 +678,40 @@ export class HdScene implements Renderer {
           const [fx, fy] = from!;
           const h0 = row * rowHeight;
           const h1 = h0 + rowHeight;
-          this.push(this.stand, { ...shaded, color: [0.8, 0.8, 0.84, 1], src: [fx, fy, fx + sw, fy + sh], at: [P(at, near, h1), P(at, near + size, h1), P(at, near + size, h0), P(at, near, h0)] });
+          const strip = (from: number, to: number, out: number) => {
+            const px = at + sideOf * out;
+            const z0 = near + from * size;
+            const z1 = near + to * size;
+            const trim = row === 0 && !out ? Math.min(sh - 1, Math.round(this.hd.wallTrim)) : 0;
+            this.push(this.stand, { ...shaded, sideOf, color: [0.8, 0.8, 0.84, 1], src: [fx + from * sw, fy, fx + to * sw, fy + sh - trim], at: [P(px, z0, h1), P(px, z1, h1), P(px, z1, h0), P(px, z0, h0)] });
+          };
+          let along = 0;
+          for (const j of [...(cell.sideJuts ?? [])].sort((p, q) => p.from - q.from)) {
+            if (j.from > along) strip(along, j.from, 0);
+            // Seen at a glancing angle, a full-depth pier would hide the next one: a side keeps them shallower.
+            const out = j.depth * 0.6;
+            strip(j.from, j.to, out);
+            along = j.to;
+            const px = at + sideOf * out;
+            const za = near + j.from * size;
+            const zb = near + j.to * size;
+            const dark = { ...shaded, shaped: false, color: [0.72, 0.72, 0.78, 1] as const };
+            // From inside the pier: its outermost column is the black outline, which stretched would read as a slit.
+            const inside = (k: number) => Math.floor(fx + (j.from + (j.to - j.from) * k) * sw);
+            const flank = (z: number, u: number) => this.push(this.stand, { ...dark, src: [u, fy, u + 1, fy + sh], at: [P(at, z, h1), P(px, z, h1), P(px, z, h0), P(at, z, h0)] });
+            if (j.starts) flank(za, inside(0.3));
+            if (j.ends) flank(zb, inside(0.7));
+            if (row === sides.length - 1) this.push(this.stand, { ...dark, color: [0.8, 0.8, 0.86, 1], src: [fx + j.from * sw, fy, fx + j.to * sw, fy + 1], at: [P(at, za, h1), P(px, za, h1), P(px, zb, h1), P(at, zb, h1)] });
+          }
+          if (along < 1) strip(along, 1, 0);
         });
         return;
       }
       // No front anywhere on this map to borrow from: the edge of the top is stretched down, darker.
-      this.push(this.stand, { ...shaded, color: [0.62, 0.62, 0.66, 1], src: [u, sy, u + 1, sy + sh], at: [P(at, near, top), P(at, near + size, top), P(at, near + size, 0), P(at, near, 0)] });
+      this.push(this.stand, { ...shaded, shaped: false, color: [0.62, 0.62, 0.66, 1], src: [u, sy, u + 1, sy + sh], at: [P(at, near, top), P(at, near + size, top), P(at, near + size, 0), P(at, near, 0)] });
     };
-    if (cell.left) side(x, sx);
-    if (cell.right) side(x + size, sx + sw - 1);
+    if (cell.left) side(x, sx, -1);
+    if (cell.right) side(x + size, sx + sw - 1, 1);
   }
 
   // ------------------------------------------------------------------ drawing
@@ -530,11 +729,11 @@ export class HdScene implements Renderer {
     this.color = this.upload(null, w, h, gl.LINEAR);
     this.depth = gl.createRenderbuffer()!;
     gl.bindRenderbuffer(gl.RENDERBUFFER, this.depth);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, w, h);
     this.fbo = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.color, 0);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.depth);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, this.depth);
   }
 
   private drawList(list: DrawList, matrix: Float32Array, depthTest: boolean): void {
@@ -543,6 +742,7 @@ export class HdScene implements Renderer {
     const p = this.program;
     gl.bufferData(gl.ARRAY_BUFFER, list.data.subarray(0, list.vertices * FLOATS), gl.STREAM_DRAW);
     gl.uniformMatrix4fv(p.uniform('matrix'), false, matrix);
+    gl.depthFunc(gl.LEQUAL);
     if (depthTest) gl.enable(gl.DEPTH_TEST);
     else gl.disable(gl.DEPTH_TEST);
     gl.depthMask(depthTest);
@@ -563,8 +763,20 @@ export class HdScene implements Renderer {
         gl.disable(gl.BLEND);
         gl.colorMask(true, true, true, true);
       }
+      if (b.stencil) {
+        gl.enable(gl.STENCIL_TEST);
+        if (b.stencil === 1) {
+          gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+          gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+          gl.colorMask(false, false, false, false);
+        } else {
+          gl.stencilFunc(gl.EQUAL, 1, 0xff);
+          gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+        }
+      } else gl.disable(gl.STENCIL_TEST);
       gl.drawArrays(gl.TRIANGLES, b.first, b.count);
     }
+    gl.disable(gl.STENCIL_TEST);
     gl.disable(gl.BLEND);
     gl.colorMask(true, true, true, true);
   }
@@ -583,7 +795,9 @@ export class HdScene implements Renderer {
     gl.colorMask(true, true, true, true);
     gl.clearColor(this.background[0], this.background[1], this.background[2], 1);
     gl.clearDepth(1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.clearStencil(0);
+    gl.stencilMask(0xff);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
 
     const p = this.program;
     gl.useProgram(p.program);
@@ -597,7 +811,7 @@ export class HdScene implements Renderer {
     gl.uniform1f(p.uniform('relief'), rel ? 1 : 0);
     gl.uniform1f(p.uniform('strength'), rel?.strength ?? 0);
     gl.uniform1f(p.uniform('bands'), rel?.bands ?? 0);
-    gl.uniform1f(p.uniform('rim'), rel?.rim ?? 0);
+    gl.uniform1f(p.uniform('rimLight'), rel?.rim ?? 0);
     gl.uniform1f(p.uniform('lightHeight'), rel?.lightHeight ?? 0.3);
     gl.uniform1f(p.uniform('sunOn'), rel?.sun ? 1 : 0);
     if (rel?.sun) {

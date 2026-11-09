@@ -104,6 +104,10 @@ function foot(i: Instance, o: ObjectType, sizeOf: SizeOf, tile: number): { x: nu
 /** Things worth reaching: anything with behavior beyond being an obstacle. */
 const interactive = (o: ObjectType) => o.behaviors.some((b) => b.type !== 'solid' && b.type !== 'sine' && b.type !== 'lifetime');
 
+/** A sprite this tall on a floor layer (z between TALL_FLAT_Z and 0) is probably meant to stand up. Lower z = painted ground art. */
+const TALL_FLAT_PX = 56;
+const TALL_FLAT_Z = -5;
+
 export function checkMaps(p: ProjectSources, world: WorldMap, sizeOf: SizeOf): Problem[] {
   const out: Problem[] = [];
   for (const name of world.unreachable) out.push({ where: `scene ${name}`, message: 'nothing leads to this scene (no door, event, script or data names it)' });
@@ -128,6 +132,35 @@ export function checkMaps(p: ProjectSources, world: WorldMap, sizeOf: SizeOf): P
       if (!o || o.hud || !(i.sprite ?? o.sprite) || !(o.hitbox && interactive(o))) continue;
       const c = cell(i, o);
       if (inside(c.x, c.y) && solid[c.y * s.cols + c.x]) out.push({ where: here(i), message: `stands on a solid tile (${c.x}, ${c.y})` });
+    }
+
+    // Props glued together: two bodies in the same place. Alternatives for different moments of the story don't count.
+    const bodies = s.instances.flatMap((i) => {
+      const o = types.get(i.object);
+      return o?.hitbox && (i.sprite ?? o.sprite) && o.behaviors.some((b) => b.type === 'solid') ? [{ i, x: i.x + o.hitbox.x, y: i.y + o.hitbox.y, w: o.hitbox.w, h: o.hitbox.h }] : [];
+    });
+    for (let a = 0; a < bodies.length; a++) {
+      for (let b = a + 1; b < bodies.length; b++) {
+        const A = bodies[a]!;
+        const B = bodies[b]!;
+        if (A.i.activeIf && B.i.activeIf) continue;
+        if (A.x < B.x + B.w && B.x < A.x + A.w && A.y < B.y + B.h && B.y < A.y + A.h) out.push({ where: here(A.i), message: `is stuck into ${B.i.name ?? B.i.object} #${B.i.id}` });
+      }
+    }
+
+    // Something tall painted on the floor: it can be walked through, is not hidden by anything and casts no shadow.
+    for (const i of s.instances) {
+      const o = types.get(i.object);
+      if (!o || (o.z ?? 0) >= 0 || (o.z ?? 0) < TALL_FLAT_Z || o.behaviors.some((b) => b.type === 'solid')) continue;
+      const size = sizeOf(i.sprite ?? o.sprite);
+      const h = size?.h ?? 0;
+      if (h < TALL_FLAT_PX) continue;
+      // Hanging on a wall (a gate, a gear, a window) is what the floor layer is for.
+      let onWall = false;
+      for (let y = Math.floor(i.y / s.tileSize); y <= Math.floor((i.y + h - 1) / s.tileSize) && !onWall; y++) {
+        for (let x = Math.floor(i.x / s.tileSize); x <= Math.floor((i.x + size!.w - 1) / s.tileSize); x++) if (inside(x, y) && solid[y * s.cols + x]) onWall = true;
+      }
+      if (!onWall) out.push({ where: here(i), message: `is ${h} px tall but lies flat on the ground: no collider, no shadow` });
     }
 
     // Pockets, for top-down maps: where can the player walk, from where they start and from every door?

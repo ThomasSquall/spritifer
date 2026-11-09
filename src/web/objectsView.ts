@@ -299,6 +299,23 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
     h('option', { value: 'stand', selected: obj.hdPose === 'stand' }, 'Stands up'),
     h('option', { value: 'flat', selected: obj.hdPose === 'flat' }, 'Lies flat'),
   );
+  const shapeSel = h('select', { onchange: () => {
+    if (shapeSel.value) obj.hdShape = shapeSel.value as NonNullable<typeof obj.hdShape>;
+    else delete obj.hdShape;
+    changed();
+  } },
+    h('option', { value: '', selected: !obj.hdShape }, 'Flat sprite'),
+    h('option', { value: 'round', selected: obj.hdShape === 'round' }, 'Round'),
+    h('option', { value: 'octagon', selected: obj.hdShape === 'octagon' }, 'Octagon'),
+    h('option', { value: 'hexagon', selected: obj.hdShape === 'hexagon' }, 'Hexagon'),
+    h('option', { value: 'square', selected: obj.hdShape === 'square' }, 'Square, corner forward'),
+  );
+  const reliefIn = h('input', { type: 'number', class: 'num', min: '0', max: '40', step: '1', value: obj.hdRelief === undefined ? '' : String(obj.hdRelief), placeholder: '0', onchange: () => {
+    const v = Math.round(Number(reliefIn.value));
+    if (v > 0) obj.hdRelief = Math.min(40, v);
+    else delete obj.hdRelief;
+    changed();
+  } });
   // Wind: seen moving in Play and in the scene editor's game look.
   const swaySet = (amount: string, speed: string, react = swayReactIn.value) => {
     const a = Number(amount);
@@ -392,6 +409,8 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
           h('label', {}, 'Draw order (z)', zIn),
           h('label', { title: 'Soft contact shadow under instances in scenes with an atmosphere: width in px. Empty = automatic (hitbox width), 0 = none (rugs, doormats, flowerbeds)' }, 'Shadow width (px)', shadowIn),
           h('label', { title: 'In the 2D-HD perspective: lies on the ground (rugs, decals) or stands up (characters, trees). Automatic = flat when the draw order is below 0' }, '2D-HD pose', poseSel),
+          h('label', { title: 'In the 2D-HD perspective, the solid a standing sprite is wrapped on: its width row by row gives the size, so base and capital come out wider than the shaft. For columns, barrels, pillars' }, '2D-HD shape', shapeSel),
+          h('label', { title: 'In the 2D-HD perspective, pixels a sprite hung on a wall stands out from it: its outline is extruded. For reliefs and statues in niches' }, '2D-HD relief (px)', reliefIn),
           h('div', { class: 'row4', title: 'The wind bends the sprite when drawn, without new art or frames: the top moves by this many pixels, the foot stays still and the hitbox does not move. Trees want 2-4' }, h('label', {}, 'Wind sway (px)', swayIn), h('label', {}, 'Wind speed', swaySpeedIn), h('label', { title: 'Pixels a character walking through pushes the top aside; it springs back after. Grass and ferns want 2-4. Seen in Play' }, 'Pushed by walkers (px)', swayReactIn)),
           h('div', { class: 'row4', title: 'A sound that loops around every instance of this object (fire, fountain): louder the closer the camera is. Heard in Play' }, h('label', {}, 'Ambient sound', ambientSel), h('label', {}, 'Volume', ambientVolIn), h('label', {}, 'Heard up to (px)', ambientRadiusIn)),
           lightBox,

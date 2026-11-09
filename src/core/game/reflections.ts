@@ -19,6 +19,13 @@ export interface WaterMap {
   grid: Uint8Array;
   /** Cells of animated tiles, with every tile each one goes through. */
   cells: { tx: number; ty: number; tiles: number[] }[];
+  /** How high in the drawing order the highest water is. */
+  z?: number;
+}
+
+/** Where reflections are drawn: right on the water, so whatever lies across it (a bridge is a decal) covers them. Never above the shadows. */
+export function reflectionZ(map: WaterMap): number {
+  return Math.min(-1.8, (map.z ?? -1.8) + 0.001);
 }
 
 /** One patch of water on the screen. `sources` are x, y pairs in the sheet: with several, the pixels that differ are water; with one, its solid pixels. */
@@ -49,6 +56,7 @@ export function findWater(layers: readonly TileLayer[], cols: number, rows: numb
   const grid = new Uint8Array(cols * rows);
   const cells: WaterMap['cells'] = [];
   const list: number[] = [];
+  let z: number | undefined;
   layers.forEach((layer, li) => {
     if (!layer.visible || layer.solid) return;
     for (let ty = 0; ty < rows; ty++) {
@@ -62,10 +70,11 @@ export function findWater(layers: readonly TileLayer[], cols: number, rows: numb
         for (const c of SAMPLES) for (const t of resolver.resolve(layer, cols, rows, tx, ty, list, c)) tiles.add(t);
         cells.push({ tx, ty, tiles: [...tiles] });
         grid[i] = 1;
+        z = Math.max(z ?? -Infinity, layer.z ?? li - 10);
       }
     }
   });
-  return { cols, rows, grid, cells };
+  return { cols, rows, grid, cells, z };
 }
 
 /** Marks the cells covered by water drawn as instances (canals laid over a dry bed). */
@@ -73,6 +82,7 @@ export function addWaterActors(map: WaterMap, actors: readonly AtmosphereActor[]
   if (!sprites.length) return;
   for (const a of actors) {
     if (a.destroyed || !a.asset?.name || !sprites.includes(a.asset.name)) continue;
+    map.z = Math.max(map.z ?? -Infinity, a.z);
     const x0 = Math.max(0, Math.floor(a.x / tileSize));
     const y0 = Math.max(0, Math.floor(a.y / tileSize));
     const x1 = Math.min(map.cols - 1, Math.floor((a.x + a.asset.width - 1) / tileSize));
@@ -123,10 +133,11 @@ export function reflectionBands(a: AtmosphereActor, cfg: SceneReflections, map: 
 /** Everything standing near water, mirrored in it. */
 export function drawReflections(r: Renderer, cfg: SceneReflections, map: WaterMap, actors: readonly AtmosphereActor[], tileset: { name: string; tile(t: number): [number, number]; w: number; h: number } | null, ts: number, clock: number, camX: number, camY: number, zoom: number, vw: number, vh: number): void {
   if (!r.reflections) return;
-  const x0 = Math.floor(camX / ts);
-  const y0 = Math.floor(camY / ts);
-  const x1 = Math.ceil((camX + vw / zoom) / ts);
-  const y1 = Math.ceil((camY + vh / zoom) / ts);
+  const over = r.overscan ?? { left: 0, top: 0, right: 0, bottom: 0 };
+  const x0 = Math.floor((camX - over.left / zoom) / ts);
+  const y0 = Math.floor((camY - over.top / zoom) / ts);
+  const x1 = Math.ceil((camX + (vw + over.right) / zoom) / ts);
+  const y1 = Math.ceil((camY + (vh + over.bottom) / zoom) / ts);
   const water: WaterPiece[] = [];
   if (tileset) {
     for (const c of map.cells) {
@@ -142,12 +153,12 @@ export function drawReflections(r: Renderer, cfg: SceneReflections, map: WaterMa
     if (a.destroyed || !a.visible || !a.asset || a.type.hud || a.opacity <= 0) continue;
     if (a.asset.name && overlays.includes(a.asset.name)) {
       const f = a.asset.frames?.[a.frameIndex?.() ?? 0] ?? a.asset.frames?.[0];
-      if (f && (a.x + f.w) >= camX && a.x <= camX + vw / zoom && (a.y + f.h) >= camY && a.y <= camY + vh / zoom) water.push({ sprite: a.asset.name, sources: [f.x, f.y], sw: f.w, sh: f.h, x: Math.round((a.x - camX) * zoom), y: Math.round((a.y - camY) * zoom) });
+      if (f && (a.x + f.w) >= camX - over.left / zoom && a.x <= camX + (vw + over.right) / zoom && (a.y + f.h) >= camY - over.top / zoom && a.y <= camY + (vh + over.bottom) / zoom) water.push({ sprite: a.asset.name, sources: [f.x, f.y], sw: f.w, sh: f.h, x: Math.round((a.x - camX) * zoom), y: Math.round((a.y - camY) * zoom) });
       continue;
     }
     // Decals and small flying things leave no image; neither does whatever is far off the screen.
     if (a.type.shadow === 0) continue;
-    if (a.x + a.asset.width < camX - 8 || a.x > camX + vw / zoom + 8) continue;
+    if (a.x + a.asset.width < camX - 8 - over.left / zoom || a.x > camX + (vw + over.right) / zoom + 8) continue;
     bands.push(...reflectionBands(a, cfg, map, ts, clock, camX, camY, zoom));
   }
   if (water.length && bands.length) r.reflections(water, bands, zoom);

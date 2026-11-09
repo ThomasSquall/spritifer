@@ -54,6 +54,16 @@ describe('edge overlays on their own layer', () => {
     const rules = { rules: [{ tile: 0, kind: 'corners' as const, first: 100, group: [9] }] };
     const at = (rows: string[], x: number, y: number, r = new TileResolver(rules)) => r.resolve(layer(rows), rows[0].length, rows.length, x, y, [])[0];
 
+    it('picks one of the variant blocks by position, and leaves the plain terrain alone', () => {
+      const r = new TileResolver({ rules: [{ tile: 0, kind: 'corners', first: 100, group: [9], variants: 4 }] });
+      const cols = 40;
+      const tiles = new Array(cols * 3).fill(0).map((_, k) => (k >= cols * 2 ? 9 : 0));
+      const row = Array.from({ length: cols }, (_, x) => r.resolve({ tiles } as never, cols, 3, x, 1, [])[0]!);
+      expect(new Set(row).size).toBe(4);
+      for (const t of row) expect((t - 100) % 16).toBe(3);
+      expect(r.resolve({ tiles } as never, cols, 3, 5, 0, [])[0]).toBe(100);
+    });
+
     it('picks the transition tile from the corners touching the other terrain', () => {
       const map = ['000', '090', '000'];
       expect(at(map, 0, 0)).toBe(100 + 1); // diagonal: only SE

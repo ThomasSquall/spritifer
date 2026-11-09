@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HD_FIELDS, type HdFrame, applyHdBuffer, hdBlurAt, normalizeHd, normalizeHdCells, resolveHd } from '../src/core/game/hd.js';
+import { HD_FIELDS, type HdFrame, applyHdBuffer, hdBlurAt, normalizeHd, normalizeHdCells, normalizeHdJuts, resolveHd } from '../src/core/game/hd.js';
 import { normalizeAtmosphere, normalizeGame, normalizeScene } from '../src/core/game/types.js';
 
 const flat = { bloom: 0, haze: 0, halo: 0, exposure: 1, contrast: 1, saturation: 1, vignette: 0, blurFar: 0, blurNear: 0 };
@@ -50,6 +50,14 @@ describe('auto 2D-HD wall corrections', () => {
     expect(normalizeHdCells({})).toBeUndefined();
     expect(normalizeScene({ hdCells: { '3,4': 2 } }).hdCells).toEqual({ '3,4': 2 });
     expect(normalizeScene({}).hdCells).toBeUndefined();
+  });
+});
+
+describe('auto 2D-HD protrusions', () => {
+  it('keep what is valid and survive with the scene', () => {
+    expect(normalizeHdJuts([{ x: 10, w: 20, foot: 3, depth: 500 }, { x: 'a' }, null])).toEqual([{ x: 10, w: 20, foot: 3, depth: 64 }]);
+    expect(normalizeHdJuts([])).toBeUndefined();
+    expect(normalizeScene({ hdJuts: [{ x: 1, w: 2, foot: 3, depth: 4 }] }).hdJuts).toEqual([{ x: 1, w: 2, foot: 3, depth: 4 }]);
   });
 });
 

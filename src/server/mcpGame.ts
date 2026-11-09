@@ -37,6 +37,7 @@ import {
 } from '../core/game/types.js';
 import { exportAndroid } from './android.js';
 import { HD_CELL_MAX_ROWS, HD_FIELDS, normalizeHd } from '../core/game/hd.js';
+import { HD_SHAPES } from '../core/game/hd3d.js';
 import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePreview, renderVfxStrip, renderViewport } from './game.js';
 import { type VfxEdge, type VfxGraph, VFX_NAME_RE, VFX_REFERENCE, VFX_TEMPLATES, VFX_TEMPLATE_IDS, VFX_NODE_TYPES, checkVfx, normalizeVfx, vfxEdgePort, vfxHasCycle, vfxInputErrors } from '../core/game/vfxGraph.js';
 import { encodePng } from './png.js';
@@ -323,6 +324,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     group: z.array(z.number().int().min(0)).optional().describe('blob: painted tiles counted as the same terrain (default just tile). corners: required, the painted tiles of the other terrain'),
     alt: z.number().int().min(0).optional().describe('corners: first of the count alternatives for cells that touch no other terrain'),
     invert: z.boolean().optional().describe('corners: put the rule on the upper terrain with group = the lower one, so the border is drawn inside its cells. Use it for solid terrain (water, walls, dense forest), so walkable cells stay clear'),
+    variants: z.number().int().min(2).max(64).optional().describe('corners: this many blocks of 16 tiles follow each other from first, picked by position, so a long border does not repeat'),
     border: z.boolean().optional().describe('blob: outside the map counts as the same terrain (default true)'),
     frames: z.number().int().min(1).max(64).optional().describe('Animated: this many copies of the block follow each other (water, lava)'),
     fps: z.number().min(0.1).max(60).optional().describe('Animation speed (default 4)'),
@@ -387,6 +389,8 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       light: lightSchema.nullable().optional().describe('Light it gives off (seen in scenes with an atmosphere: darker ambient + glow). null removes'),
       shadow: z.number().min(0).nullable().optional().describe('Contact shadow width in px (0 = none, null = automatic: hitbox width). Flat things (rugs, doormats, flowerbeds) want 0'),
       hd_pose: z.enum(['flat', 'stand']).nullable().optional().describe('In the 2D-HD perspective: lies on the ground or stands up. null = automatic (flat when z is below 0)'),
+      hd_shape: z.enum(HD_SHAPES).nullable().optional().describe('In the 2D-HD perspective, the solid a standing sprite is wrapped on: round for columns and barrels, octagon, hexagon, square (a corner towards the camera). The width of each row gives its size. null = flat'),
+      hd_relief: z.number().int().min(0).max(40).optional().describe('In the 2D-HD perspective, pixels a sprite hung on a wall stands out from it: its outline is extruded (a relief, statues in a niche). 0 = none'),
       sway: z.object({ amount: z.number().min(0).max(24).describe('Pixels the top of the sprite travels; the foot stays still. Trees want 2-4'), speed: z.number().min(0.1).max(5).optional().describe('1 = normal'), react: z.number().min(0).max(24).optional().describe('Pixels a character walking through pushes the top aside, springing back after. Grass and ferns want 2-4') }).nullable().optional().describe('Wind: bends the sprite when drawn, without new art or frames, with gusts travelling across the map. The hitbox does not move. null = off'),
       extends: z.string().nullable().optional().describe('Make it a VARIANT of another object type (like a Unity prefab variant): it inherits sprite, hitbox, properties, tags, components (params can be overridden by listing the same component with only the changed params) and events, and stores only what differs. null = standalone again. Queries and events on the parent type (find("slime"), "collides with slime", count) include its variants.'),
       ambient_sound: z.object({ sound: z.string(), volume: z.number().min(0).max(1).optional().describe('Next to it, default 0.4'), radius: z.number().min(8).max(4096).optional().describe('Heard up to this many px from the middle of the screen, default 160') }).nullable().optional().describe('A sound looping around every instance (fire, fountain): louder the closer the camera is. null = off'),
@@ -452,6 +456,14 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
           const l = a.light === null ? undefined : normalizeLight(a.light);
           if (l) o.light = l;
           else delete o.light;
+        }
+        if (a.hd_shape !== undefined) {
+          if (a.hd_shape === null) delete o.hdShape;
+          else o.hdShape = a.hd_shape;
+        }
+        if (a.hd_relief !== undefined) {
+          if (a.hd_relief > 0) o.hdRelief = a.hd_relief;
+          else delete o.hdRelief;
         }
         if (a.hd_pose !== undefined) {
           if (a.hd_pose === null) delete o.hdPose;
@@ -596,7 +608,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     region: z.object({ x: z.number().int(), y: z.number().int(), w: z.number().int(), h: z.number().int() }).optional().describe('Tile region for the dump'),
   }, (a) => {
     const s = ws.loadScene(a.scene);
-    const lines = [describeScene(s), ...(s.hdCells ? [`2D-HD wall corrections (x,y: 0 flat, n front rows): ${JSON.stringify(s.hdCells)}`] : []), '', 'Instances:'];
+    const lines = [describeScene(s), ...(s.hdCells ? [`2D-HD wall corrections (x,y: 0 flat, n front rows): ${JSON.stringify(s.hdCells)}`] : []), ...(s.hdJuts ? [`2D-HD wall juts: ${JSON.stringify(s.hdJuts)}`] : []), '', 'Instances:'];
     for (const i of s.instances) lines.push(`- ${i.id}: ${i.name ? `"${i.name}" (${i.object})` : i.object}${i.sprite ? ` sprite ${i.sprite}` : ''} at ${i.x},${i.y} (tile ${Math.floor(i.x / s.tileSize)},${Math.floor(i.y / s.tileSize)})${i.flipX ? ' flipped' : ''}${i.props ? ' ' + JSON.stringify(i.props) : ''}${i.components ? ' components ' + JSON.stringify(i.components) : ''}${i.activeIf ? ` active if (${i.activeIf})` : ''}`);
     if (a.layer) {
       const l = s.layers.find((x) => x.name === a.layer);
@@ -628,6 +640,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       backgrounds: z.array(z.object({ sprite: z.string(), parallax: z.number().optional(), repeat_x: z.boolean().optional(), y: z.number().optional() })).optional().describe('Parallax background images, back to front'),
       variables: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       y_sort: z.boolean().optional().describe('Draw instances lower on screen in front (top-down / RPG depth)'),
+      hd_juts: z.array(z.object({ x: z.number().int().min(0).describe('Left edge in map pixels'), w: z.number().int().min(1).describe('Width in pixels'), foot: z.number().int().min(0).describe('Tile row of the foot of the wall front'), depth: z.number().int().min(1).max(64).describe('Pixels it stands forward') })).nullable().optional().describe('Stretches of wall fronts that stand forward in the 2D-HD view: piers, buttresses (replaces the list; null removes it)'),
       hd_walls: z.array(z.object({ x: z.number().int().min(0), y: z.number().int().min(0), w: z.number().int().min(1).optional(), h: z.number().int().min(1).optional(), mode: z.enum(['auto', 'flat', 'wall']), rows: z.number().int().min(1).max(HD_CELL_MAX_ROWS).optional().describe('With mode wall: height of the front in tiles (default 3). The whole column of wall cells takes it') })).optional().describe('Corrections to the automatic walls of the 2D-HD view, cell by cell or by rectangle, merged with the ones already there. auto removes a correction'),
       persistent: z.boolean().optional().describe('Remember instances when leaving (positions, properties, destroyed ones), e.g. an RPG town you come back to after a battle'),
       components: z.array(stepSchema).optional().describe('Scene components (replace the list): [{ type: "script", name: "Battle", foeHp: 12 }] — managers, level logic, HUD'),
@@ -640,6 +653,10 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         if (a.persistent !== undefined) {
           if (a.persistent) s.persistent = true;
           else delete s.persistent;
+        }
+        if (a.hd_juts !== undefined) {
+          if (a.hd_juts?.length) s.hdJuts = a.hd_juts;
+          else delete s.hdJuts;
         }
         for (const c of a.hd_walls ?? []) {
           const cells = { ...(s.hdCells ?? {}) };

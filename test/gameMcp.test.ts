@@ -187,6 +187,11 @@ describe('auto 2D-HD through MCP', () => {
     expect(textOf(await call('get_scene', { scene }))).toContain('2D-HD wall corrections');
     await call('update_scene', { scene, hd_walls: [{ x: 0, y: 0, w: 3, h: 2, mode: 'auto' }] });
     expect(ws.loadScene(scene).hdCells).toBeUndefined();
+    await call('update_scene', { scene, hd_juts: [{ x: 8, w: 12, foot: 2, depth: 6 }] });
+    expect(ws.loadScene(scene).hdJuts).toEqual([{ x: 8, w: 12, foot: 2, depth: 6 }]);
+    expect(textOf(await call('get_scene', { scene }))).toContain('2D-HD wall juts');
+    await call('update_scene', { scene, hd_juts: null });
+    expect(ws.loadScene(scene).hdJuts).toBeUndefined();
     await call('set_game', { hd: null });
     expect(ws.loadGame().hd).toBeUndefined();
   });

@@ -198,6 +198,7 @@ export async function openTileRules(asset: LoadedAsset): Promise<void> {
               : r.kind === 'random'
               ? numField('Alternatives', () => r.count, (v) => { r.count = Math.max(1, Math.round(v ?? 1)); }, { min: '1' })
               : numField('Pieces per side', () => r.size ?? 1, (v) => { if (!v || v <= 1) delete r.size; else r.size = Math.min(16, Math.round(v)); }, { min: '1', max: '16' }),
+            r.kind === 'corners' ? numField('Border variants', () => r.variants, (v) => { if (!v || v <= 1) delete r.variants; else r.variants = Math.min(64, Math.round(v)); }, { min: '1', max: '64', placeholder: '1' }) : null,
             numField('Animation frames', () => r.frames, (v) => { if (!v || v <= 1) delete r.frames; else r.frames = Math.min(64, Math.round(v)); }, { min: '1', max: '64', placeholder: '1' }),
             numField('Frames / s', () => r.fps, (v) => { if (!v || v <= 0) delete r.fps; else r.fps = Math.min(60, v); }, { min: '0.1', step: '0.5', placeholder: '4' }),
             r.kind === 'corners' && r.count ? h('label', { title: 'First of the alternative tiles drawn where no corner touches the other terrain' }, 'First alternative', tileInput(td, r.alt ?? 0, (t) => set(() => (r.alt = t)))) : null,

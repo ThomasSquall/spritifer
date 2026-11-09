@@ -1695,6 +1695,7 @@ export class ScriptHost {
       hitstop: (seconds = 0.08) => w.hitstop(Number(seconds)),
       ambience: (list: string | (string | { sound: string; volume?: number })[], fade = 1.5) => w.setAmbience(Array.isArray(list) ? list : list ? [String(list)] : [], Number(fade)),
       setVolume: (channel: 'music' | 'sfx', value: number) => w.setVolume(channel, value),
+      interactTarget: () => this.handle(w.interactTarget()) ?? null,
       setDialogSpeed: (speed: number) => { host.dialogSpeed = Math.max(0.1, Number(speed) || 1); },
       setDialogSkip: (on = true) => { host.dialogSkip = !!on; },
       log: (...args: unknown[]) => w.log(args.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')),

@@ -28,6 +28,8 @@ export interface TileRule {
   group?: number[];
   /** corners: first of the `count` alternatives drawn where no corner touches the other terrain. */
   alt?: number;
+  /** corners: this many blocks of 16 follow each other, picked by position, so a long border never shows the same bumps twice. */
+  variants?: number;
   /** corners: the rule sits on the upper terrain and `group` lists the lower one, so the border stays inside this terrain's cells (water, walls). */
   invert?: boolean;
   /** blob: outside the map counts as the same terrain (default true). */
@@ -140,7 +142,7 @@ export class TileResolver {
         const corner = cornerIndex(this.mask(layer, cols, rows, tx, ty, (x) => r.groupSet.has(x), false));
         if (r.invert) out.push(r.first + frame(r, CORNER_TILES) + CORNER_TILES - 1 - corner);
         else if (!corner && r.alt !== undefined && r.count) out.push(r.alt + Math.floor(cellHash(tx, ty, t) * r.count));
-        else out.push(r.first + frame(r, CORNER_TILES) + corner);
+        else out.push(r.first + frame(r, CORNER_TILES) + (corner && r.variants ? Math.floor(cellHash(tx, ty, t + 1) * r.variants) * CORNER_TILES : 0) + corner);
       }
       else {
         const shape = BLOB_INDEX.get(reduceBlob(this.mask(layer, cols, rows, tx, ty, (x) => r.groupSet.has(x), r.border !== false))) ?? BLOB_FULL;
@@ -182,6 +184,8 @@ export function normalizeTilesetRules(v: unknown): TilesetRules | undefined {
     const alt = int(R.alt);
     if (kind === 'corners' && alt !== undefined) rule.alt = alt;
     if (kind === 'corners' && R.invert === true) rule.invert = true;
+    const variants = int(R.variants);
+    if (kind === 'corners' && variants && variants > 1) rule.variants = Math.min(64, variants);
     if (R.border === false) rule.border = false;
     const frames = int(R.frames);
     if (frames && frames > 1) rule.frames = Math.min(64, frames);

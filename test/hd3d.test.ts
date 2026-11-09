@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cameraMatrix, findWalls, makeCamera, overscanOf, projectWorld, worldPoint } from '../src/core/game/hd3d.js';
+import { cameraMatrix, findWalls, makeCamera, overscanOf, projectWorld, shapeSurface, spriteProfile, worldPoint } from '../src/core/game/hd3d.js';
 import type { TileResolver } from '../src/core/game/tilerules.js';
 import type { TileLayer } from '../src/core/game/types.js';
 
@@ -53,6 +53,33 @@ describe('2D-HD camera', () => {
     expect(o.top).toBeGreaterThan(0);
     expect(o.bottom).toBe(0);
     expect(o.left).toBeGreaterThan(0);
+  });
+});
+
+describe('2D-HD solids', () => {
+  it('bulges towards the camera in the middle and turns away at the edges', () => {
+    expect(shapeSurface('round', 0)).toEqual({ forward: 1, side: 0 });
+    expect(shapeSurface('round', 1).forward).toBeCloseTo(0);
+    expect(shapeSurface('round', -0.6).side).toBeCloseTo(-0.6);
+  });
+
+  it('has flat faces with sharp edges when it has corners', () => {
+    expect(shapeSurface('octagon', 0.2).forward).toBeCloseTo(1);
+    expect(shapeSurface('octagon', 0.2).side).toBeCloseTo(0);
+    expect(shapeSurface('octagon', 0.8).side).toBeGreaterThan(0.6);
+    expect(shapeSurface('square', 0.5).forward).toBeCloseTo(0.5);
+    expect(shapeSurface('square', 0.5).side).toBeCloseTo(shapeSurface('square', 0.9).side);
+    expect(shapeSurface('square', -0.5).side).toBeLessThan(0);
+  });
+
+  it('reads the radius of every row from the silhouette, around one axis', () => {
+    // A 6-wide capital over a 2-wide shaft, in a frame placed at 1,0 of a sheet 8 wide.
+    const rows = ['.######.', '...##...', '...##...', '........'];
+    const alpha = Uint8Array.from(rows.join('').split('').map((c) => (c === '#' ? 1 : 0)));
+    const p = spriteProfile(alpha, 8, { x: 1, y: 0, w: 6, h: 4 });
+    expect(p.axis).toBe(3);
+    expect(Array.from(p.radius)).toEqual([3, 1, 1, 0]);
+    expect(p.largest).toBe(3);
   });
 });
 
@@ -135,6 +162,37 @@ describe('2D-HD walls', () => {
 
   it('leaves sides undressed when the map has no front to borrow', () => {
     expect(findWalls(map(['...', '###']), 3, 2, resolver, 3)[3]).not.toHaveProperty('sides');
+  });
+
+  it('keeps flat the cells where water is laid over the map as instances', () => {
+    const water = new Uint8Array(9);
+    water[3] = 1;
+    const cells = findWalls(map(['###', '###', '...']), 3, 3, resolver, 1, undefined, water);
+    expect(cells[3]).toBeNull();
+    expect(cells[4]).toEqual({ face: 0 });
+  });
+
+  it('hands a jut to every front cell it crosses, across tiles', () => {
+    const cells = findWalls(map(['###', '###', '...']), 3, 3, resolver, 2, undefined, undefined, [{ x: 24, w: 16, foot: 1, depth: 8 }], 32);
+    expect(cells[1 * 3 + 0]).toMatchObject({ face: 0, juts: [{ from: 0.75, to: 1, depth: 8, starts: true, ends: false }] });
+    expect(cells[1 * 3 + 1]).toMatchObject({ face: 0, juts: [{ from: 0, to: 0.25, depth: 8, starts: false, ends: true }] });
+    // The whole height of the front, and the highest cell knows it is.
+    expect(cells[0]).toMatchObject({ face: 1, top: true });
+    expect(cells[1 * 3 + 2]).toEqual({ face: 0 });
+  });
+
+  it('carries a jut of the borrowed front onto the side of a wall', () => {
+    const wide = ['####', '####', '####', '####', '....'];
+    const cells = findWalls(map(wide), 4, 5, resolver, 2, undefined, undefined, [{ x: 40, w: 16, foot: 3, depth: 8 }], 32);
+    // Column 0's top at row 0 borrows column 1, which has the jut.
+    expect(cells[0]).toMatchObject({ cap: 2, left: true, sides: [3 * 4 + 1, 2 * 4 + 1], sideJuts: [{ depth: 8 }] });
+    // The top at row 1 borrows column 2, which hasn't.
+    expect(cells[1 * 4]).not.toHaveProperty('sideJuts');
+  });
+
+  it('ignores a jut that is not on a front', () => {
+    const cells = findWalls(map(['###', '...', '...']), 3, 3, resolver, 1, undefined, undefined, [{ x: 0, w: 32, foot: 2, depth: 8 }], 32);
+    expect(cells.every((c) => !c || !('juts' in c))).toBe(true);
   });
 
   it('does nothing with no rows asked for', () => {

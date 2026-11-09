@@ -235,7 +235,9 @@ export function flipNormalSheet(sheet: Uint8ClampedArray): Uint8ClampedArray {
 export function reliefKind(asset: Pick<SpriteAsset, 'width' | 'height' | 'grid' | 'relief'>, view: { width: number; height: number }): 'shape' | 'surface' | null {
   if (asset.relief?.off) return null;
   if (asset.grid) return 'surface';
-  return asset.width < view.width * 0.9 && asset.height < view.height * 0.9 ? 'shape' : null;
+  // A backdrop fills the screen. Something tall but narrow, like a tower, is an object however high it goes.
+  const backdrop = asset.width >= view.width * 0.9 || (asset.height >= view.height * 0.9 && asset.width >= view.width * 0.5);
+  return backdrop ? null : 'shape';
 }
 
 export interface ResolvedRelief {

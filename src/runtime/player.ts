@@ -18,7 +18,7 @@ export interface PlayerOptions {
   autofocus?: boolean;
   /** false: start this run without music. Otherwise the last choice made in this browser applies. */
   music?: boolean;
-  /** Small on-screen music button (off inside the editor, whose Play bar has its own). */
+  /** Small on-screen music button and volume slider (off inside the editor, whose Play bar has its own). */
   musicButton?: boolean;
   /** Called with the music state at start and whenever it changes. */
   onMusicChange?: (on: boolean) => void;
@@ -90,11 +90,14 @@ const STYLE = `
 .spf-touch button.on{background:#ffffff66}
 .spf-btns button{width:64px;height:64px;border-radius:50%}
 .spf-loading{color:#888;font:14px system-ui}
-.spf-music{position:absolute;top:8px;right:8px;width:30px;height:30px;padding:0;border:1px solid #ffffff55;border-radius:50%;background:#0008;color:#fff;font:16px system-ui;cursor:pointer;opacity:0;transition:opacity .15s}
-.spf-root:hover .spf-music,.spf-music:focus-visible{opacity:.85}
+.spf-controls{position:absolute;top:8px;right:8px;display:flex;align-items:center;gap:8px;pointer-events:none}
+.spf-controls>*{pointer-events:auto}
+.spf-music{width:30px;height:30px;padding:0;border:1px solid #ffffff55;border-radius:50%;background:#0008;color:#fff;font:16px system-ui;cursor:pointer;opacity:0;transition:opacity .15s}
+.spf-volume{width:80px;margin:0;accent-color:#fff;cursor:pointer;opacity:0;transition:opacity .15s}
+.spf-root:hover .spf-music,.spf-music:focus-visible,.spf-root:hover .spf-volume,.spf-volume:focus-visible{opacity:.85}
 .spf-music.off{text-decoration:line-through;color:#ffffff99}
-@media (hover:none){.spf-music{opacity:.5}}
-.spf-fps-btn{position:absolute;top:8px;right:46px;height:30px;padding:0 9px;border:1px solid #ffffff55;border-radius:15px;background:#0008;color:#fff;font:600 11px system-ui;cursor:pointer;opacity:.7}
+@media (hover:none){.spf-music,.spf-volume{opacity:.5}}
+.spf-fps-btn{height:30px;padding:0 9px;border:1px solid #ffffff55;border-radius:15px;background:#0008;color:#fff;font:600 11px system-ui;cursor:pointer;opacity:.7}
 .spf-fps-btn:hover,.spf-fps-btn:focus-visible{opacity:1}
 .spf-fps-btn.on{background:#3b5dc9;border-color:#3b5dc9;opacity:1}
 .spf-fps{position:absolute;top:44px;right:8px;padding:6px 9px;border-radius:6px;background:#000c;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre;pointer-events:none}
@@ -176,7 +179,34 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     storage.set(MUSIC_PREF, on ? 'on' : 'off');
     showMusic();
   };
+  const setMusicVolume = (volume: number) => {
+    sound.musicVolume = volume;
+    storage.set(MUSIC_VOLUME_PREF, String(sound.musicVolume));
+  };
+  const savedVolume = storage.get(MUSIC_VOLUME_PREF);
+  sound.musicVolume = savedVolume === null ? 1 : Number(savedVolume) || 0;
+  opts.onMusicVolume?.(sound.musicVolume);
+  const controls = document.createElement('div');
+  controls.className = 'spf-controls';
+  root.append(controls);
   if (opts.musicButton !== false && Object.keys(bundle.audio ?? {}).length) {
+    const volumeSlider = document.createElement('input');
+    volumeSlider.type = 'range';
+    volumeSlider.className = 'spf-volume';
+    volumeSlider.min = '0';
+    volumeSlider.max = '100';
+    volumeSlider.value = String(Math.round(sound.musicVolume * 100));
+    volumeSlider.title = 'Music volume';
+    volumeSlider.setAttribute('aria-label', 'Music volume');
+    volumeSlider.addEventListener('input', () => {
+      sound.unlock();
+      const volume = Number(volumeSlider.value) / 100;
+      setMusicVolume(volume);
+      // Moving the slider while the music is off would otherwise seem to do nothing.
+      if (!musicOn && volume > 0) setMusic(true);
+    });
+    volumeSlider.addEventListener('change', () => canvas.focus());
+    controls.append(volumeSlider);
     musicBtn = document.createElement('button');
     musicBtn.className = 'spf-music';
     musicBtn.textContent = '♪';
@@ -186,12 +216,9 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       setMusic(!musicOn);
       canvas.focus();
     });
-    root.append(musicBtn);
+    controls.append(musicBtn);
   }
   showMusic();
-  const savedVolume = storage.get(MUSIC_VOLUME_PREF);
-  sound.musicVolume = savedVolume === null ? 1 : Number(savedVolume) || 0;
-  opts.onMusicVolume?.(sound.musicVolume);
 
   // ---------------------------------------------------------------- frame-rate readout
   let fpsOn = storage.get(FPS_PREF) === 'on';
@@ -246,7 +273,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       setFps(!fpsOn);
       canvas.focus();
     });
-    root.append(fpsBtn);
+    controls.prepend(fpsBtn);
   }
   showFps();
 
@@ -505,8 +532,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       return sound.musicVolume;
     },
     set musicVolume(volume: number) {
-      sound.musicVolume = volume;
-      storage.set(MUSIC_VOLUME_PREF, String(sound.musicVolume));
+      setMusicVolume(volume);
     },
     get fps() {
       return fpsOn;

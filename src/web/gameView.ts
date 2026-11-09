@@ -201,7 +201,7 @@ export function renderGameSettings(root: HTMLElement): () => void {
             h('tr', {}, h('td', {}, h('kbd', {}, 'Space'), ' ', h('kbd', {}, 'Z'), ' ', h('kbd', {}, 'J')), h('td', {}, 'action (jump)')),
             h('tr', {}, h('td', {}, h('kbd', {}, 'X'), ' ', h('kbd', {}, 'K')), h('td', {}, 'action2')),
             h('tr', {}, h('td', {}, h('kbd', {}, 'F2')), h('td', {}, 'show hitboxes')),
-            h('tr', {}, h('td', {}, h('kbd', {}, 'F3')), h('td', {}, 'music on/off')),
+            h('tr', {}, h('td', {}, h('kbd', {}, 'F3')), h('td', {}, 'sound on/off')),
           ),
         ),
       ),

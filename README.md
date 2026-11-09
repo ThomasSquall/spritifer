@@ -270,7 +270,7 @@ Con **Remember instances when leaving** la scena ricorda posizioni, proprietà e
 ### Play ed export per il web
 
 - **Play** apre il gioco in sovrimpressione (da tutta l'avventura o dalla scena corrente) con la console dei log ed errori, riavvio e visualizzazione delle hitbox (F2).
-- **Musica**: si toglie e si rimette a gioco avviato con il pulsante *Music* nella barra di Play, con F3 o con il pulsante ♪ che compare passando il mouse sul gioco; la scelta resta per le partite successive. Per avviare senza musica aggiungi `?nomusic` all'indirizzo del gioco (vale per quella partita; gli effetti sonori restano).
+- **Suono**: musica, effetti e ambiente si tolgono e si rimettono a gioco avviato con il pulsante *Sound* nella barra di Play, con F3 o con il pulsante ♪ che compare passando il mouse sul gioco; lo slider accanto ne regola il volume e la scelta resta per le partite successive. Per avviare senza suono aggiungi `?nomusic` all'indirizzo del gioco (vale per quella partita).
 - **Export** scrive `<workspace>/export/web/<titolo>/index.html`: **un solo file** con motore, scene e immagini incorporate. Funziona offline, su qualsiasi hosting statico e si carica su itch.io come gioco HTML5. Lo stesso file si scarica dal pulsante *Download HTML*.
 - Il runtime (~17 KB gzip) scala il gioco a pixel interi quando possibile, supporta tastiera (frecce/WASD, Spazio/Z/J, X/K, Invio), mouse, **controlli touch** su telefono e **gamepad**.
 

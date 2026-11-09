@@ -131,19 +131,19 @@ export async function openPlay(scene?: string): Promise<void> {
   const hotBtn = h('button', { class: `small${hotReload ? ' on' : ''}`, title: 'Apply script changes to the running game without restarting (components keep their state)', onclick: () => { hotReload = !hotReload; hotBtn.classList.toggle('on', hotReload); } }, 'Hot reload');
   const hitBtn = h('button', { class: 'small', title: 'Show collision boxes (F2 in game)', onclick: () => { debug = !debug; hitBtn.classList.toggle('on', debug); reload(); } }, 'Hitboxes');
   let musicOn = true;
-  const musicBtn = h('button', { class: 'small on', title: 'Music on or off while the game runs (F3 in game); remembered for the next Play', onclick: () => { sendToGame({ type: 'music', on: !musicOn }); frame.focus(); } }, 'Music');
+  const musicBtn = h('button', { class: 'small on', title: 'Sound on or off while the game runs: music and effects (F3 in game); remembered for the next Play', onclick: () => { sendToGame({ type: 'music', on: !musicOn }); frame.focus(); } }, 'Sound');
   const volumeSlider = h('input', {
-    type: 'range', min: '0', max: '100', value: '100', 'aria-label': 'Music volume',
+    type: 'range', min: '0', max: '100', value: '100', 'aria-label': 'Volume',
     oninput: () => {
       const volume = Number(volumeSlider.value) / 100;
       sendToGame({ type: 'musicVolume', volume });
       volumeSlider.title = volumeTitle(volume);
-      // Moving the slider while the music is off would otherwise seem to do nothing.
+      // Moving the slider while the sound is off would otherwise seem to do nothing.
       if (!musicOn && volume > 0) sendToGame({ type: 'music', on: true });
     },
     onchange: () => frame.focus(),
   });
-  const volumeTitle = (volume: number) => `Music volume: ${Math.round(volume * 100)}%; remembered for the next Play`;
+  const volumeTitle = (volume: number) => `Volume of music and effects: ${Math.round(volume * 100)}%; remembered for the next Play`;
   const showVolume = (volume: number) => {
     volumeSlider.value = String(Math.round(volume * 100));
     volumeSlider.title = volumeTitle(volume);

@@ -49,17 +49,16 @@ interface AmbienceLoop {
 export class SoundBoard {
   private ctx: AudioContext | null = null;
   private noise: AudioBuffer | null = null;
-  muted = false;
   /** Audio files by name (data or http URLs). */
   private files: Record<string, string> = {};
   private decoded = new Map<string, Promise<AudioBuffer | null>>();
   private sfxGain: GainNode | null = null;
   private musicGain: GainNode | null = null;
   private volumes = { music: 1, sfx: 1 };
-  /** Music switched off: the track keeps running silently, so switching back resumes it. */
-  private musicOff = false;
-  /** The player's own music volume (0..1), on top of the volume the game sets for itself. */
-  private playerMusicVolume = 1;
+  /** Sound switched off: music and loops keep running silently, so switching back resumes them. */
+  private soundOff = false;
+  /** The player's own volume (0..1) for music and effects, on top of the volumes the game sets for itself. */
+  private playerVolume = 1;
   private track: { name: string; src: AudioBufferSourceNode | null; gain: GainNode | null; volume: number } | null = null;
   /** Music asked for before audio was unlocked (first key or click): starts then. */
   private pendingMusic: MusicCmd | null = null;
@@ -67,31 +66,33 @@ export class SoundBoard {
   private loops = new Map<string, AmbienceLoop>();
   private pendingAmbience: MusicCmd | null = null;
 
-  get musicMuted(): boolean {
-    return this.musicOff;
+  get muted(): boolean {
+    return this.soundOff;
   }
 
-  set musicMuted(off: boolean) {
-    this.musicOff = off;
-    this.applyMusicLevel();
+  set muted(off: boolean) {
+    this.soundOff = off;
+    this.applyLevels();
   }
 
-  get musicVolume(): number {
-    return this.playerMusicVolume;
+  get volume(): number {
+    return this.playerVolume;
   }
 
-  set musicVolume(volume: number) {
-    this.playerMusicVolume = Math.max(0, Math.min(1, volume));
-    this.applyMusicLevel();
+  set volume(volume: number) {
+    this.playerVolume = Math.max(0, Math.min(1, volume));
+    this.applyLevels();
   }
 
-  private applyMusicLevel(): void {
-    if (this.musicGain && this.ctx) this.musicGain.gain.setTargetAtTime(this.musicLevel(), this.ctx.currentTime, 0.05);
+  private applyLevels(): void {
+    if (!this.ctx) return;
+    this.sfxGain?.gain.setTargetAtTime(this.level('sfx'), this.ctx.currentTime, 0.05);
+    this.musicGain?.gain.setTargetAtTime(this.level('music'), this.ctx.currentTime, 0.05);
   }
 
   /** Squared because hearing is not linear: half way on the slider should sound about half as loud. */
-  private musicLevel(): number {
-    return this.musicOff ? 0 : this.volumes.music * this.playerMusicVolume ** 2;
+  private level(channel: 'music' | 'sfx'): number {
+    return this.soundOff ? 0 : this.volumes[channel] * this.playerVolume ** 2;
   }
 
   setFiles(files: Record<string, string> | undefined): void {
@@ -118,10 +119,10 @@ export class SoundBoard {
     const ctx = this.ctx!;
     if (!this.sfxGain) {
       this.sfxGain = ctx.createGain();
-      this.sfxGain.gain.value = this.volumes.sfx;
+      this.sfxGain.gain.value = this.level('sfx');
       this.sfxGain.connect(ctx.destination);
       this.musicGain = ctx.createGain();
-      this.musicGain.gain.value = this.musicLevel();
+      this.musicGain.gain.value = this.level('music');
       this.musicGain.connect(ctx.destination);
     }
     return channel === 'music' ? this.musicGain! : this.sfxGain;
@@ -130,10 +131,8 @@ export class SoundBoard {
   /** Music commands from the engine. */
   music(cmd: MusicCmd): void {
     if (cmd.type === 'volume') {
-      const v = Math.max(0, Math.min(1, cmd.value ?? 1));
-      this.volumes[cmd.channel === 'music' ? 'music' : 'sfx'] = v;
-      const g = cmd.channel === 'music' ? this.musicGain : this.sfxGain;
-      if (g && this.ctx) g.gain.setTargetAtTime(cmd.channel === 'music' ? this.musicLevel() : v, this.ctx.currentTime, 0.05);
+      this.volumes[cmd.channel === 'music' ? 'music' : 'sfx'] = Math.max(0, Math.min(1, cmd.value ?? 1));
+      this.applyLevels();
       return;
     }
     if (cmd.type === 'ambience') {

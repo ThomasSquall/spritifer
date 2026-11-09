@@ -16,13 +16,13 @@ export interface PlayerOptions {
   debug?: boolean;
   /** Focus the canvas so keys work immediately. */
   autofocus?: boolean;
-  /** false: start this run without music. Otherwise the last choice made in this browser applies. */
+  /** false: start this run without sound. Otherwise the last choice made in this browser applies. */
   music?: boolean;
-  /** Small on-screen music button and volume slider (off inside the editor, whose Play bar has its own). */
+  /** Small on-screen sound button and volume slider (off inside the editor, whose Play bar has its own). */
   musicButton?: boolean;
-  /** Called with the music state at start and whenever it changes. */
+  /** Called with the sound state (music and effects) at start and whenever it changes. */
   onMusicChange?: (on: boolean) => void;
-  /** Called once at start with the music volume (0..1) remembered in this browser. */
+  /** Called once at start with the volume (0..1) remembered in this browser. */
   onMusicVolume?: (volume: number) => void;
   /** Small on-screen button for the frame-rate readout (for playing from the editor's server, not in exported games). */
   fpsButton?: boolean;
@@ -38,9 +38,9 @@ export interface Player {
   paused: boolean;
   /** Advances one frame while paused. */
   stepOnce(): void;
-  /** Music on or off while the game runs (effects are not affected). */
+  /** All game sound on or off while the game runs: music, effects and ambience. */
   music: boolean;
-  /** Music volume, 0..1; remembered in this browser. */
+  /** Volume of music, effects and ambience, 0..1; remembered in this browser. */
   musicVolume: number;
   /** Frame-rate readout on or off (F4). */
   fps: boolean;
@@ -163,29 +163,29 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
 
   // ---------------------------------------------------------------- music switch
   let musicOn = opts.music ?? storage.get(MUSIC_PREF) !== 'off';
-  sound.musicMuted = !musicOn;
+  sound.muted = !musicOn;
   let musicBtn: HTMLButtonElement | null = null;
   const showMusic = () => {
     if (musicBtn) {
       musicBtn.classList.toggle('off', !musicOn);
-      musicBtn.title = `Music ${musicOn ? 'on' : 'off'} (F3)`;
+      musicBtn.title = `Sound ${musicOn ? 'on' : 'off'} (F3)`;
       musicBtn.setAttribute('aria-pressed', String(musicOn));
     }
     opts.onMusicChange?.(musicOn);
   };
   const setMusic = (on: boolean) => {
     musicOn = on;
-    sound.musicMuted = !on;
+    sound.muted = !on;
     storage.set(MUSIC_PREF, on ? 'on' : 'off');
     showMusic();
   };
   const setMusicVolume = (volume: number) => {
-    sound.musicVolume = volume;
-    storage.set(MUSIC_VOLUME_PREF, String(sound.musicVolume));
+    sound.volume = volume;
+    storage.set(MUSIC_VOLUME_PREF, String(sound.volume));
   };
   const savedVolume = storage.get(MUSIC_VOLUME_PREF);
-  sound.musicVolume = savedVolume === null ? 1 : Number(savedVolume) || 0;
-  opts.onMusicVolume?.(sound.musicVolume);
+  sound.volume = savedVolume === null ? 1 : Number(savedVolume) || 0;
+  opts.onMusicVolume?.(sound.volume);
   const controls = document.createElement('div');
   controls.className = 'spf-controls';
   root.append(controls);
@@ -195,14 +195,14 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     volumeSlider.className = 'spf-volume';
     volumeSlider.min = '0';
     volumeSlider.max = '100';
-    volumeSlider.value = String(Math.round(sound.musicVolume * 100));
-    volumeSlider.title = 'Music volume';
-    volumeSlider.setAttribute('aria-label', 'Music volume');
+    volumeSlider.value = String(Math.round(sound.volume * 100));
+    volumeSlider.title = 'Volume';
+    volumeSlider.setAttribute('aria-label', 'Volume');
     volumeSlider.addEventListener('input', () => {
       sound.unlock();
       const volume = Number(volumeSlider.value) / 100;
       setMusicVolume(volume);
-      // Moving the slider while the music is off would otherwise seem to do nothing.
+      // Moving the slider while the sound is off would otherwise seem to do nothing.
       if (!musicOn && volume > 0) setMusic(true);
     });
     volumeSlider.addEventListener('change', () => canvas.focus());
@@ -210,7 +210,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     musicBtn = document.createElement('button');
     musicBtn.className = 'spf-music';
     musicBtn.textContent = '♪';
-    musicBtn.setAttribute('aria-label', 'Music');
+    musicBtn.setAttribute('aria-label', 'Sound');
     musicBtn.addEventListener('click', () => {
       sound.unlock();
       setMusic(!musicOn);
@@ -529,7 +529,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       setMusic(on);
     },
     get musicVolume() {
-      return sound.musicVolume;
+      return sound.volume;
     },
     set musicVolume(volume: number) {
       setMusicVolume(volume);

@@ -28,6 +28,8 @@ import { normalizeTest } from '../core/game/gameTests.js';
 import { type EditorContext, appendPlayLog, listNotes, saveEditorContext, setNote } from './context.js';
 import { type HistoryKind, undoChange } from './history.js';
 import { loadSources, mapReport, runTests } from './projectTools.js';
+import { PAINTED, buildBlueprint, currentBlueprint, draftFromScene } from './blueprints.js';
+import { renderPlan } from './planView.js';
 import { enableGit, gitCommit, gitCommitFiles, gitDiff, gitFileAt, gitLog, gitPull, gitPush, gitRestore, gitSetRemote, gitStatus } from './projectGit.js';
 
 const WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
@@ -784,6 +786,23 @@ async function handleScenes(ws: Workspace, req: http.IncomingMessage, res: http.
     throw new HttpError(405, 'Method not allowed');
   }
   const sub = parts[1];
+  if (sub === 'blueprint') {
+    const answer = (r: ReturnType<typeof buildBlueprint>) => {
+      const scene = ws.loadScene(name);
+      return sendJson(res, 200, { problems: r.problems, wrote: r.wrote, absorbed: r.absorbed, blueprint: r.blueprint, plan: renderPlan({ ...scene, blueprint: r.blueprint }, new Map(), r.blueprint, r.problems, 18, ws.loadGame().tilesets?.[scene.tileset ?? '']).toString('base64') });
+    };
+    if (method === 'GET') {
+      const now = currentBlueprint(ws, name);
+      if (!now) return sendJson(res, 200, { blueprint: null, kits: [...Object.keys(ws.loadGame().mapKits ?? {}), PAINTED] });
+      return answer(buildBlueprint(ws, name, now.blueprint, { dryRun: true, absorbed: now.absorbed }));
+    }
+    if (method === 'POST') {
+      const body = (await readJson(req, 16 * 1024 * 1024)) as { blueprint?: unknown; draftKit?: string; dryRun?: boolean; force?: boolean };
+      const blueprint = body.draftKit ? draftFromScene(ws, name, body.draftKit) : body.blueprint;
+      return answer(buildBlueprint(ws, name, blueprint, { dryRun: body.dryRun || !!body.draftKit, force: body.force, by: 'editor' }));
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
   if (!sub) {
     if (method === 'GET') return sendJson(res, 200, ws.loadScene(name));
     if (method === 'PUT') {

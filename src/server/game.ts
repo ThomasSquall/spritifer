@@ -10,7 +10,8 @@ import { scaleBitmap } from '../core/draw.js';
 import { BUILTIN_FONT, type PixelFont, fontPixelSize, rasterText } from '../core/game/font.js';
 import { type Renderer, World, renderWorld } from '../core/game/engine.js';
 import type { ScreenLight } from '../core/game/atmosphere.js';
-import { type HdFrame, applyHdBuffer } from '../core/game/hd.js';
+import { type HdFrame, applyHdBuffer, resolveHd } from '../core/game/hd.js';
+import { SoftHdRenderer } from './hdSoftware.js';
 import { type ResolvedRelief, buildNormalSheet, frameTilt, normalSheetFor, reliefKind, resolveRelief, shadeRelief } from '../core/game/relief.js';
 import { type Problem, validateGame } from '../core/game/catalog.js';
 import { type GameBundle, type GameProject, type Scene, type SpriteAsset, type Value, gameSlug, interfaceSize } from '../core/game/types.js';
@@ -572,9 +573,37 @@ export function renderReliefPreview(built: { sheet: Bitmap; asset: SpriteAsset }
 
 export function renderViewport(world: World, sheets: Map<string, Bitmap>, scale = 1, hd = false): Buffer {
   const r = new BitmapRenderer(world.game.width, world.game.height, sheets).useRelief(world.bundle.sprites, interfaceSize(world.game));
-  if (hd) r.endWorld = (frame) => { if (frame) applyHdBuffer(r.out.data, r.out.width, r.out.height, frame); };
-  renderWorld(world, r);
+  const resolved = hd ? resolveHd(world.game.hd, world.scene.atmosphere?.hd, world.scene.atmosphere?.ambient) : null;
+  renderWorld(world, resolved ? new SoftHdRenderer(r, sheets, resolved) : r);
   return encodePng(scale > 1 ? scaleBitmap(r.out, scale) : r.out);
+}
+
+export const encodeBitmap = (b: Bitmap): Buffer => encodePng(b);
+
+/**
+ * A scene through the 2D-HD camera, as the player will see it from there: `at` is the tile in the middle of the view, `size` the
+ * view in pixels (default: the game's screen). `effects` false leaves out blur, bloom and haze.
+ */
+export function renderSceneHd(loaded: LoadedGame, sceneName: string, opts: { at?: [number, number]; size?: [number, number]; scale?: number; vars?: Record<string, Value>; effects?: boolean } = {}): { png: Buffer; width: number; height: number } {
+  const scene = loaded.bundle.scenes[sceneName];
+  if (!scene) throw new Error(`Scene "${sceneName}" not found`);
+  const [W, H] = opts.size ?? [loaded.bundle.game.width, loaded.bundle.game.height];
+  const game: GameProject = { ...loaded.bundle.game, width: W, height: H };
+  const world = new World({ ...loaded.bundle, game, scripts: {} }, { scene: sceneName, vars: opts.vars });
+  const start = new World({ ...loaded.bundle, game, scripts: {} }, { scene: sceneName, vars: opts.vars });
+  start.step();
+  const ts = scene.tileSize;
+  const cx = opts.at ? (opts.at[0] + 0.5) * ts - W / 2 : start.camera.x;
+  const cy = opts.at ? (opts.at[1] + 0.5) * ts - H / 2 : start.camera.y;
+  world.camera = { x: Math.round(cx), y: Math.round(cy), zoom: 1 };
+  world.updateTexts();
+  const r = new BitmapRenderer(W, H, loaded.sheets);
+  const hd = resolveHd(game.hd, scene.atmosphere?.hd, scene.atmosphere?.ambient);
+  if (!hd) throw new Error(`Scene "${sceneName}" has 2D-HD switched off`);
+  renderWorld(world, new SoftHdRenderer(r, loaded.sheets, hd, opts.effects ?? false));
+  const scale = opts.scale ?? 2;
+  const final = scale > 1 ? scaleBitmap(r.out, scale) : r.out;
+  return { png: encodePng(final), width: final.width, height: final.height };
 }
 
 /**

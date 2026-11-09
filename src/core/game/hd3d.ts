@@ -221,7 +221,7 @@ export function findWalls(layers: readonly TileLayer[], cols: number, rows: numb
       y = top;
     }
   }
-  exposeSides(out, cols, rows);
+  exposeSides(out, cols, rows, ground?.tiles);
   for (const jut of juts ?? []) standOut(out, cols, rows, tileSize, jut);
   dressSides(out, cols, rows);
   return out;
@@ -250,7 +250,7 @@ function standOut(cells: (WallCell | null)[], cols: number, rows: number, ts: nu
  * Which sides of a wall top show. A top stands as many rows south of where it is painted as the wall is high, so what
  * counts is what is next to it down there: next to where it is painted there may be another wall, and the side still shows.
  */
-function exposeSides(cells: (WallCell | null)[], cols: number, rows: number): void {
+function exposeSides(cells: (WallCell | null)[], cols: number, rows: number, ground?: readonly number[]): void {
   const standing = new Uint8Array(cols * rows);
   cells.forEach((c, i) => {
     if (!c) return;
@@ -262,12 +262,14 @@ function exposeSides(cells: (WallCell | null)[], cols: number, rows: number): vo
     } else if (c.face === 0) standing[i] = 1;
   });
   const standsAt = (x: number, y: number) => x >= 0 && x < cols && !!standing[Math.min(y, rows - 1) * cols + x];
+  // Nothing is painted there: a side would only face the dark.
+  const empty = (x: number, y: number) => !!ground && x >= 0 && x < cols && ground[Math.min(y, rows - 1) * cols + x]! < 0;
   cells.forEach((c, i) => {
     if (!c || !('cap' in c)) return;
     const x = i % cols;
-    const ground = Math.floor(i / cols) + c.cap;
-    c.left = !standsAt(x - 1, ground);
-    c.right = !standsAt(x + 1, ground);
+    const foot = Math.floor(i / cols) + c.cap;
+    c.left = !standsAt(x - 1, foot) && !empty(x - 1, foot);
+    c.right = !standsAt(x + 1, foot) && !empty(x + 1, foot);
   });
 }
 
@@ -332,4 +334,111 @@ function dressSides(cells: (WallCell | null)[], cols: number, rows: number): voi
       if (source && 'face' in source && source.juts) c.sideJuts = source.juts;
     }
   }
+}
+
+/** One flat piece of a wall in the 2D-HD view: where it goes in the world and which part of the tile sheet it shows. */
+export interface WallQuad {
+  src: readonly [number, number, number, number];
+  at: (readonly [number, number, number])[];
+  flat: [number, number][];
+  depth: number;
+  color: readonly [number, number, number, number];
+  /** Takes the light through the tile's normals. */
+  shaped: boolean;
+  /** The side of a wall, facing east (1) or west (-1). */
+  sideOf?: 1 | -1;
+}
+
+/**
+ * The pieces of one map tile standing up, per its place in the wall. `x` and `y` are where it is in the flat picture, in view
+ * pixels. The browser and the headless screenshots draw the same list, so what is checked headless is what is played.
+ */
+export function wallQuads(cam: Camera3d, raise: number, wallTrim: number, sx: number, sy: number, sw: number, sh: number, x: number, y: number, size: number, cell: WallCell, sides: readonly ([number, number] | null)[] | null): WallQuad[] {
+  const out: WallQuad[] = [];
+  const cx = cam.vw / 2;
+  const cy = cam.vh / 2;
+  const P = (px: number, py: number, h: number) => worldPoint(cam, px - cx, py - cy, h);
+  const flat: [number, number][] = [[x, y], [x + size, y], [x + size, y + size], [x, y + size]];
+  const white = [1, 1, 1, 1] as const;
+  if ('face' in cell) {
+    const foot = y + size * (cell.face + 1);
+    const tall = size * raise * (cell.stretch ?? 1);
+    const h0 = cell.face * tall;
+    const h1 = (cell.face + 1) * tall;
+    // What is painted at the foot (a plinth) stays out, and the masonry reaches the ground. Piers are painted all the way down.
+    const trim = cell.face === 0 ? Math.min(sh - 1, Math.round(wallTrim)) : 0;
+    const front = (from: number, to: number, depth: number) => {
+      const a = x + from * size;
+      const b = x + to * size;
+      const z = foot + depth;
+      out.push({ color: white, shaped: true, src: [sx + from * sw, sy, sx + to * sw, sy + sh - (depth ? 0 : trim)], flat: [[a, y], [b, y], [b, y + size], [a, y + size]], depth: z - cy, at: [P(a, z, h1), P(b, z, h1), P(b, z, h0), P(a, z, h0)] });
+    };
+    const juts = [...(cell.juts ?? [])].sort((p, q) => p.from - q.from);
+    let along = 0;
+    for (const j of juts) {
+      if (j.from > along) front(along, j.from, 0);
+      front(j.from, j.to, j.depth);
+      along = j.to;
+      const a = x + j.from * size;
+      const b = x + j.to * size;
+      const z = foot + j.depth;
+      const dark = { shaped: false, flat, depth: z - cy, color: [0.72, 0.72, 0.78, 1] as const };
+      const inside = (k: number) => Math.floor(sx + (j.from + (j.to - j.from) * k) * sw);
+      const flank = (at: number, u: number) => out.push({ ...dark, src: [u, sy, u + 1, sy + sh], at: [P(at, foot, h1), P(at, z, h1), P(at, z, h0), P(at, foot, h0)] });
+      if (j.starts) flank(a, inside(0.3));
+      if (j.ends) flank(b, inside(0.7));
+      if (cell.top) out.push({ ...dark, color: [0.85, 0.85, 0.9, 1], src: [sx + j.from * sw, sy, sx + j.to * sw, sy + 1], at: [P(a, foot, h1), P(b, foot, h1), P(b, z, h1), P(a, z, h1)] });
+    }
+    if (along < 1) front(along, 1, 0);
+    return out;
+  }
+  // The top of the wall sits as far south as it is high, which is where the flat picture shows it.
+  const height = cell.cap * size;
+  const top = height * raise;
+  const near = y + height;
+  out.push({ color: white, shaped: true, src: [sx, sy, sx + sw, sy + sh], flat, depth: near - cy, at: [P(x, near, top), P(x + size, near, top), P(x + size, near + size, top), P(x, near + size, top)] });
+  if (!sides) return out;
+  const side = (at: number, u: number, sideOf: 1 | -1) => {
+    if (sides.length && sides.every(Boolean)) {
+      // The masonry of a front, turned to run along the side, a little in shade.
+      const rowHeight = top / sides.length;
+      sides.forEach((from, row) => {
+        const [fx, fy] = from!;
+        const h0 = row * rowHeight;
+        const h1 = h0 + rowHeight;
+        const strip = (a: number, b: number, sticks: number) => {
+          const px = at + sideOf * sticks;
+          const z0 = near + a * size;
+          const z1 = near + b * size;
+          const trim = row === 0 && !sticks ? Math.min(sh - 1, Math.round(wallTrim)) : 0;
+          out.push({ shaped: true, flat, depth: near - cy, sideOf, color: [0.8, 0.8, 0.84, 1], src: [fx + a * sw, fy, fx + b * sw, fy + sh - trim], at: [P(px, z0, h1), P(px, z1, h1), P(px, z1, h0), P(px, z0, h0)] });
+        };
+        let along = 0;
+        for (const j of [...(cell.sideJuts ?? [])].sort((p, q) => p.from - q.from)) {
+          if (j.from > along) strip(along, j.from, 0);
+          // Seen at a glancing angle, a full-depth pier would hide the next one: a side keeps them shallower.
+          const sticks = j.depth * 0.6;
+          strip(j.from, j.to, sticks);
+          along = j.to;
+          const px = at + sideOf * sticks;
+          const za = near + j.from * size;
+          const zb = near + j.to * size;
+          const dark = { shaped: false, flat, depth: near - cy, color: [0.72, 0.72, 0.78, 1] as const };
+          // From inside the pier: its outermost column is the black outline, which stretched would read as a slit.
+          const inside = (k: number) => Math.floor(fx + (j.from + (j.to - j.from) * k) * sw);
+          const flank = (z: number, u: number) => out.push({ ...dark, src: [u, fy, u + 1, fy + sh], at: [P(at, z, h1), P(px, z, h1), P(px, z, h0), P(at, z, h0)] });
+          if (j.starts) flank(za, inside(0.3));
+          if (j.ends) flank(zb, inside(0.7));
+          if (row === sides.length - 1) out.push({ ...dark, color: [0.8, 0.8, 0.86, 1], src: [fx + j.from * sw, fy, fx + j.to * sw, fy + 1], at: [P(at, za, h1), P(px, za, h1), P(px, zb, h1), P(at, zb, h1)] });
+        }
+        if (along < 1) strip(along, 1, 0);
+      });
+      return;
+    }
+    // No front anywhere on this map to borrow from: the edge of the top is stretched down, darker.
+    out.push({ shaped: false, flat, depth: near - cy, color: [0.62, 0.62, 0.66, 1], src: [u, sy, u + 1, sy + sh], at: [P(at, near, top), P(at, near + size, top), P(at, near + size, 0), P(at, near, 0)] });
+  };
+  if (cell.left) side(x, sx, -1);
+  if (cell.right) side(x + size, sx + sw - 1, 1);
+  return out;
 }

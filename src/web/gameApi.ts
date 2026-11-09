@@ -114,6 +114,15 @@ export const gitApi = {
   spriteUrl: (ref: string, path: string) => `${apiBase()}/git/sprite.png?ref=${enc(ref)}&path=${enc(path)}&t=${Date.now()}`,
 };
 
+export interface BlueprintAnswer {
+  blueprint: unknown;
+  kits?: string[];
+  problems?: { level: 'error' | 'warning'; code: string; message: string; cell?: [number, number] }[];
+  wrote?: boolean;
+  absorbed?: string[];
+  plan?: string;
+}
+
 export const gameApi = {
   getGame: () => req<GameProject & { saved: boolean }>('GET', `${apiBase()}/game`),
   saveGame: (g: GameProject) => req<{ rev: string }>('PUT', `${apiBase()}/game`, g),
@@ -126,6 +135,8 @@ export const gameApi = {
   saveScene: (s: Scene) => req<{ rev: string }>('PUT', `${apiBase()}/scenes/${enc(s.name)}`, s),
   createScene: (body: { name: string; cols: number; rows: number; tileset?: string; tileSize?: number }) => req<{ name: string }>('POST', `${apiBase()}/scenes`, body),
   deleteScene: (name: string) => req<{ ok: true }>('DELETE', `${apiBase()}/scenes/${enc(name)}`),
+  blueprint: (name: string) => req<BlueprintAnswer>('GET', `${apiBase()}/scenes/${enc(name)}/blueprint`),
+  buildBlueprint: (name: string, body: { blueprint?: unknown; draftKit?: string; dryRun?: boolean; force?: boolean }) => req<BlueprintAnswer>('POST', `${apiBase()}/scenes/${enc(name)}/blueprint`, body),
   renameScene: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/scenes/${enc(name)}/rename`, { to }),
   duplicateScene: (name: string, to: string) => req<{ name: string }>('POST', `${apiBase()}/scenes/${enc(name)}/duplicate`, { to }),
   sceneState: (name: string, vars: Record<string, Value>, scale = 1) => req<{ png: string; hidden: string[] }>('POST', `${apiBase()}/scenes/${enc(name)}/preview-state`, { vars, scale }),

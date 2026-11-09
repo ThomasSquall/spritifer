@@ -148,6 +148,8 @@ export class Actor {
   patrolDir = 1;
   sineOffset = 0;
   sceneId?: string;
+  /** The instance's own say on lying down or standing up in the 2D-HD perspective. */
+  hdPose?: 'flat' | 'stand';
 
   constructor(id: number, type: ObjectType, asset: SpriteAsset | undefined, x: number, y: number, now: number) {
     this.id = id;
@@ -687,6 +689,8 @@ export class World {
     if (inst.props) Object.assign(a.vars, inst.props);
     if (inst.flipX) a.flipX = true;
     if (inst.light) a.light = inst.light.radius > 0 ? inst.light : undefined;
+    if (inst.hdPose) a.hdPose = inst.hdPose;
+    if (inst.order !== undefined) a.z = inst.order;
     for (const t of inst.tags ?? []) a.tags.add(t);
     a.componentConfig = inst.components;
     if (mem) {
@@ -2928,7 +2932,7 @@ function drawDialog(w: World, r: Renderer): void {
 /** Where an instance goes in the perspective. What is painted on a wall (a window, a relief) stays on it, as it is seen. */
 function actorMark(w: World, r: Renderer, a: Actor, camX: number, camY: number, zoom: number): WorldMark {
   const b = a.box();
-  const flat = (a.type.hdPose ?? (a.z < 0 ? 'flat' : 'stand')) === 'flat';
+  const flat = (a.hdPose ?? a.type.hdPose ?? (a.z < 0 ? 'flat' : 'stand')) === 'flat';
   const s = w.scene;
   const ts = s.tileSize;
   const middle = b.x + b.w / 2;

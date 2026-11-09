@@ -3,6 +3,8 @@
 import type { Problem } from '../core/game/catalog.js';
 import { type GameTest, type TestOutcome, runGameTest } from '../core/game/gameTests.js';
 import type { SizeOf } from '../core/game/sceneOps.js';
+import { type MapIssue, lintScene } from '../core/game/mapLint.js';
+import { TileResolver } from '../core/game/tilerules.js';
 import { resolveObjectTypes } from '../core/game/variants.js';
 import type { ProjectSources } from '../core/game/usages.js';
 import { type WorldMap, buildWorldMap, checkMaps } from '../core/game/worldMap.js';
@@ -43,6 +45,21 @@ export function mapReport(ws: Workspace): { world: WorldMap; problems: Problem[]
     return [s.name, solid.join('')];
   }));
   return { world, problems: checkMaps(sources, world, (sprite) => sizes.get(sprite ?? '')), minimaps };
+}
+
+/** Architectural problems of every map, for the editor and the MCP tools alike. */
+export function architectureReport(ws: Workspace): MapIssue[] {
+  const game = ws.loadGame();
+  const { types } = resolveObjectTypes(game.objects);
+  const tile = 32;
+  const sizeOf = instanceSizes(ws, tile);
+  const resolvers = new Map<string, TileResolver>();
+  const resolver = (name: string) => {
+    let r = resolvers.get(name);
+    if (!r) resolvers.set(name, (r = new TileResolver(game.tilesets?.[name])));
+    return r;
+  };
+  return ws.listScenes().flatMap((s) => lintScene(ws.loadScene(s.name), { types, sizeOf, resolver }));
 }
 
 export interface TestRun {

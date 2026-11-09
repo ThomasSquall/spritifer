@@ -9,6 +9,7 @@ import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value,
 import { CanvasRenderer } from '../runtime/canvasRenderer.js';
 import { atmosphereEditor, lightEditor } from './atmosphereUi.js';
 import { HdPreview } from './hdPreview.js';
+import { openBlueprint } from './blueprintPanel.js';
 import { HD_CELL_MAX_ROWS, HD_FIELDS, resolveHd } from '../core/game/hd.js';
 import { type WallCell, findWalls } from '../core/game/hd3d.js';
 import { openTileRules } from './tileRulesUi.js';
@@ -225,6 +226,11 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
   const dimBtn = iconButton('eye', 'Dim other layers', () => { dimOthers = !dimOthers; dimBtn.classList.toggle('active', dimOthers); draw(); });
   const lookBtn = iconButton('sun', 'Game look (L): preview lights, shadows, clouds, particles, color grade and animated tiles as in Play', () => setGameLook(!showGameLook));
   const hdBtn = h('button', { class: 'small', title: 'See the scene through the game\'s 2D-HD camera: perspective, raised walls, depth of field. Its settings are in the Scene tab, under Atmosphere', onclick: () => hdPreview.toggle() }, '2D-HD');
+  const blueprintBtn = h('button', { class: 'small', title: 'What this map is made from: rooms, passages, water and what stands where. Tiles, walls and instances are compiled from it', onclick: async () => {
+    await flush();
+    await state.flush();
+    await openBlueprint(scene.name);
+  } }, 'Blueprint');
   const nameBtn = h('button', { class: 'sprite-name', title: 'Rename scene', onclick: async () => {
     const to = await promptText('Rename scene', 'New name', scene.name);
     if (!to || to === scene.name) return;
@@ -277,6 +283,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       dimBtn,
       lookBtn,
       hdBtn,
+      blueprintBtn,
       h('span', { class: 'sep' }),
       h('button', { class: 'small', onclick: () => void openEvents() }, icon('tag', 14), 'Scene events'),
       h('button', { class: 'small', title: 'Find what uses this scene', onclick: () => void openUsages('scene', scene.name) }, icon('target', 14), 'Usages'),

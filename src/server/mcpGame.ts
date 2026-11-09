@@ -38,7 +38,10 @@ import {
 import { exportAndroid } from './android.js';
 import { HD_CELL_MAX_ROWS, HD_FIELDS, normalizeHd } from '../core/game/hd.js';
 import { HD_SHAPES } from '../core/game/hd3d.js';
-import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderScenePreview, renderVfxStrip, renderViewport } from './game.js';
+import { BitmapRenderer, buildAsset, exportGame, loadGameBundle, renderSceneHd, renderScenePreview, renderVfxStrip, renderViewport } from './game.js';
+import { renderPlan } from './planView.js';
+import { buildBlueprint, currentBlueprint, draftFromScene } from './blueprints.js';
+import type { Blueprint, BpProblem } from '../core/game/blueprint.js';
 import { type VfxEdge, type VfxGraph, VFX_NAME_RE, VFX_REFERENCE, VFX_TEMPLATES, VFX_TEMPLATE_IDS, VFX_NODE_TYPES, checkVfx, normalizeVfx, vfxEdgePort, vfxHasCycle, vfxInputErrors } from '../core/game/vfxGraph.js';
 import { encodePng } from './png.js';
 import { scaleBitmap } from '../core/draw.js';
@@ -54,7 +57,7 @@ import { type GameTest, normalizeTest } from '../core/game/gameTests.js';
 import { type ScatterRecipe, deleteGroup, extractRegion, listGroups, pasteRegion, regenerateGroup, renameGroup, scatterIntoGroup } from '../core/game/sceneOps.js';
 import { formatEditorContext, formatNotes, listNotes, setNote } from './context.js';
 import { formatHistory, undoChange } from './history.js';
-import { formatTestRun, instanceSizes, loadSources, mapReport, runTests } from './projectTools.js';
+import { architectureReport, formatTestRun, instanceSizes, loadSources, mapReport, runTests } from './projectTools.js';
 import { enableGit, gitCommit, gitCommitFiles, gitDiff, gitLog, gitPull, gitPush, gitRestore, gitSetRemote, gitStatus } from './projectGit.js';
 
 type Content = CallToolResult['content'];
@@ -101,6 +104,28 @@ Workflow that works:
 5. ALWAYS verify: validate_game, preview_scene, then playtest with scripted inputs (vars: {...} starts at a later stage, player_at: [x, y] puts the player next to what you test) (e.g. hold right 2s, tap up) and read the final state, logs and screenshot. Fix and re-test until it plays as intended.
 6. export_game and tell the user where index.html is (it runs offline and can be uploaded to itch.io as an HTML game), or export_android for an installable APK.
 `;
+
+
+const BLUEPRINT_REFERENCE = `A blueprint says what a map IS; tiles, collision, the walls of the 2D-HD view and instances are compiled from it.
+
+Work in this order and stop at each step: (1) concept and spaces, look at preview_scene view "plan"; (2) links, water, checks; dry_run until there are no errors; (3) elements; (4) look at view "2d" and view "hd".
+
+{ concept, kit, size: [cols, rows], spaces: [], links: [], water: [], elements: [], checks: [] }
+
+concept: what this place is and why it is built this way. Required.
+spaces: { id, kind: hall|room|corridor|alcove|landing|gallery, purpose: "what happens or happened here" (required), rects: [[x,y,w,h], ...] }. The first rect's corner is the space's origin.
+  What is not a space is empty darkness, not rock. Every space gets its own walls: a front 3 tiles high on its north side and one tile of top behind it, one tile of wall east and west, a low kerb south (the camera sees in over it).
+  So between a floor and the next floor to the north leave at least 4 rows (3 are tolerated, with a warning; fewer is an error). East to west 1 is enough.
+links: { a, b, via: open|arch|door|gate|stair|bridge, note? }. Spaces that touch must be linked and linked spaces must touch; a passage through a wall is a corridor space between two rooms.
+water: { id, kind: canal (water, not walkable) | dry (empty channel, not walkable) | basin (walkable until blocked), rects, flows?: [{ when: expr, look?, name?, joined?: [ids] }] }. Must lie inside spaces. A walkway across water is simply the cells the water rects leave out.
+elements: an instance plus { in: spaceId, at: [x,y] tiles from the space's origin, mount }.
+  mount "floor": at = the feet; must be on floor. "wall": hung on a north front; at = the bottom of the sprite, on a front cell or on the first row of floor under one. "flat": lies on the floor. "pit": stands in a canal or basin. "marker": no sprite (exits, zones, light spots, blocks); at = top-left corner.
+  Other fields are those of an instance: id, object, name, sprite, animation, activeIf, props, components, tags, light. Keep the ids that saves depend on. blk_WxH objects are solid while their activeIf holds (closed gates, flooded passages).
+checks: { name, vars?: {...}, from: place, reach?: [places], block?: [places] }: routes that must or must not exist at a moment of the story. place: [x,y], "spaceId" (its middle), or ["spaceId",dx,dy].
+
+Painted terrain (woods, towns, caves): set terrain: "painted" and no kit. Tiles and scatter (trees, grass, pebbles: unnamed or "~" names) stay as they are; spaces are zones of the ground, kinds clearing|road|plaza|shore|marsh|maze|cave|quarter too. Rects may be generous: a zone is the walkable ground inside them, and earlier zones win. Links say which zones the ground joins: joined without a link, or linked without ground, is an error. elements are what matters: exits, characters, chests, buildings, anything with a name. validate_game also looks for invisible walls, trunks that can be walked through, ground nothing leads to and exits nothing shows.
+
+Compile with write_blueprint or edit_blueprint. Instances moved or tiles painted by hand on a compiled map go back into the blueprint on the next build, so they aren't lost.`;
 
 export function registerGameTools(ws: Workspace, h: ToolHelpers): void {
   const { tool, text, image } = h;
@@ -1009,8 +1034,17 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     region: z.object({ x: z.number().int(), y: z.number().int(), w: z.number().int().min(1), h: z.number().int().min(1) }).optional().describe('Pixel region to zoom into'),
     scale: z.number().int().min(1).max(8).optional(),
     vars: z.record(z.string(), valueSchema).optional().describe('Global variables for this preview: conditional instances (active_if) show as they would with these values, e.g. { inn_lv: 2, town_rank: 10 } to see the grown town'),
+    view: z.enum(['2d', 'plan', 'hd']).optional().describe('2d (default): the flat map. plan: a schematic of rooms, walls, water and what stands where, with names and problems in red. hd: through the real 2D-HD perspective camera, headless'),
+    at: z.tuple([z.number(), z.number()]).optional().describe('hd: the tile in the middle of the view (default: where the camera starts)'),
+    size: z.tuple([z.number().int().min(64).max(2400), z.number().int().min(64).max(1600)]).optional().describe('hd: the view in pixels (default: the game screen). Larger shows more of the map'),
+    effects: z.boolean().optional().describe('hd: also bloom, depth of field and haze (default off: to judge the shape of the place)'),
   }, (a) => {
     const loaded = loadGameBundle(ws);
+    if (a.view === 'plan') return [...text(`Plan of "${a.scene}".`), image(renderPlan(ws.loadScene(a.scene), loaded.sheets, undefined, undefined, 18, ws.loadGame().tilesets?.[ws.loadScene(a.scene).tileset ?? '']))];
+    if (a.view === 'hd') {
+      const hd = renderSceneHd(loaded, a.scene, { at: a.at as [number, number] | undefined, size: a.size as [number, number] | undefined, scale: a.scale, vars: a.vars as Record<string, Value> | undefined, effects: a.effects });
+      return [...text(`Scene "${a.scene}" in 2D-HD, ${hd.width}x${hd.height}px.`), image(hd.png)];
+    }
     const { png, width, height, hidden } = renderScenePreview(loaded, a.scene, { grid: a.grid, region: a.region, scale: a.scale, vars: a.vars as Record<string, Value> | undefined });
     return [...text(`Scene "${a.scene}" preview ${width}x${height}px.${hidden.length ? `\nHidden (active_if false${a.vars ? ' with these vars' : ' with the initial variables'}): ${hidden.join(', ')}` : ''}`), image(png)];
   }, { readOnlyHint: true });
@@ -1476,9 +1510,120 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     { readOnlyHint: true },
   );
 
-  tool('validate_game', 'Check the game for problems: unknown triggers/actions/behaviors, bad expressions, missing sprites, objects and scenes, and the map checks: scenes nothing leads to, one-way doors, instances stuck on solid tiles or where the player cannot walk.', {}, () => {
+
+  // ------------------------------------------------------------------ blueprints
+
+  const problemLines = (p: BpProblem[]) => p.map((x) => `${x.level === 'error' ? 'ERROR' : 'warning'} [${x.code}] ${x.message}`).join('\n');
+  const blueprintResult = (scene: string, r: ReturnType<typeof buildBlueprint>, preview: boolean) => {
+    const loaded = preview ? loadGameBundle(ws) : null;
+    const counts = `${r.problems.filter((p) => p.level === 'error').length} error(s), ${r.problems.filter((p) => p.level === 'warning').length} warning(s)`;
+    const head = `${r.wrote ? `Compiled into scene "${scene}".` : `Not written (${r.problems.some((p) => p.level === 'error') ? 'errors' : 'dry run'}).`} ${counts}.${r.absorbed.length ? `\nTaken back from the map: ${r.absorbed.slice(0, 20).join('; ')}.` : ''}`;
+    const out = text(`${head}${r.problems.length ? `\n${problemLines(r.problems.slice(0, 80))}` : ''}`);
+    if (!loaded) return out;
+    const shell = ws.listScenes().some((s) => s.name === scene) ? ws.loadScene(scene) : ({ name: scene } as Scene);
+    return [...out, image(renderPlan({ ...shell, blueprint: r.blueprint } as Scene, loaded.sheets, r.blueprint, r.problems, 18, ws.loadGame().tilesets?.[shell.tileset ?? '']))];
+  };
+
+  tool('blueprint_reference', 'How to write a blueprint: the description of a map (rooms, passages, water, things on walls and floors) that tiles, collision, 2D-HD walls and instances are compiled from. Read it before writing maps.', {}, () => text(BLUEPRINT_REFERENCE), { readOnlyHint: true });
+
+  tool('read_blueprint', 'The blueprint of a scene, as JSON. With summary: true, spaces, links, water, checks and how many elements each space has.', { scene: z.string(), summary: z.boolean().optional() }, (a) => {
+    const bp = currentBlueprint(ws, a.scene)?.blueprint;
+    if (!bp) return text(`Scene "${a.scene}" has no blueprint. blueprint_from_scene makes a draft.`);
+    if (!a.summary) return text(JSON.stringify(bp));
+    const count = (id: string) => bp.elements.filter((e) => e.in === id).length;
+    return text(JSON.stringify({ ...bp, spaces: bp.spaces.map((s) => ({ ...s, elements: count(s.id) })), elements: undefined, paint: bp.paint ? Object.keys(bp.paint).length : undefined }));
+  }, { readOnlyHint: true });
+
+  tool('write_blueprint', 'Replace the blueprint of a scene and compile it. What is wrong with the map is reported and, if there are errors, nothing is written. Always returns the plan drawing.', {
+    scene: z.string(),
+    blueprint: z.record(z.string(), z.unknown()),
+    dry_run: z.boolean().optional().describe('Only report and draw the plan'),
+    force: z.boolean().optional().describe('Write even with errors: only to look at a work in progress'),
+  }, (a) => blueprintResult(a.scene, buildBlueprint(ws, a.scene, a.blueprint, { dryRun: a.dry_run, force: a.force, by: AUTHOR }), true));
+
+  tool('edit_blueprint', 'Change part of a blueprint and compile it. Lists are merged by id (links by a+b, checks by name); remove lists ids to take out.', {
+    scene: z.string(),
+    concept: z.string().optional(),
+    size: z.tuple([z.number().int(), z.number().int()]).optional(),
+    spaces: z.array(z.record(z.string(), z.unknown())).optional(),
+    links: z.array(z.record(z.string(), z.unknown())).optional(),
+    water: z.array(z.record(z.string(), z.unknown())).optional(),
+    elements: z.array(z.record(z.string(), z.unknown())).optional(),
+    checks: z.array(z.record(z.string(), z.unknown())).optional(),
+    remove: z.array(z.string()).optional().describe('Ids of spaces, water or elements, names of checks, "a+b" of links'),
+    dry_run: z.boolean().optional(),
+    force: z.boolean().optional(),
+  }, (a) => {
+    const current = currentBlueprint(ws, a.scene);
+    if (!current) throw new Error(`Scene "${a.scene}" has no blueprint.`);
+    const bp = current.blueprint;
+    const merge = <T>(list: T[], items: unknown[] | undefined, key: (t: T) => string) => {
+      for (const raw of items ?? []) {
+        const item = raw as T;
+        const n = list.findIndex((x) => key(x) === key(item));
+        if (n >= 0) list[n] = { ...list[n], ...item };
+        else list.push(item);
+      }
+    };
+    const linkKey = (l: Blueprint['links'][number]) => `${l.a}+${l.b}`;
+    merge(bp.spaces, a.spaces, (s) => s.id);
+    merge(bp.links, a.links, linkKey);
+    merge(bp.water, a.water, (w) => w.id);
+    merge(bp.elements, a.elements, (e) => e.id);
+    merge(bp.checks, a.checks, (c) => c.name);
+    if (a.concept !== undefined) bp.concept = a.concept;
+    if (a.size) bp.size = a.size as [number, number];
+    const gone = new Set(a.remove ?? []);
+    bp.spaces = bp.spaces.filter((s) => !gone.has(s.id));
+    bp.water = bp.water.filter((w) => !gone.has(w.id));
+    bp.elements = bp.elements.filter((e) => !gone.has(e.id));
+    bp.checks = bp.checks.filter((c) => !gone.has(c.name));
+    bp.links = bp.links.filter((l) => !gone.has(linkKey(l)));
+    return blueprintResult(a.scene, buildBlueprint(ws, a.scene, bp, { dryRun: a.dry_run, force: a.force, by: AUTHOR, absorbed: current.absorbed }), true);
+  });
+
+  tool('blueprint_from_scene', 'Draft a blueprint from a scene as it is: spaces cut from its floor, its instances placed in them. The concept and the purpose of each space are left for you to write. Writes nothing unless save: true.', {
+    scene: z.string(),
+    kit: z.string().describe('An architecture kit, or "painted" for woods, towns and caves whose terrain stays as it is'),
+    save: z.boolean().optional().describe('Compile it into the scene (force: even with errors)'),
+    force: z.boolean().optional(),
+  }, (a) => {
+    const bp = draftFromScene(ws, a.scene, a.kit);
+    const r = buildBlueprint(ws, a.scene, bp, { dryRun: !a.save, force: a.force, by: AUTHOR });
+    return [...blueprintResult(a.scene, r, true), ...text(a.save ? '' : JSON.stringify({ ...bp, elements: `${bp.elements.length} elements` }))];
+  });
+
+  tool('rebuild_maps', 'Compile the blueprints of every scene, or of one, from what they say now. What was edited by hand on those maps goes into the blueprint first.', {
+    scene: z.string().optional(),
+  }, (a) => {
+    const names = a.scene ? [a.scene] : ws.listScenes().filter((s) => ws.loadScene(s.name).blueprint).map((s) => s.name);
+    const lines: string[] = [];
+    for (const n of names) {
+      const now = currentBlueprint(ws, n);
+      if (!now) {
+        lines.push(`${n}: no blueprint`);
+        continue;
+      }
+      const r = buildBlueprint(ws, n, now.blueprint, { by: AUTHOR, absorbed: now.absorbed });
+      lines.push(`${n}: ${r.wrote ? 'ok' : 'NOT written'}${r.problems.length ? `\n${problemLines(r.problems.slice(0, 12))}` : ''}`);
+    }
+    return text(lines.join('\n') || 'No blueprints yet.');
+  });
+
+  tool('set_map_kit', 'Define or replace an architecture kit: the sprites blueprints are painted with (wall panel, piers, floor texture, roof, moss, water, dry bed), and the sheet they are baked into.', {
+    name: z.string(),
+    kit: z.record(z.string(), z.unknown()),
+  }, (a) => {
+    mutateGame((g) => {
+      (g.mapKits ??= {})[a.name] = a.kit as unknown as NonNullable<GameProject['mapKits']>[string];
+    });
+    return text(`Kit "${a.name}" saved.`);
+  });
+
+  tool('validate_game', 'Check the game for problems: unknown triggers/actions/behaviors, bad expressions, missing sprites, objects and scenes, and the map checks: scenes nothing leads to, one-way doors, instances stuck on solid tiles or where the player cannot walk, and the architecture of each map: walls too thin to stand, blocks of wall alone in a floor, big sprites across a passage.', {}, () => {
     const maps = mapReport(ws).problems;
-    return text(`${problemsText()}${maps.length ? `\n\nMap checks (${maps.length}), worth a look but sometimes intended:\n${maps.slice(0, 60).map((p) => `- ${p.where}: ${p.message}`).join('\n')}${maps.length > 60 ? `\n... ${maps.length - 60} more` : ''}` : ''}`);
+    const arch = architectureReport(ws);
+    return text(`${problemsText()}${maps.length ? `\n\nMap checks (${maps.length}), worth a look but sometimes intended:\n${maps.slice(0, 60).map((p) => `- ${p.where}: ${p.message}`).join('\n')}${maps.length > 60 ? `\n... ${maps.length - 60} more` : ''}` : ''}${arch.length ? `\n\nArchitecture (${arch.length}):\n${arch.slice(0, 80).map((p) => `- ${p.where} [${p.code}]: ${p.message}`).join('\n')}${arch.length > 80 ? `\n... ${arch.length - 80} more` : ''}` : ''}`);
   }, { readOnlyHint: true });
 
   // ------------------------------------------------------------------ project-wide tools

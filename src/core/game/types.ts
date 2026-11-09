@@ -7,6 +7,8 @@ import { type TilesetRules, normalizeTilesetRules } from './tilerules.js';
 import type { SpriteRelief } from '../sprite.js';
 import type { VfxGraph } from './vfxGraph.js';
 import { BUILTIN_FONT, FONTS } from './font.js';
+import { type Blueprint, normalizeBlueprint } from './blueprint.js';
+import type { MapKit } from './blueprintBake.js';
 import { HD_SHAPES, type HdShape } from './hd3d.js';
 import { type GameHd, type HdCells, type HdJut, type SceneHd, normalizeHd, normalizeHdCells, normalizeHdJuts } from './hd.js';
 import type { ScatterRecipe, SceneGroup } from './sceneOps.js';
@@ -294,6 +296,10 @@ export interface Instance {
   light?: LightDef;
   /** Named group inside the scene, for working on many instances at once (trees, decor); the game ignores it. */
   group?: string;
+  /** In the 2D-HD perspective: lies on the ground or stands up, over what its object type says. */
+  hdPose?: 'flat' | 'stand';
+  /** Draw order, over what its object type says. */
+  order?: number;
 }
 
 export interface SceneBackground {
@@ -339,6 +345,8 @@ export interface Scene {
   atmosphere?: SceneAtmosphere;
   /** How groups of instances were made, so they can be redone. */
   groups?: Record<string, SceneGroup>;
+  /** What this map is made from: tiles, walls and instances are compiled from it. */
+  blueprint?: Blueprint;
   rev: string;
   updatedBy?: string;
 }
@@ -374,6 +382,8 @@ export interface GameProject {
   actions?: Record<string, string[]>;
   /** Tileset rules by tileset sprite name: autotiling, big seamless textures, random variants, edge overlays. */
   tilesets?: Record<string, TilesetRules>;
+  /** Architecture kits blueprints are built with, by name. */
+  mapKits?: Record<string, MapKit>;
   /** Android export settings. */
   android?: AndroidSettings;
   /** Auto 2D-HD: how the whole game looks with it on, and whether it starts on. */
@@ -539,6 +549,7 @@ export function normalizeGame(v: unknown): GameProject {
     ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
     ...(normalizeActions(o.actions) ? { actions: normalizeActions(o.actions) } : {}),
     ...(normalizeTilesets(o.tilesets) ? { tilesets: normalizeTilesets(o.tilesets) } : {}),
+    ...(o.mapKits && typeof o.mapKits === 'object' ? { mapKits: o.mapKits as Record<string, MapKit> } : {}),
     ...(normalizeAndroid(o.android) ? { android: normalizeAndroid(o.android) } : {}),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
@@ -724,6 +735,8 @@ export function normalizeScene(v: unknown): Scene {
     const light = normalizeLight(I.light, true);
     if (light) inst.light = light;
     if (typeof I.group === 'string' && I.group) inst.group = I.group;
+    if (I.hdPose === 'flat' || I.hdPose === 'stand') inst.hdPose = I.hdPose;
+    if (typeof I.order === 'number') inst.order = I.order;
     return inst;
   });
   const backgrounds: SceneBackground[] = (Array.isArray(o.backgrounds) ? o.backgrounds : []).map((b: unknown) => {
@@ -753,6 +766,7 @@ export function normalizeScene(v: unknown): Scene {
     ...(normalizeComponents(o.components) ? { components: normalizeComponents(o.components) } : {}),
     ...(normalizeAtmosphere(o.atmosphere) ? { atmosphere: normalizeAtmosphere(o.atmosphere) } : {}),
     ...(normalizeGroups(o.groups) ? { groups: normalizeGroups(o.groups) } : {}),
+    ...(normalizeBlueprint(o.blueprint) ? { blueprint: normalizeBlueprint(o.blueprint) } : {}),
     rev: str(o.rev, newGameId()),
     ...(typeof o.updatedBy === 'string' ? { updatedBy: o.updatedBy } : {}),
   };

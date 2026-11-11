@@ -283,6 +283,12 @@ export class World {
   /** Seconds since the game started (does not reset with scenes). */
   clock = 0;
   frame = 0;
+  /**
+   * How fast the game runs: 2 = twice as fast. The player and the playtest run this many steps per frame of real time,
+   * so everything that moves with the steps (clock, wait, timers, tweens, vfx, animations, particles) follows it.
+   * Back to 1 when the scene changes.
+   */
+  timeScale = 1;
   /** Top-left of the view in world pixels; zoom > 1 shows less of the world, bigger. */
   camera = { x: 0, y: 0, zoom: 1 };
   /** What the camera followed in the last update: drawing keeps it on a steady screen pixel. */
@@ -423,6 +429,12 @@ export class World {
   hitstop(seconds: number): void {
     if (this.clock >= this.hitstopUntil) this.hitstopFrom = this.clock;
     this.hitstopUntil = Math.max(this.hitstopUntil, this.clock + Math.max(0, Number(seconds) || 0));
+  }
+
+  /** Sets timeScale (0.1..4; anything else becomes 1). */
+  setTimeScale(scale: number): void {
+    const s = Number(scale);
+    this.timeScale = Number.isFinite(s) && s > 0 ? Math.max(0.1, Math.min(4, s)) : 1;
   }
 
   /** The clock animations follow: it stands still during a hit stop. */
@@ -652,6 +664,7 @@ export class World {
     this.shake = { until: 0, intensity: 0, duration: 0 };
     this.camera = { x: 0, y: 0, zoom: this.uiScale };
     this.paused = false;
+    this.timeScale = 1;
     this.particles?.clear();
     this.vfx?.clear();
     this.hitstopUntil = 0;
@@ -3078,6 +3091,9 @@ export async function runPlaytest(bundle: GameBundle, opts: PlaytestOptions): Pr
   const samples: PlaytestResult['samples'] = [];
   const sampleFrames = new Set((opts.sampleAt ?? []).map((s) => Math.round(s / STEP)));
   let prev = new Set<string>();
+  // Steps of game time owed to the frames of real time (world.timeScale of them per frame, like the player).
+  let owed = 0;
+  let late = { pressed: new Set<string>(), released: new Set<string>(), clicks: [] as [number, number][] };
   for (let f = 0; f < frames; f++) {
     const down = new Set<string>();
     const clicks: [number, number][] = [];
@@ -3089,8 +3105,18 @@ export async function runPlaytest(bundle: GameBundle, opts: PlaytestOptions): Pr
     }
     const pressed = new Set([...down].filter((k) => !prev.has(k)));
     const released = new Set([...prev].filter((k) => !down.has(k)));
-    world.step({ down, pressed, released, clicks, pointer: clicks[0] ?? null });
-    await world.settle();
+    for (const k of pressed) late.pressed.add(k);
+    for (const k of released) late.released.add(k);
+    late.clicks.push(...clicks);
+    owed += world.timeScale;
+    // A fraction of a step stays owed: at 0.5x every other frame runs one, at 1.5x they alternate one and two.
+    while (owed >= 1 - 1e-9) {
+      // Key presses and clicks go to the next step (a frame without one keeps them), held keys to all of them.
+      world.step({ down, pressed: late.pressed, released: late.released, clicks: late.clicks, pointer: late.clicks[0] ?? null });
+      await world.settle();
+      owed -= 1;
+      late = { pressed: new Set(), released: new Set(), clicks: [] };
+    }
     // Headless: run the UI code too (menus and buttons in onDraw react to input there).
     world.scripts.draw(NULL_RENDERER, world.camera.x, world.camera.y, world.zoom);
     await world.settle();

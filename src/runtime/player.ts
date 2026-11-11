@@ -569,7 +569,8 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       r.held.delete(k);
     }
     for (const click of input.clicks) r.inputs.push({ at: r.frame * STEP, click });
-    r.frame++;
+    // Counted in frames of real time, as replays read them: at 2x a step is half a frame.
+    r.frame += 1 / world.timeScale;
   };
 
   // ---------------------------------------------------------------- loop
@@ -591,7 +592,8 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     let dt = Math.min(0.25, (now - last) / 1000);
     const halves = Math.round(dt / (STEP / 2));
     if (halves > 0 && halves <= 8 && Math.abs(dt - (halves * STEP) / 2) < 0.002) dt = (halves * STEP) / 2;
-    acc += dt;
+    // world.timeScale (setTimeScale): more or fewer steps of game time per second of real time.
+    acc += dt * world.timeScale;
     last = now;
     if (paused) {
       // Only the frames asked for with stepOnce().
@@ -599,7 +601,9 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       stepRequests = 0;
     }
     let steps = 0;
-    while (acc >= STEP && steps < 5) {
+    // Catching up after a slow frame stops somewhere: 5 steps at normal speed, more when the game runs faster.
+    const maxSteps = Math.ceil(5 * Math.max(1, world.timeScale));
+    while (acc >= STEP && steps < maxSteps) {
       const input = readInput();
       if (recording) recordFrame(input);
       world.step(input);
@@ -608,7 +612,7 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
       acc -= STEP;
       steps++;
     }
-    if (steps === 5) acc = 0;
+    if (steps >= maxSteps) acc = 0;
     busy = false;
     // Nothing moved (a screen faster than the game): the picture on it is already right.
     if (steps === 0 && !paused && drawn) return;

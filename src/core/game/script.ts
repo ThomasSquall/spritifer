@@ -25,6 +25,43 @@ export function spriteScale(scale: number, uiScale: number): number {
   return scale > 0 && Number.isInteger(scale * uiScale) ? scale : Math.max(1, Math.round(scale));
 }
 
+/** ui.view: interface drawing magnified `zoom` times around (x, y), in interface units. */
+export interface UiView {
+  zoom: number;
+  x: number;
+  y: number;
+}
+
+/**
+ * Magnifies what is drawn on a device canvas around a fixed point: `view()` is read at every call, null = as it is.
+ * `k` is the interface scale (device pixels per interface unit), so the point stays where ui.* draws it.
+ */
+export function viewRenderer(r: Renderer, k: number, view: () => UiView | null): Renderer {
+  const px = (v: UiView, x: number) => v.x * k + (x - v.x * k) * v.zoom;
+  const py = (v: UiView, y: number) => v.y * k + (y - v.y * k) * v.zoom;
+  return {
+    clear: (color) => r.clear(color),
+    image: (sprite, sx, sy, sw, sh, dx, dy, o) => {
+      const v = view();
+      if (!v) return r.image(sprite, sx, sy, sw, sh, dx, dy, o);
+      r.image(sprite, sx, sy, sw, sh, Math.round(px(v, dx)), Math.round(py(v, dy)), { ...o, scale: (o.scale ?? 1) * v.zoom });
+    },
+    rect: (x, y, w, h, color, alpha, blend) => {
+      const v = view();
+      if (!v) return r.rect(x, y, w, h, color, alpha, blend);
+      // Whole device pixels, edges rounded rather than sizes: rects that touch keep touching.
+      const x0 = Math.round(px(v, x));
+      const y0 = Math.round(py(v, y));
+      r.rect(x0, y0, Math.round(px(v, x + w)) - x0, Math.round(py(v, y + h)) - y0, color, alpha, blend);
+    },
+    text: (text, x, y, color, scale, font) => {
+      const v = view();
+      if (!v) return r.text(text, x, y, color, scale, font);
+      r.text(text, Math.round(px(v, x)), Math.round(py(v, y)), color, scale * v.zoom, font);
+    },
+  };
+}
+
 export function scaledRenderer(r: Renderer, k: number): Renderer {
   if (k === 1) return r;
   return {
@@ -427,6 +464,7 @@ export interface UiApi {
   height: number;
   text(text: string, x: number, y: number, opts?: { color?: string; size?: number; align?: 'left' | 'center' | 'right'; shadow?: boolean }): void;
   rect(x: number, y: number, w: number, h: number, color: string, alpha?: number): void;
+  view(opts?: { zoom: number; x: number; y: number } | null): void;
   panel(x: number, y: number, w: number, h: number, opts?: { color?: string; border?: string; alpha?: number }): void;
   bar(x: number, y: number, w: number, h: number, value: number, max: number, color?: string, back?: string): void;
   sprite(name: string, x: number, y: number, opts?: { white?: number; frame?: number; animation?: string; elapsed?: number; flipX?: boolean; opacity?: number; scale?: number }): void;
@@ -1355,10 +1393,22 @@ export class ScriptHost {
     if (!this.drawHooks.length && !drawers.length) return;
     const w = this.world;
     const k = w.uiScale;
-    const r = scaledRenderer(canvas, k);
+    // ui.view: everything drawn from here (and the effects) is magnified around a point until view() or the end of onDraw.
+    let view: UiView | null = null;
+    const device = viewRenderer(canvas, k, () => view);
+    const r = scaledRenderer(device, k);
     const toUi = ([x, y]: [number, number]): [number, number] => [x / k, y / k];
     const latch = { ...raw, clicks: raw.clicks.map(toUi), pointer: raw.pointer ? toUi(raw.pointer) : raw.pointer };
-    const inside = (px: number, py: number, x: number, y: number, ww: number, hh: number) => px >= x && px < x + ww && py >= y && py < y + hh;
+    // Hit tests follow the view: a button drawn magnified is clicked where it shows.
+    const inside = (px: number, py: number, x: number, y: number, ww: number, hh: number) => {
+      if (view) {
+        x = view.x + (x - view.x) * view.zoom;
+        y = view.y + (y - view.y) * view.zoom;
+        ww *= view.zoom;
+        hh *= view.zoom;
+      }
+      return px >= x && px < x + ww && py >= y && py < y + hh;
+    };
     const clickIn = (x: number, y: number, ww: number, hh: number) => latch.clicks.some(([cx, cy]) => inside(cx, cy, x, y, ww, hh));
     const hover = (x: number, y: number, ww: number, hh: number) => !!latch.pointer && inside(latch.pointer[0], latch.pointer[1], x, y, ww, hh);
     const ui: UiApi = {
@@ -1367,8 +1417,13 @@ export class ScriptHost {
       shake: { x: Math.round(((w.camera.x - camX) * zoom) / k), y: Math.round(((w.camera.y - camY) * zoom) / k) },
       effects: (layer = 'front') => {
         this.effectsInUi = true;
+        // Flashes cover the whole screen whatever the view.
         if (layer === 'screen') w.vfx.drawScreen(canvas, w.game.width, w.game.height);
-        else w.vfx.draw(canvas, camX, camY, zoom, layer === 'behind');
+        else w.vfx.draw(device, camX, camY, zoom, layer === 'behind');
+      },
+      view: (opts) => {
+        const zv = Number(opts?.zoom);
+        view = opts && Number.isFinite(zv) && zv > 0 && zv !== 1 ? { zoom: zv, x: Number(opts.x) || 0, y: Number(opts.y) || 0 } : null;
       },
       text: (text, x, y, o = {}) => {
         const s = Math.max(1, Math.round(o.size ?? 1));
@@ -1496,8 +1551,14 @@ export class ScriptHost {
     };
     // Instances first (health bars), then scene and game components (HUD on top), then plain onDraw hooks.
     const order = (c: Behaviour) => { const st = stateOf(c)!; return st.actor ? 0 : st.scope === 'scene' ? 1 : 2; };
-    for (const c of drawers.sort((p, q) => order(p) - order(q))) this.invoke(c, 'onDraw', ui);
-    for (const fn of this.drawHooks) this.run('onDraw', fn, ui);
+    for (const c of drawers.sort((p, q) => order(p) - order(q))) {
+      this.invoke(c, 'onDraw', ui);
+      view = null;
+    }
+    for (const fn of this.drawHooks) {
+      this.run('onDraw', fn, ui);
+      view = null;
+    }
   }
 
   // ------------------------------------------------------------------ API
@@ -1598,6 +1659,7 @@ export class ScriptHost {
         get time() { return w.time; },
         get clock() { return w.clock; },
         get animClock() { return w.animClock; },
+        get timeScale() { return w.timeScale; },
         get dialogOpen() { return !!host.dialog; },
         get paused() { return w.paused; },
         get music() { return w.music; },
@@ -1698,6 +1760,7 @@ export class ScriptHost {
       interactTarget: () => this.handle(w.interactTarget()) ?? null,
       setDialogSpeed: (speed: number) => { host.dialogSpeed = Math.max(0.1, Number(speed) || 1); },
       setDialogSkip: (on = true) => { host.dialogSkip = !!on; },
+      setTimeScale: (scale: number) => w.setTimeScale(scale),
       log: (...args: unknown[]) => w.log(args.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')),
       key: (name: string) => w.input.down.has(String(name)),
       pressed: (name: string) => w.input.pressed.has(String(name)),

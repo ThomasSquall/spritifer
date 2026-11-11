@@ -264,7 +264,7 @@ Con **Remember instances when leaving** la scena ricorda posizioni, proprietà e
 
 - Strumenti: pennello tile (B, trascina sul tileset per un timbro multi-tile), rettangolo (R), secchiello (G), gomma (E, o tasto destro), piazza oggetti (P, allineati al tile; Alt = posizione libera), seleziona/sposta (V, aggancio alla griglia; Alt = libero).
 - Alt+click preleva un tile, Canc elimina l'istanza selezionata, Ctrl+D la duplica, frecce per spostarla di 1 px (Shift = 1 tile), Ctrl+Z / Ctrl+Shift+Z.
-- Livelli tile con visibilità, *solid*/*decor*, ordine di disegno (z > 0 = davanti agli oggetti) e parallasse.
+- Livelli tile con visibilità, *solid*/*decor*, ordine di disegno (z > 0 = davanti agli oggetti) e parallasse. Un livello di suolo può essere marcato *painted* (MCP `set_tile_layer` con `painted`): è un quadro unico, in cui ogni cella è un pezzo diverso della pittura, e il 2D-HD non ne deduce muri. In piedi stanno gli oggetti; le correzioni per cella (`hd_walls` / `hdCells`) valgono comunque.
 - Inspector dell'istanza (posizione, specchiatura, proprietà sovrascritte), impostazioni della scena, foglio eventi della scena.
 
 ### Play ed export per il web
@@ -540,7 +540,7 @@ this.add.sprite(100, 100, 'hero').play({ key: 'walk', repeat: -1 });
 Il workspace (default `./sprites`) contiene tutto il progetto:
 
 - `<nome>.sprite.json`: dimensioni, palette, livelli, frame, tag, griglia tile opzionale e pixel RGBA (base64) per ogni cel `livello/frame`;
-- `<nome>.scene.json`: dimensioni in tile, tileset, livelli tile (indici, `-1` = vuoto), istanze, eventi e variabili della scena;
+- `<nome>.scene.json`: dimensioni in tile, tileset, livelli tile (indici, `-1` = vuoto; `solid`, `visible`, `parallax`, `z`, e `painted: true` per un suolo dipinto da cui il 2D-HD non alza muri), istanze, eventi e variabili della scena;
 - `game.json`: impostazioni, variabili globali e tipi di oggetto con comportamenti ed eventi;
 - `scripts/<cartella>/<Nome>.js`: gli script del gioco (componenti e moduli), più `jsconfig.json` e `spritifer.d.ts` generati per l'autocompletamento negli IDE;
 - `dialogues/<nome>.dialogue`: i dialoghi;

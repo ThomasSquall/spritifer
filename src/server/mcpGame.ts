@@ -772,7 +772,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
 
   tool(
     'set_tile_layer',
-    'Create or change a tile layer: solid (collides), visible, parallax, z (draw order; > 0 draws in front of objects), position among the layers, rename, or delete.',
+    'Create or change a tile layer: solid (collides), visible, parallax, z (draw order; > 0 draws in front of objects), painted (a ground painted as one picture: no walls are raised from it in 2D-HD), position among the layers, rename, or delete.',
     {
       scene: z.string(),
       layer: z.string(),
@@ -781,6 +781,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       visible: z.boolean().optional(),
       parallax: z.number().optional(),
       z: z.number().optional(),
+      painted: z.boolean().optional().describe('Ground painted as one picture: 2D-HD raises no walls from its tiles (objects stand up instead; hdCells still apply)'),
       move_to: z.number().int().min(0).optional().describe('New position in the layer list (0 = drawn first)'),
       delete: z.boolean().optional(),
     },
@@ -801,6 +802,10 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         if (a.visible !== undefined) l.visible = a.visible;
         if (a.parallax !== undefined) l.parallax = a.parallax;
         if (a.z !== undefined) l.z = a.z;
+        if (a.painted !== undefined) {
+          if (a.painted) l.painted = true;
+          else delete l.painted;
+        }
         if (a.move_to !== undefined) {
           s.layers.splice(s.layers.indexOf(l), 1);
           s.layers.splice(Math.min(a.move_to, s.layers.length), 0, l);

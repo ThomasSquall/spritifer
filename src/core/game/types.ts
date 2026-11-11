@@ -141,6 +141,11 @@ export interface TileLayer {
   parallax?: number;
   /** Draw order relative to objects (objects default to z 0; layers default to -10 + index). */
   z?: number;
+  /**
+   * A ground painted as one picture (every cell its own piece of the painting): its tiles say nothing about which solid
+   * cells are masonry, so 2D-HD does not raise walls from it. What stands up there are the objects; hdCells still apply.
+   */
+  painted?: boolean;
 }
 
 /** A point light. Offsets are from the center of the sprite. */
@@ -715,6 +720,7 @@ export function normalizeScene(v: unknown): Scene {
     const layer: TileLayer = { name: str(L.name, `layer${i + 1}`), tiles, solid: bool(L.solid, false), visible: bool(L.visible, true) };
     if (typeof L.parallax === 'number') layer.parallax = L.parallax;
     if (typeof L.z === 'number') layer.z = L.z;
+    if (L.painted === true) layer.painted = true;
     return layer;
   });
   if (!layers.length) layers.push({ name: 'ground', tiles: new Array(size).fill(-1), solid: true, visible: true });

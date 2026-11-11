@@ -64,9 +64,30 @@ uniform int lightCount;
 uniform vec4 lights[${MAX_LIGHTS}];
 uniform vec3 lightColors[${MAX_LIGHTS}];
 
+// A small copy read back with a cubic B-spline instead of straight lines between its pixels: enlarged many times, the
+// lines show as a grid of squares, the curve does not. Four fetches, each already mixing four pixels.
+vec3 bspline(sampler2D t, vec2 at) {
+  vec2 size = vec2(textureSize(t, 0));
+  vec2 p = at * size - 0.5;
+  vec2 i = floor(p);
+  vec2 f = p - i;
+  vec2 f2 = f * f;
+  vec2 f3 = f2 * f;
+  vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  vec2 w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  vec2 w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+  vec2 w3 = f3 / 6.0;
+  vec2 g0 = w0 + w1;
+  vec2 g1 = w2 + w3;
+  vec2 h0 = (i - 0.5 + w1 / g0) / size;
+  vec2 h1 = (i + 1.5 + w3 / g1) / size;
+  return g0.y * (g0.x * texture(t, h0).rgb + g1.x * texture(t, vec2(h1.x, h0.y)).rgb)
+       + g1.y * (g0.x * texture(t, vec2(h0.x, h1.y)).rgb + g1.x * texture(t, h1).rgb);
+}
+
 vec3 tent(sampler2D t, float cell) {
   vec2 d = cell / game;
-  return (texture(t, v - d).rgb + texture(t, v + d).rgb + texture(t, v + vec2(d.x, -d.y)).rgb + texture(t, v - vec2(d.x, -d.y)).rgb) * 0.25;
+  return (bspline(t, v - d) + bspline(t, v + d) + bspline(t, v + vec2(d.x, -d.y)) + bspline(t, v - vec2(d.x, -d.y))) * 0.25;
 }
 
 void main() {

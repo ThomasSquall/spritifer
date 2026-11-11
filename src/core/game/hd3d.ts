@@ -146,7 +146,8 @@ export type WallCell = { face: number; stretch?: number; juts?: JutSpan[]; top?:
  * Which cells stand up, read from the map as it is. A solid cell is a wall when the ground art under it is used only under
  * solid cells (so it is painted masonry, not grass under a tree trunk) and isn't water, animated or laid over it as
  * instances (`moreWater`).
- * A map where such cells are a minority has no walls. In a column of wall cells the lowest `wallRows` are the front; the ones above are the top.
+ * A map where such cells are a minority has no walls, and neither does a ground marked `painted` (one picture: every cell
+ * is used once). In a column of wall cells the lowest `wallRows` are the front; the ones above are the top.
  */
 /** The part of a front tile that stands forward: `from` and `to` across the tile, 0..1, and whether the jut begins or ends in it. */
 export interface JutSpan {
@@ -170,8 +171,10 @@ export function findWalls(layers: readonly TileLayer[], cols: number, rows: numb
   const isWall = new Uint8Array(total);
   let blockedCells = 0;
   let wallCells = 0;
+  // A painted ground tells nothing about masonry: only hand corrections (below) raise walls on it.
+  const guess = !ground?.painted;
   for (let i = 0; i < total; i++) {
-    if (!blocked(i) || water[i] || moreWater?.[i]) continue;
+    if (!guess || !blocked(i) || water[i] || moreWater?.[i]) continue;
     blockedCells++;
     const painted = solid.some((l) => l.visible && l.tiles[i]! >= 0);
     if (painted || (ground && !open.has(ground.tiles[i]!))) {

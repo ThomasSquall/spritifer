@@ -104,6 +104,13 @@ describe('2D-HD walls', () => {
     expect(findWalls(map(rows, true), 3, 6, resolver, 3).every((c) => c === null)).toBe(true);
   });
 
+  it('raises nothing from a ground painted as one picture, except what is corrected by hand', () => {
+    const painted = map(rows).map((l) => (l.solid ? l : { ...l, painted: true }));
+    expect(findWalls(painted, 3, 6, resolver, 3).every((c) => c === null)).toBe(true);
+    const fixed = findWalls(painted, 3, 6, resolver, 3, { '1,3': 1 });
+    expect(fixed[3 * 3 + 1]).toEqual({ face: 0 });
+  });
+
   it('keeps water flat', () => {
     const cells = findWalls(map(['###', '~~~', '...']), 3, 3, resolver, 1);
     expect(cells[3]).toBeNull();

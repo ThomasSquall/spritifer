@@ -1510,6 +1510,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
           if (n) { snapshot(); l.name = n; changed(); renderLayers(); }
         } }, l.name),
         h('button', { class: `chip solid-chip${l.solid ? ' on' : ''}`, title: 'Solid layers block movement (floors, walls)', onclick: (e: Event) => { e.stopPropagation(); snapshot(); l.solid = !l.solid; changed(); renderLayers(); } }, l.solid ? 'solid' : 'decor'),
+        ...(!l.solid ? [h('button', { class: `chip solid-chip${l.painted ? ' on' : ''}`, title: 'Painted ground: one picture, every cell its own piece. 2D-HD raises no walls from it (the objects stand up instead; hdCells still apply)', onclick: (e: Event) => { e.stopPropagation(); snapshot(); if (l.painted) delete l.painted; else l.painted = true; changed(); renderLayers(); } }, 'painted')] : []),
       ));
     });
     layersBox.append(list,

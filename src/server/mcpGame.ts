@@ -34,6 +34,7 @@ import {
   normalizeScene,
   normalizeTable,
   resizeScene,
+  footLineProblem,
 } from '../core/game/types.js';
 import { exportAndroid } from './android.js';
 import { HD_CELL_MAX_ROWS, HD_FIELDS, normalizeHd } from '../core/game/hd.js';
@@ -413,7 +414,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       hud: z.boolean().optional().describe('Draw in screen space (ignores the camera)'),
       light: lightSchema.nullable().optional().describe('Light it gives off (seen in scenes with an atmosphere: darker ambient + glow). null removes'),
       shadow: z.number().min(0).nullable().optional().describe('Contact shadow width in px (0 = none, null = automatic: hitbox width). Flat things (rugs, doormats, flowerbeds) want 0'),
-      hd_pose: z.enum(['flat', 'stand']).nullable().optional().describe('In the 2D-HD perspective: lies on the ground or stands up. null = automatic (flat when z is below 0)'),
+      hd_pose: z.enum(['flat', 'stand', 'wall']).nullable().optional().describe('In the 2D-HD perspective: lies on the ground, stands up facing the camera, or stands as an upright surface like a wall front (\'wall\'). null = automatic (flat when z is below 0)'),
       hd_lift: z.number().min(0).nullable().optional().describe('2D-HD: a flat sprite lies this many px above the ground (the top of a wall). null or 0 = on the ground'),
       hd_shape: z.enum(HD_SHAPES).nullable().optional().describe('In the 2D-HD perspective, the solid a standing sprite is wrapped on: round for columns and barrels, octagon, hexagon, square (a corner towards the camera). The width of each row gives its size. null = flat'),
       hd_relief: z.number().int().min(0).max(40).optional().describe('In the 2D-HD perspective, pixels a sprite hung on a wall stands out from it: its outline is extruded (a relief, statues in a niche). 0 = none'),
@@ -939,6 +940,8 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       group: z.string().nullable().optional().describe('Named group (null clears)'),
       light: lightSchema.nullable().optional().describe('Light override (radius 0 = off, null = the object type\'s)'),
       hd_lift: z.number().min(0).nullable().optional().describe('2D-HD: a flat instance lies this many px above the ground (the top of a wall). null or 0 = on the ground'),
+      hd_pose: z.enum(['flat', 'stand', 'wall']).nullable().optional().describe('2D-HD: lies on the ground, stands up facing the camera, or stands as an upright surface like a wall front (\'wall\'), over the object type\'s. null clears'),
+      foot_line: z.array(z.tuple([z.number(), z.number()])).min(2).nullable().optional().describe('Where the picture meets the ground, points [x, y] relative to the instance, left to right (x strictly increasing): a painted object at an angle. 2D: drawn in strips sorted by the ground under each; 2D-HD: every column stands on the ground under it facing the camera (with hd_pose \'wall\': an upright surface along the line). null clears'),
       hitbox: z.object({ x: z.number(), y: z.number(), w: z.number().min(1), h: z.number().min(1) }).nullable().optional().describe('Collision box of these instances, relative to each (over the object type\'s; also used for the y-sort and the 2D-HD foot). null = the object type\'s'),
       props: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       components: z.record(z.string(), z.union([z.record(z.string(), z.union([valueSchema, z.null()])), z.null()])).optional().describe('Component params by component name (merged; null value deletes a param, null component removes the override)'),
@@ -993,6 +996,19 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
           if (a.hd_lift !== undefined) {
             if (!a.hd_lift) delete i.hdLift;
             else i.hdLift = a.hd_lift;
+          }
+          if (a.hd_pose !== undefined) {
+            if (a.hd_pose === null) delete i.hdPose;
+            else i.hdPose = a.hd_pose;
+          }
+          if (a.foot_line !== undefined) {
+            if (a.foot_line === null) delete i.footLine;
+            else {
+              const line = a.foot_line.map(([x, y]) => [x, y] as [number, number]);
+              const problem = footLineProblem(line);
+              if (problem) throw new Error(problem);
+              i.footLine = line;
+            }
           }
           if (a.hitbox !== undefined) {
             if (a.hitbox === null) delete i.hitbox;

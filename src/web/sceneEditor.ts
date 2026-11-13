@@ -5,7 +5,7 @@ import { swayBands, swayBase } from '../core/game/wind.js';
 import { RainField, drawShafts } from '../core/game/weather.js';
 import { type WaterMap, addWaterActors, drawReflections, findWater, reflectionZ } from '../core/game/reflections.js';
 import { type AtmosphereActor, type AtmosphereWorld, MoteField, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
-import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, hitboxOf, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
+import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, footLineProblem, hitboxOf, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
 import { CanvasRenderer } from '../runtime/canvasRenderer.js';
 import { atmosphereEditor, lightEditor } from './atmosphereUi.js';
 import { HdPreview } from './hdPreview.js';
@@ -1884,6 +1884,22 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('label', { title: 'Named group inside this scene, for working on many instances at once (Groups tab). The game ignores it.' }, 'Group', h('input', { type: 'text', value: inst.group ?? '', placeholder: 'none', spellcheck: false, onchange: (e: Event) => edit(() => { const v = (e.target as HTMLInputElement).value.trim(); if (v) inst.group = v; else delete inst.group; }) })),
         h('div', { class: 'row2' }, num('x', () => inst.x, (v) => (inst.x = v)), num('y', () => inst.y, (v) => (inst.y = v))),
         instanceHitboxRow(),
+        h('label', { title: '2D-HD: lies on the ground, stands up facing the camera, or stands as an upright surface like a wall front (its top comes towards the camera: for low wall fronts). Automatic = the object type\'s' }, 'HD pose', h('select', { onchange: (e: Event) => edit(() => {
+          const v = (e.target as HTMLSelectElement).value;
+          if (v === 'flat' || v === 'stand' || v === 'wall') inst.hdPose = v; else delete inst.hdPose;
+        }) },
+          h('option', { value: '', selected: !inst.hdPose }, 'Automatic'),
+          h('option', { value: 'stand', selected: inst.hdPose === 'stand' }, 'Stands up'),
+          h('option', { value: 'flat', selected: inst.hdPose === 'flat' }, 'Lies flat'),
+          h('option', { value: 'wall', selected: inst.hdPose === 'wall' }, 'Wall front'))),
+        h('label', { title: 'Where the picture meets the ground, points x,y relative to the instance, left to right (a painted object at an angle): each column stands on the ground under it. Empty = none' }, 'Foot line', h('input', { type: 'text', value: (inst.footLine ?? []).map((p) => p.join(',')).join(' '), placeholder: 'x,y x,y', spellcheck: false, onchange: (e: Event) => {
+          const input = e.target as HTMLInputElement;
+          const pts = input.value.trim().split(/\s+/).map((t) => t.split(',').map(Number)).filter((p) => p.length === 2 && p.every(Number.isFinite)) as [number, number][];
+          const problem = pts.length >= 2 ? footLineProblem(pts) : null;
+          input.setCustomValidity(problem ?? '');
+          if (problem) { input.reportValidity(); return; }
+          edit(() => { if (pts.length >= 2) inst.footLine = pts; else delete inst.footLine; });
+        } })),
         h('label', { title: '2D-HD: a flat instance lies this many px above the ground (the top of a wall). Empty or 0 = on the ground' }, 'HD lift', h('input', { type: 'number', class: 'num', min: '0', value: inst.hdLift ? String(inst.hdLift) : '', placeholder: obj?.hdLift ? String(obj.hdLift) : '0', onchange: (e: Event) => edit(() => { const v = Number((e.target as HTMLInputElement).value); if (v > 0) inst.hdLift = v; else delete inst.hdLift; }) })),
         h('div', {}, h('div', { class: 'muted small' }, keys.size ? 'Properties (empty = default of the type)' : 'Properties'), props,
           h('button', { class: 'small ghost', onclick: async () => {

@@ -206,3 +206,31 @@ describe('2D-HD walls', () => {
     expect(findWalls(map(rows), 3, 6, resolver, 0).every((c) => c === null)).toBe(true);
   });
 });
+
+describe('2D-HD wall along a line meets a lifted top', () => {
+  it('puts the top row of a sloped wall front where a top lifted H puts its bottom row, column by column', async () => {
+    const { SoftHdRenderer } = await import('../src/server/hdSoftware.js');
+    const { BitmapRenderer } = await import('../src/server/game.js');
+    const { resolveHd } = await import('../src/core/game/hd.js');
+    const hd = resolveHd({ enabled: true, perspective: 0.5, elevation: 50 } as never, undefined)!;
+    const r = new SoftHdRenderer(new BitmapRenderer(640, 360, new Map()), new Map(), hd);
+    type Placed = { point: (x: number, y: number) => [number, number, number]; depthAt?: (x: number) => number };
+    const placed = () => (r as unknown as { placed: () => Placed }).placed();
+    const run = { x0: 100, f0: 220, x1: 164, f1: 252 }; // a foot line going down 32 px over 64 px
+    const footAt = (x: number) => run.f0 + ((x - run.x0) * (run.f1 - run.f0)) / (run.x1 - run.x0);
+    const H = 24;
+    r.mark({ kind: 'wall', foot: run.f0, z: 0, run });
+    const wall = placed();
+    for (const x of [100, 120, 141, 164]) {
+      const f = footAt(x);
+      r.mark({ kind: 'top', h: H, z: 0 } as never);
+      const top = placed();
+      const a = wall.point(x, f - H); // top row of the wall front in this column
+      const b = top.point(x, f - H); // bottom row of a top lifted H standing on the same foot
+      for (let k = 0; k < 3; k++) expect(a[k]).toBeCloseTo(b[k], 6);
+      r.mark({ kind: 'wall', foot: run.f0, z: 0, run });
+    }
+    // and the depth follows the line, not the first foot
+    expect(wall.depthAt!(164) - wall.depthAt!(100)).toBeCloseTo(32, 6);
+  });
+});

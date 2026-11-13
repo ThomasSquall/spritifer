@@ -149,11 +149,13 @@ export class Actor {
   sineOffset = 0;
   sceneId?: string;
   /** The instance's own say on lying down or standing up in the 2D-HD perspective. */
-  hdPose?: 'flat' | 'stand';
+  hdPose?: 'flat' | 'stand' | 'wall';
   /** Its own collision box, from the placed instance (over the object type's). */
   instHitbox?: Hitbox;
   /** Height above the ground of a flat instance in 2D-HD (a wall top), from the placed instance. */
   hdLift?: number;
+  /** Where the picture meets the ground, from the placed instance (see Instance.footLine). */
+  footLine?: [number, number][];
 
   constructor(id: number, type: ObjectType, asset: SpriteAsset | undefined, x: number, y: number, now: number) {
     this.id = id;
@@ -710,6 +712,7 @@ export class World {
     if (inst.hdPose) a.hdPose = inst.hdPose;
     if (inst.hitbox) a.instHitbox = inst.hitbox;
     if (inst.hdLift) a.hdLift = inst.hdLift;
+    if (inst.footLine) a.footLine = inst.footLine;
     if (inst.order !== undefined) a.z = inst.order;
     for (const t of inst.tags ?? []) a.tags.add(t);
     a.componentConfig = inst.components;
@@ -2641,7 +2644,7 @@ export class World {
  * ground: lies on the floor. stand: upright with its feet at x, y (view pixels). air: over everything. wall: stuck on the
  * front of a wall whose foot is at `foot`. top: lying on top of a wall `h` high. `z` is the object's draw order.
  */
-export type WorldMark = { kind: 'backdrop' | 'ground' | 'air' | 'screen' } | { kind: 'stand'; x: number; y: number; z: number; solid?: { shape: HdShape; frame: { x: number; y: number; w: number; h: number } } } | { kind: 'wall'; foot: number; z: number; relief?: number } | { kind: 'top'; h: number; z: number };
+export type WorldMark = { kind: 'backdrop' | 'ground' | 'air' | 'screen' } | { kind: 'stand'; x: number; y: number; z: number; solid?: { shape: HdShape; frame: { x: number; y: number; w: number; h: number } }; run?: { x0: number; f0: number; x1: number; f1: number } } | { kind: 'wall'; foot: number; z: number; relief?: number; run?: { x0: number; f0: number; x1: number; f1: number } } | { kind: 'top'; h: number; z: number };
 
 export interface Renderer {
   clear(color: string): void;
@@ -2834,6 +2837,14 @@ export function renderWorld(w: World, r: Renderer): void {
       const sy = (a.y + oy - camY) * zoom;
       if (sx + a.asset.width * zoom < -8 - over.left || sy + a.asset.height * zoom < -8 - over.top || sx > vw + 8 + over.right || sy > vh + 8 + over.bottom) return;
     }
+    // A picture standing along a line on the ground: strips, each sorted by the ground under it. At a zoom that is not a
+    // whole number (a zoom tween) strips could open seams: the picture is then drawn whole, like a swaying plant.
+    if (a.footLine && a.asset?.frames.length && a.type.text === undefined && Number.isInteger(zoom)) {
+      for (const strip of footStrips(a)) {
+        items.push({ z: a.z, order: scene.ySort ? 1000 + strip.foot + i / 10000 : 1000 + i, draw: () => drawFootStrip(w, r, a, strip, camX, camY, zoom) });
+      }
+      return;
+    }
     // y-sort: within the same z, instances lower on screen are drawn in front (top-down / RPG depth).
     const order = scene.ySort ? 1000 + a.box().y + a.box().h + i / 10000 : 1000 + i;
     items.push({ z: a.z, order, draw: () => {
@@ -2971,7 +2982,95 @@ function actorMark(w: World, r: Renderer, a: Actor, camX: number, camY: number, 
   // A flat sprite lifted above the ground (the top of a wall): lies where a wall cell's top lies, H pixels up.
   const lift = a.hdLift ?? a.type.hdLift ?? 0;
   if (flat && lift > 0) return { kind: 'top', h: lift * zoom, z: a.z };
+  // An upright surface on its foot, like a wall's front: what is painted on it comes towards the camera as it goes up.
+  if ((a.hdPose ?? a.type.hdPose) === 'wall') return { kind: 'wall', foot: y, z: a.z };
   return flat ? { kind: 'ground' } : { kind: 'stand', x, y, z: a.z, ...(a.type.hdShape && frame && !a.angle ? { solid: { shape: a.type.hdShape, frame } } : {}) };
+}
+
+/** Width of the strips a picture with a foot line is cut into: each takes the ground under its middle. */
+const FOOT_STRIP = 4;
+
+interface FootStrip {
+  /** Columns of the frame, and the ground (world y) at each edge and in the middle. */
+  c0: number;
+  c1: number;
+  f0: number;
+  f1: number;
+  foot: number;
+}
+
+/** Ground under each column of a picture with a foot line: linear between its points, flat past the ends. */
+function footAt(line: [number, number][], ax: number, ay: number, c: number): number {
+  const pts = line;
+  if (c <= pts[0]![0]) return ay + pts[0]![1];
+  for (let k = 1; k < pts.length; k++) {
+    const [x0, y0] = pts[k - 1]!;
+    const [x1, y1] = pts[k]!;
+    if (c <= x1) return ay + (x1 === x0 ? y1 : y0 + ((c - x0) * (y1 - y0)) / (x1 - x0));
+  }
+  return ay + pts[pts.length - 1]![1];
+}
+
+/** Strips of an instance, kept until its frame width, foot line, place, mirroring or sprite offset change (M). */
+const stripCache = new WeakMap<Actor, { key: string; line: [number, number][]; strips: FootStrip[] }>();
+
+/**
+ * The strips of a picture with a foot line. c0..c1 are columns of the sprite frame; the foot is read on the line at the
+ * column where that part of the picture is shown (the instance's own coordinates): moved by the type's spriteOffset and
+ * mirrored when the instance is flipped.
+ */
+function footStrips(a: Actor): FootStrip[] {
+  const f = a.asset!.frames[a.frameIndex()] ?? a.asset!.frames[0]!;
+  const line = a.footLine!;
+  const ox = a.type.spriteOffset?.x ?? 0;
+  const key = `${f.w}:${a.x}:${a.y}:${a.flipX ? 1 : 0}:${ox}`;
+  const hit = stripCache.get(a);
+  if (hit && hit.key === key && hit.line === line) return hit.strips;
+  // shown column of sprite column c (instance coordinates)
+  const shown = (c: number) => ox + (a.flipX ? f.w - c : c);
+  // Strip edges: every point of the line, and every FOOT_STRIP columns in between.
+  const cuts = new Set<number>([0, f.w]);
+  for (const [x] of line) {
+    const c = Math.round(a.flipX ? f.w - (x - ox) : x - ox);
+    if (c > 0 && c < f.w) cuts.add(c);
+  }
+  for (let c = FOOT_STRIP; c < f.w; c += FOOT_STRIP) cuts.add(c);
+  const xs = [...cuts].sort((p, q) => p - q);
+  const out: FootStrip[] = [];
+  for (let k = 1; k < xs.length; k++) {
+    const c0 = xs[k - 1]!;
+    const c1 = xs[k]!;
+    // f0 at the strip's left edge ON SCREEN, f1 at its right edge
+    const left = Math.min(shown(c0), shown(c1));
+    const right = Math.max(shown(c0), shown(c1));
+    const f0 = footAt(line, a.x, a.y, left);
+    const f1 = footAt(line, a.x, a.y, right);
+    out.push({ c0, c1, f0, f1, foot: footAt(line, a.x, a.y, (left + right) / 2) });
+  }
+  stripCache.set(a, { key, line, strips: out });
+  return out;
+}
+
+function drawFootStrip(w: World, r: Renderer, a: Actor, s: FootStrip, camX: number, camY: number, zoom: number): void {
+  if (!a.visible || a.destroyed) return;
+  if (a.flashUntil > w.clock && Math.floor(w.clock * 12) % 2 === 0) return;
+  const f = a.asset!.frames[a.frameIndex()] ?? a.asset!.frames[0]!;
+  const off = a.type.spriteOffset;
+  const x = Math.round((a.x + (off?.x ?? 0) - camX) * zoom);
+  const y = Math.round((a.y + (off?.y ?? 0) - camY) * zoom);
+  // where the strip is on screen: mirrored, sprite column c0..c1 is shown at f.w - c1 .. f.w - c0
+  const d0 = a.flipX ? f.w - s.c1 : s.c0;
+  const d1 = a.flipX ? f.w - s.c0 : s.c1;
+  if (r.mark) {
+    // Each column stands on the ground under it, its foot running from one edge of the strip to the other: facing the
+    // camera (a ribbon, the strips meet at their edges), or with hdPose 'wall' an upright surface along the line.
+    const sx0 = x + d0 * zoom;
+    const sx1 = x + d1 * zoom;
+    const run = { x0: sx0, f0: (s.f0 - camY) * zoom, x1: sx1, f1: (s.f1 - camY) * zoom };
+    if ((a.hdPose ?? a.type.hdPose) === 'wall') r.mark({ kind: 'wall', foot: run.f0, z: a.z, run });
+    else r.mark({ kind: 'stand', x: (sx0 + sx1) / 2, y: (s.foot - camY) * zoom, z: a.z, run });
+  }
+  r.image(a.asset!.name, f.x + s.c0, f.y, s.c1 - s.c0, f.h, x + d0 * zoom, y, { flipX: a.flipX, opacity: a.opacity, angle: 0, ...(zoom !== 1 ? { scale: zoom } : {}) });
 }
 
 function drawActor(w: World, r: Renderer, a: Actor, camX: number, camY: number, zoom = 1): void {

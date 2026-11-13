@@ -291,13 +291,14 @@ function objectEditor(obj: ObjectType, go: (name: string | null) => void): HTMLE
       changed();
     } });
   const poseSel = h('select', { onchange: () => {
-    if (poseSel.value === 'flat' || poseSel.value === 'stand') obj.hdPose = poseSel.value;
+    if (poseSel.value === 'flat' || poseSel.value === 'stand' || poseSel.value === 'wall') obj.hdPose = poseSel.value;
     else delete obj.hdPose;
     changed();
   } },
     h('option', { value: '', selected: !obj.hdPose }, 'Automatic'),
     h('option', { value: 'stand', selected: obj.hdPose === 'stand' }, 'Stands up'),
     h('option', { value: 'flat', selected: obj.hdPose === 'flat' }, 'Lies flat'),
+    h('option', { value: 'wall', selected: obj.hdPose === 'wall', title: 'An upright surface like a wall front: its top comes towards the camera (for low wall fronts)' }, 'Wall front'),
   );
   const shapeSel = h('select', { onchange: () => {
     if (shapeSel.value) obj.hdShape = shapeSel.value as NonNullable<typeof obj.hdShape>;

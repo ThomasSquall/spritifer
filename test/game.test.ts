@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { compile, checkExpr } from '../src/core/game/expr.js';
 import { World, emptyInput, renderWorld, runPlaytest } from '../src/core/game/engine.js';
 import { validateGame } from '../src/core/game/catalog.js';
-import { type GameBundle, type Instance, type Scene, type SpriteAsset, createGame, createScene, normalizeObject } from '../src/core/game/types.js';
+import { type GameBundle, type Instance, type Scene, type SpriteAsset, createGame, createScene, footLineProblem, normalizeObject, normalizeScene as normalizeSceneForTest } from '../src/core/game/types.js';
 import { BUILTIN_FONT, PIXEL_OPERATOR, gameFont, measureText, rasterText } from '../src/core/game/font.js';
 import { wrapText } from '../src/core/game/script.js';
 import { nodeEvaluator } from '../src/server/scripts.js';
+import { renderViewport } from '../src/server/game.js';
+import type { Bitmap } from '../src/core/sprite.js';
 
 const ctx = (vars: Record<string, number | string | boolean> = {}) => ({
   get: (p: string[]) => vars[p.join('.')],
@@ -582,5 +584,140 @@ describe('hd lift', () => {
 
   it('keeps flat instances without it on the ground', () => {
     expect(marks()).toEqual([{ kind: 'ground' }]);
+  });
+});
+
+describe('foot line', () => {
+  const world = () => {
+    const b = platformBundle();
+    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 80 }];
+    b.game.objects.push(normalizeObject({ name: 'face', sprite: 'wall' }));
+    b.sprites.wall = box('wall', 64, 32);
+    b.scenes.level1.ySort = true;
+    // A wall front running from y 32 (left) to y 64 (right): its right end is closer to the camera.
+    b.scenes.level1.instances = [
+      { id: 'p', object: 'player', x: 60, y: 30 },
+      { id: 'f', object: 'face', x: 40, y: 20, footLine: [[0, 12], [64, 44]] },
+    ];
+    return new World(b);
+  };
+  type M = { kind: string; foot?: number; run?: { x0: number; f0: number; x1: number; f1: number } };
+  const frame = (w: World) => {
+    const seen: { s: string; m: M; sx: number }[] = [];
+    let last: M = { kind: '' };
+    const r = { clear() {}, rect() {}, text() {}, mark(m: M) { last = m; }, image(s: string, sx: number) { seen.push({ s, m: last, sx }); } };
+    renderWorld(w, r as unknown as Parameters<typeof renderWorld>[1]);
+    return seen;
+  };
+
+  it('draws in strips sorted by the ground under each: the hero is between them', () => {
+    const seen = frame(world()).filter((e) => e.s === 'wall' || e.s === 'hero');
+    const hero = seen.findIndex((e) => e.s === 'hero');
+    // Feet at y 46: strips whose ground is above 46 are drawn before the hero, the others after.
+    expect(hero).toBeGreaterThan(0);
+    expect(hero).toBeLessThan(seen.length - 1);
+    const strips = seen.filter((e) => e.s === 'wall');
+    expect(strips.length).toBe(16);
+  });
+
+  it('stands facing the camera in 2D-HD, each column on its own foot, continuous from strip to strip', () => {
+    const strips = frame(world()).filter((e) => e.s === 'wall');
+    for (const e of strips) expect(e.m.kind).toBe('stand');
+    for (let k = 1; k < strips.length; k++) {
+      expect(strips[k]!.m.run!.x0).toBeCloseTo(strips[k - 1]!.m.run!.x1);
+      expect(strips[k]!.m.run!.f0).toBeCloseTo(strips[k - 1]!.m.run!.f1);
+    }
+  });
+
+  it("is an upright surface along the line with hdPose 'wall', continuous from strip to strip", () => {
+    const w = world();
+    w.actors.find((a) => a.sceneId === 'f')!.hdPose = 'wall';
+    const strips = frame(w).filter((e) => e.s === 'wall');
+    for (const e of strips) expect(e.m.kind).toBe('wall');
+    for (let k = 1; k < strips.length; k++) {
+      expect(strips[k]!.m.run!.x0).toBeCloseTo(strips[k - 1]!.m.run!.x1);
+      expect(strips[k]!.m.run!.f0).toBeCloseTo(strips[k - 1]!.m.run!.f1);
+    }
+  });
+
+  it('draws a level foot line exactly like the same picture standing on that foot, in 2D and in 2D-HD', () => {
+    const sheet: Bitmap = { width: 128, height: 32, data: new Uint8ClampedArray(128 * 32 * 4) };
+    for (let y = 0; y < 32; y++) for (let x = 0; x < 128; x++) sheet.data.set([(x * 37) % 256, (y * 53) % 256, ((x + y) * 19) % 256, x % 9 === 0 && y % 5 === 0 ? 0 : 255], (y * 128 + x) * 4);
+    const sheets = new Map([['wall', sheet]]);
+    const make = (extra: Partial<Instance>) => {
+      const b = platformBundle();
+      b.game.objects[0].behaviors = [{ type: 'topdown', speed: 80 }, { type: 'camera' }];
+      b.game.objects.push(normalizeObject({ name: 'face', sprite: 'wall' }));
+      b.sprites.wall = box('wall', 64, 32);
+      b.scenes.level1.ySort = true;
+      b.scenes.level1.instances = [{ id: 'p', object: 'player', x: 150, y: 40 }, { id: 'f', object: 'face', x: 60, y: 120, hitbox: { x: 0, y: 24, w: 64, h: 8 }, ...extra }];
+      return new World(b);
+    };
+    for (const hd of [false, true]) {
+      const plain = renderViewport(make({}), sheets, 1, hd);
+      const level = renderViewport(make({ footLine: [[0, 32], [64, 32]] }), sheets, 1, hd);
+      expect(level.equals(plain)).toBe(true);
+    }
+    // the 2D-HD picture really is another one, and a sloping line really moves the columns
+    expect(renderViewport(make({}), sheets, 1, true).equals(renderViewport(make({}), sheets, 1, false))).toBe(false);
+    expect(renderViewport(make({ footLine: [[0, 20], [64, 40]] }), sheets, 1, true).equals(renderViewport(make({}), sheets, 1, true))).toBe(false);
+  });
+
+  it('refuses a foot line whose x goes back or repeats', () => {
+    expect(footLineProblem([[0, 1], [10, 1], [20, 9]])).toBeNull();
+    expect(footLineProblem([[0, 1], [10, 1], [5, 9]])).toMatch(/goes back/);
+    expect(footLineProblem([[0, 1], [10, 1], [10, 9], [20, 9]])).toMatch(/same x/);
+  });
+
+});
+
+describe('foot line strips: mirroring, sprite offset, blinking, zoom', () => {
+  const sheet: Bitmap = { width: 128, height: 32, data: new Uint8ClampedArray(128 * 32 * 4) };
+  for (let y = 0; y < 32; y++) for (let x = 0; x < 128; x++) sheet.data.set([(x * 37) % 256, (y * 53) % 256, ((x + y) * 19) % 256, x % 9 === 0 && y % 5 === 0 ? 0 : 255], (y * 128 + x) * 4);
+  const sheets = new Map([['wall', sheet]]);
+  const make = (extra: Partial<Instance>, offset?: { x: number; y: number }) => {
+    const b = platformBundle();
+    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 80 }, { type: 'camera' }];
+    b.game.objects.push(normalizeObject({ name: 'face', sprite: 'wall', ...(offset ? { spriteOffset: offset } : {}) }));
+    b.sprites.wall = box('wall', 64, 32);
+    b.scenes.level1.ySort = true;
+    b.scenes.level1.instances = [{ id: 'p', object: 'player', x: 150, y: 40 }, { id: 'f', object: 'face', x: 60, y: 120, hitbox: { x: 0, y: 24, w: 64, h: 8 }, ...extra }];
+    return new World(b);
+  };
+
+  it('draws a level foot line exactly like the picture, also mirrored and with a sprite offset, in 2D and in 2D-HD', () => {
+    for (const hd of [false, true]) {
+      for (const [extra, off] of [[{ flipX: true }, undefined], [{}, { x: -6, y: 3 }], [{ flipX: true }, { x: 5, y: -2 }]] as const) {
+        const plain = renderViewport(make({ ...extra }, off), sheets, 1, hd);
+        const level = renderViewport(make({ ...extra, footLine: [[0, 32], [64, 32]] }, off), sheets, 1, hd);
+        expect(level.equals(plain)).toBe(true);
+      }
+    }
+  });
+
+  it('blinks like any picture and is drawn whole at a zoom that is not a whole number', () => {
+    const count = (w: World) => {
+      let n = 0;
+      const r = { clear() {}, rect() {}, text() {}, image(s: string) { if (s === 'wall') n++; } };
+      renderWorld(w, r as unknown as Parameters<typeof renderWorld>[1]);
+      return n;
+    };
+    const w = make({ footLine: [[0, 20], [64, 40]] });
+    expect(count(w)).toBeGreaterThan(1);
+    const f = w.actors.find((a) => a.sceneId === 'f')!;
+    f.flashUntil = w.clock + 10;
+    expect(count(w)).toBe(0); // clock 0: a blink frame
+    f.flashUntil = 0;
+    w.camera.zoom = 1.5;
+    expect(count(w)).toBe(1);
+  });
+});
+
+describe('foot line points', () => {
+  it('8. a scene keeps foot line points left to right as given, the first of each x, without sorting them', () => {
+    const sc = (fl: [number, number][]) => normalizeSceneForTest({ name: 's', instances: [{ id: 'f', object: 'o', x: 0, y: 0, footLine: fl }] } as unknown as Scene).instances[0]!.footLine;
+    expect(sc([[0, 1], [10, 1], [10, 9], [20, 9]])).toEqual([[0, 1], [10, 1], [20, 9]]);
+    expect(sc([[0, 1], [20, 9], [10, 5], [30, 2]])).toEqual([[0, 1], [20, 9], [30, 2]]);
+    expect(sc([[0, 1], [5, 2]])).toEqual([[0, 1], [5, 2]]);
   });
 });

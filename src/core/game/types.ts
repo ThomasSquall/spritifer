@@ -86,8 +86,12 @@ export interface ObjectType {
   light?: LightDef;
   /** Soft contact shadow under the instance: width in px (0 = none). Absent = automatic (hitbox width) when the scene has shadows. */
   shadow?: number;
-  /** In the 2D-HD perspective: lies on the ground or stands up. Absent = flat when its z is below 0. */
-  hdPose?: 'flat' | 'stand';
+  /**
+   * In the 2D-HD perspective: lies on the ground ('flat'), stands up facing the camera ('stand'), or stands as an upright
+   * surface like a wall's front ('wall': its top comes towards the camera, so it meets a wall top lifted by hdLift).
+   * Absent = flat when its z is below 0, else stand.
+   */
+  hdPose?: 'flat' | 'stand' | 'wall';
   /** In the 2D-HD perspective, pixels a sprite hung on a wall stands out from it (a relief, a statue in a niche). */
   hdRelief?: number;
   /** In the 2D-HD perspective, a flat sprite lies this many pixels above the ground (the top of a wall): it lies where the ground is that many pixels further down the picture. */
@@ -303,8 +307,8 @@ export interface Instance {
   light?: LightDef;
   /** Named group inside the scene, for working on many instances at once (trees, decor); the game ignores it. */
   group?: string;
-  /** In the 2D-HD perspective: lies on the ground or stands up, over what its object type says. */
-  hdPose?: 'flat' | 'stand';
+  /** In the 2D-HD perspective: 'flat', 'stand' or 'wall' (see ObjectType.hdPose), over what its object type says. */
+  hdPose?: 'flat' | 'stand' | 'wall';
   /** Draw order, over what its object type says. */
   order?: number;
   /**
@@ -314,6 +318,23 @@ export interface Instance {
   hitbox?: Hitbox;
   /** In the 2D-HD perspective, a flat instance lies this many pixels above the ground (a wall top), over its object type's. */
   hdLift?: number;
+  /**
+   * The line where this picture meets the ground, left to right, as points [x, y] relative to the instance: a painted
+   * object that runs at an angle (a long wall, an aqueduct seen askew). In 2D it is drawn in vertical strips, each sorted by
+   * the ground under it. In 2D-HD each column stands on the ground under it, facing the camera like any standing sprite,
+   * as one continuous ribbon; with hdPose 'wall' it is instead an upright surface along the line, whose top meets a wall
+   * top lifted by hdLift exactly. A tall 'wall' grows towards the camera, so it is meant for low wall fronts.
+   */
+  footLine?: [number, number][];
+}
+
+/** Why a foot line is not usable as given: points go left to right, x strictly increasing (a vertical jump is not supported). */
+export function footLineProblem(line: [number, number][]): string | null {
+  for (let k = 1; k < line.length; k++) {
+    if (line[k]![0] < line[k - 1]![0]) return `foot line: x goes back at point ${k} (${line[k - 1]![0]} then ${line[k]![0]}); points go left to right`;
+    if (line[k]![0] === line[k - 1]![0]) return `foot line: points ${k - 1} and ${k} have the same x (${line[k]![0]}); a vertical jump is not supported, give the slope a width`;
+  }
+  return null;
 }
 
 /** The hitbox that counts for a placed instance or an actor: its own, else its object type's. The one place to read it. */
@@ -538,7 +559,7 @@ export function normalizeObject(v: unknown): ObjectType {
   const light = normalizeLight(o.light);
   if (light) obj.light = light;
   if (typeof o.shadow === 'number' && Number.isFinite(o.shadow)) obj.shadow = Math.max(0, Math.round(o.shadow));
-  if (o.hdPose === 'flat' || o.hdPose === 'stand') obj.hdPose = o.hdPose;
+  if (o.hdPose === 'flat' || o.hdPose === 'stand' || o.hdPose === 'wall') obj.hdPose = o.hdPose;
   if (typeof o.hdLift === 'number' && o.hdLift > 0) obj.hdLift = o.hdLift;
   if (typeof o.hdRelief === 'number' && o.hdRelief > 0) obj.hdRelief = Math.min(40, Math.round(o.hdRelief));
   if ((HD_SHAPES as readonly unknown[]).includes(o.hdShape)) obj.hdShape = o.hdShape as HdShape;
@@ -758,10 +779,18 @@ export function normalizeScene(v: unknown): Scene {
     const light = normalizeLight(I.light, true);
     if (light) inst.light = light;
     if (typeof I.group === 'string' && I.group) inst.group = I.group;
-    if (I.hdPose === 'flat' || I.hdPose === 'stand') inst.hdPose = I.hdPose;
+    if (I.hdPose === 'flat' || I.hdPose === 'stand' || I.hdPose === 'wall') inst.hdPose = I.hdPose;
     if (typeof I.order === 'number') inst.order = I.order;
     const ih = I.hitbox as Record<string, unknown> | undefined;
     if (typeof I.hdLift === 'number' && I.hdLift > 0) inst.hdLift = I.hdLift;
+    if (Array.isArray(I.footLine)) {
+      const pts = (I.footLine as unknown[]).filter((p): p is [number, number] => Array.isArray(p) && p.length === 2 && p.every((v) => typeof v === 'number' && Number.isFinite(v)));
+      // left to right, x always growing: a point whose x is not past the previous one is dropped (the first point of each x
+      // stays), nothing is reordered behind the author's back (room-3001 #344.8)
+      const kept: [number, number][] = [];
+      for (const [x, y] of pts) if (!kept.length || x > kept[kept.length - 1]![0]) kept.push([x, y]);
+      if (kept.length >= 2) inst.footLine = kept;
+    }
     if (ih && typeof ih === 'object') inst.hitbox = { x: num(ih.x, 0), y: num(ih.y, 0), w: Math.max(1, num(ih.w, 8)), h: Math.max(1, num(ih.h, 8)) };
     return inst;
   });

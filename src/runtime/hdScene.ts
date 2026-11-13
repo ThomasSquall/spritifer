@@ -192,6 +192,8 @@ type Quad = {
   flat: readonly (readonly [number, number])[];
   /** Height on the screen of the ground it stands on, in view pixels. */
   depth: number;
+  /** The same, corner by corner, for a surface whose foot runs at an angle (a wall along a line on the ground). */
+  depths?: readonly number[];
   sheet: Sheet;
   /** Source rectangle in sheet pixels; `mirror` swaps its left and right. */
   src: readonly [number, number, number, number];
@@ -376,9 +378,12 @@ export class HdScene implements Renderer {
     const [sx0, sy0, sx1, sy1] = q.src;
     const us = q.mirror ? [sx1, sx0, sx0, sx1] : [sx0, sx1, sx1, sx0];
     const vs = q.flipV ? [sy1, sy1, sy0, sy0] : [sy0, sy0, sy1, sy1];
-    const depth = Math.min(1, Math.max(0, ((q.depth + this.vh / 2) / this.vh + 1) / 3));
-    const sort = (depth + Math.min(MAX_Z, Math.max(0, q.z ?? 0))) / (MAX_Z + 1);
+    const depthOf = (v: number) => Math.min(1, Math.max(0, ((v + this.vh / 2) / this.vh + 1) / 3));
+    const lift = Math.min(MAX_Z, Math.max(0, q.z ?? 0));
+    const depths = [0, 1, 2, 3].map((c) => depthOf(q.depths?.[c] ?? q.depth));
     const put = (d: Float32Array, o: number, c: number) => {
+      const depth = depths[c]!;
+      const sort = (depth + lift) / (MAX_Z + 1);
       const p = q.at[c]!;
       const f = q.flat[c]!;
       d[o] = p[0]; d[o + 1] = p[1]; d[o + 2] = p[2];
@@ -399,7 +404,7 @@ export class HdScene implements Renderer {
   }
 
   /** The list of the current mark, and the world position of a flat view point in it. */
-  private placed(): { list: DrawList; point: (x: number, y: number) => readonly [number, number, number]; depthOf: (y: number) => number } {
+  private placed(): { list: DrawList; point: (x: number, y: number) => readonly [number, number, number]; depthOf: (y: number) => number; depthAt?: (x: number) => number } {
     const cam = this.cam;
     const cx = this.vw / 2;
     const cy = this.vh / 2;
@@ -412,16 +417,39 @@ export class HdScene implements Renderer {
       case 'air': return { list: this.air, point: onGround, depthOf: (y) => y - cy };
       case 'ground': return { list: this.ground, point: onGround, depthOf: (y) => y - cy };
       case 'wall': {
-        // On the plane of the wall's front, leaning as it leans, a hair in front of it.
+        // On the plane of the wall's front, leaning as it leans, a hair in front of it. With a run, the foot goes from one
+        // end to the other: a wall front along a line at an angle, still one flat vertical surface.
         const raise = this.hd.wallHeight;
-        return { list: this.stand, depthOf: () => m.foot - cy + 1, point: (x, y) => worldPoint(cam, x - cx, m.foot - cy, (m.foot - y) * raise) };
+        const run = m.run;
+        const foot = run ? (x: number) => run.f0 + ((x - run.x0) * (run.f1 - run.f0)) / Math.max(1e-6, run.x1 - run.x0) : () => m.foot;
+        return {
+          list: this.stand,
+          depthOf: () => m.foot - cy + 1,
+          ...(run ? { depthAt: (x: number) => foot(x) - cy + 1 } : {}),
+          point: (x, y) => worldPoint(cam, x - cx, foot(x) - cy, (foot(x) - y) * raise),
+        };
       }
       case 'top': {
         const raise = this.hd.wallHeight;
         return { list: this.stand, depthOf: (y) => y + m.h - cy, point: (x, y) => worldPoint(cam, x - cx, y + m.h - cy, m.h * raise) };
       }
       case 'stand': {
-        // Upright and facing the camera, on the spot of the feet: a sprite stays the drawing it is.
+        // Upright and facing the camera, on the spot of the feet: a sprite stays the drawing it is. With a run, every column
+        // stands on its own foot, from one end to the other (a picture whose foot runs at an angle: one continuous ribbon).
+        const run = m.run;
+        if (run) {
+          const foot = (x: number) => run.f0 + ((x - run.x0) * (run.f1 - run.f0)) / Math.max(1e-6, run.x1 - run.x0);
+          return {
+            list: this.stand,
+            depthOf: () => m.y - cy,
+            depthAt: (x: number) => foot(x) - cy,
+            point: (x, y) => {
+              const f = foot(x);
+              const h = f - y;
+              return [x - cx, h * cam.cos, (f - cy) * cam.depthScale - h * cam.sin] as const;
+            },
+          };
+        }
         const base = worldPoint(cam, m.x - cx, m.y - cy);
         return {
           list: this.stand,
@@ -475,13 +503,14 @@ export class HdScene implements Renderer {
       return;
     }
     if (hung.kind === 'stand' && hung.solid && !o.angle && this.wrapOnSolid(sprite, sheet, sx, sy, sw, sh, dx, dy, k, o, hung.solid, hung.z)) return;
-    const { list, point, depthOf } = this.placed();
+    const { list, point, depthOf, depthAt } = this.placed();
     const kind = this.mark_.kind;
     const lit = kind === 'ground' || kind === 'stand' || kind === 'wall' || kind === 'top';
     this.push(list, {
       at: corners.map(([x, y]) => point(x, y)),
       flat: corners,
       depth: depthOf(dy + h),
+      ...(depthAt ? { depths: corners.map(([x]) => depthAt(x)) } : {}),
       sheet,
       src: [sx, sy, sx + sw, sy + sh],
       mirror: o.flipX,

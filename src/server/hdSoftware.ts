@@ -21,6 +21,8 @@ interface Quad {
   at: readonly Vec3[];
   flat: readonly (readonly [number, number])[];
   depth: number;
+  /** Corner by corner, for a wall along a line at an angle (see hdScene). */
+  depths?: readonly number[];
   mirror: boolean;
   color: readonly [number, number, number, number];
   lit: boolean;
@@ -100,7 +102,7 @@ export class SoftHdRenderer implements Renderer {
     this.base.text(text, x, y, color, scale, font);
   }
 
-  private placed(): { list: keyof SoftHdRenderer['lists']; point: (x: number, y: number) => Vec3; depthOf: (y: number) => number; z: number; lit: boolean } {
+  private placed(): { list: keyof SoftHdRenderer['lists']; point: (x: number, y: number) => Vec3; depthOf: (y: number) => number; depthAt?: (x: number) => number; z: number; lit: boolean } {
     const cam = this.cam;
     const cx = this.vw / 2;
     const cy = this.vh / 2;
@@ -113,9 +115,23 @@ export class SoftHdRenderer implements Renderer {
       case 'screen': return { list: 'screen', point: flat, depthOf: (y) => y - cy, z: 0, lit: false };
       case 'air': return { list: 'air', point: onGround, depthOf: (y) => y - cy, z: 0, lit: false };
       case 'ground': return { list: 'ground', point: onGround, depthOf: (y) => y - cy, z: 0, lit: true };
-      case 'wall': return { list: 'stand', depthOf: () => m.foot - cy + 1, point: (x, y) => worldPoint(cam, x - cx, m.foot - cy, (m.foot - y) * raise), z: m.z, lit: true };
+      case 'wall': {
+        const run = m.run;
+        const foot = run ? (x: number) => run.f0 + ((x - run.x0) * (run.f1 - run.f0)) / Math.max(1e-6, run.x1 - run.x0) : () => m.foot;
+        return { list: 'stand', depthOf: () => m.foot - cy + 1, ...(run ? { depthAt: (x: number) => foot(x) - cy + 1 } : {}), point: (x, y) => worldPoint(cam, x - cx, foot(x) - cy, (foot(x) - y) * raise), z: m.z, lit: true };
+      }
       case 'top': return { list: 'stand', depthOf: (y) => y + m.h - cy, point: (x, y) => worldPoint(cam, x - cx, y + m.h - cy, m.h * raise), z: m.z, lit: true };
       case 'stand': {
+        const run = m.run;
+        if (run) {
+          // A picture whose foot runs at an angle: every column stands on its own foot (runtime/hdScene.ts).
+          const foot = (x: number) => run.f0 + ((x - run.x0) * (run.f1 - run.f0)) / Math.max(1e-6, run.x1 - run.x0);
+          return { list: 'stand', depthOf: () => m.y - cy, depthAt: (x: number) => foot(x) - cy, z: m.z, lit: true, point: (x, y) => {
+            const f = foot(x);
+            const h = f - y;
+            return [x - cx, h * cam.cos, (f - cy) * cam.depthScale - h * cam.sin];
+          } };
+        }
         const base = worldPoint(cam, m.x - cx, m.y - cy);
         return { list: 'stand', depthOf: () => m.y - cy, z: m.z, lit: true, point: (x, y) => {
           const h = m.y - y;
@@ -150,7 +166,7 @@ export class SoftHdRenderer implements Renderer {
     const at = out && hung.kind === 'wall'
       ? corners.map(([x, y]) => worldPoint(this.cam, x - this.vw / 2, hung.foot - this.vh / 2 + out, (hung.foot - y) * this.hd.wallHeight))
       : corners.map(([x, y]) => p.point(x, y));
-    this.lists[p.list].push({ sheet, src: [sx, sy, sx + sw, sy + sh], at, flat: corners, depth: p.depthOf(dy + h) + out, mirror: o.flipX, color: [1, 1, 1, o.opacity], lit: p.lit, blend: o.opacity < 1 || p.list === 'air' || p.list === 'screen' ? 1 : 0, z: p.z });
+    this.lists[p.list].push({ sheet, src: [sx, sy, sx + sw, sy + sh], at, flat: corners, depth: p.depthOf(dy + h) + out, ...(p.depthAt && !out ? { depths: corners.map(([x]) => p.depthAt!(x)) } : {}), mirror: o.flipX, color: [1, 1, 1, o.opacity], lit: p.lit, blend: o.opacity < 1 || p.list === 'air' || p.list === 'screen' ? 1 : 0, z: p.z });
   }
 
   rect(x: number, y: number, w: number, h: number, color: string, alpha = 1, blend?: 'add'): void {
@@ -210,12 +226,12 @@ export class SoftHdRenderer implements Renderer {
       const [sx0, sy0, sx1, sy1] = q.src;
       const us = q.mirror ? [sx1, sx0, sx0, sx1] : [sx0, sx1, sx1, sx0];
       const vs = [sy0, sy0, sy1, sy1];
-      const depth = Math.min(1, Math.max(0, ((q.depth + this.vh / 2) / this.vh + 1) / 3));
-      const sort = (depth + Math.min(MAX_Z, Math.max(0, q.z))) / (MAX_Z + 1);
+      const sortOf = (dep: number) => (Math.min(1, Math.max(0, ((dep + this.vh / 2) / this.vh + 1) / 3)) + Math.min(MAX_Z, Math.max(0, q.z))) / (MAX_Z + 1);
+      const sorts = [0, 1, 2, 3].map((c) => sortOf(q.depths?.[c] ?? q.depth));
       const v = q.at.map((p, c) => this.project(p, us[c]!, vs[c]!, q.flat[c]!, flatPlane));
       if (v.some((p) => !p)) continue;
-      this.triangle(q, v[0]!, v[1]!, v[2]!, sort, depthTest, sortBuffer);
-      this.triangle(q, v[0]!, v[2]!, v[3]!, sort, depthTest, sortBuffer);
+      this.triangle(q, v[0]!, v[1]!, v[2]!, [sorts[0]!, sorts[1]!, sorts[2]!], depthTest, sortBuffer);
+      this.triangle(q, v[0]!, v[2]!, v[3]!, [sorts[0]!, sorts[2]!, sorts[3]!], depthTest, sortBuffer);
     }
   }
 
@@ -230,7 +246,8 @@ export class SoftHdRenderer implements Renderer {
     return [p[0] * k + cx, (p[2] * s - p[1] * c) * k + cy, 1 / w, u / w, v / w, flat[0] / w, flat[1] / w];
   }
 
-  private triangle(q: Quad, a: number[], b: number[], c: number[], sort: number, depthTest: boolean, sortBuffer: Float32Array): void {
+  /** `sorts`: draw order at each corner, interpolated across the screen like the GPU does (one value = flat). */
+  private triangle(q: Quad, a: number[], b: number[], c: number[], sorts: readonly [number, number, number], depthTest: boolean, sortBuffer: Float32Array): void {
     const out = this.base.out;
     const W = out.width;
     const H = out.height;
@@ -255,6 +272,7 @@ export class SoftHdRenderer implements Renderer {
         const w2 = 1 - w0 - w1;
         if (w0 < -1e-4 || w1 < -1e-4 || w2 < -1e-4) continue;
         const i = y * W + x;
+        const sort = w0 * sorts[0] + w1 * sorts[1] + w2 * sorts[2];
         if (depthTest && sort < sortBuffer[i]!) continue;
         const oow = flatPlane ? 1 : w0 * a[2]! + w1 * b[2]! + w2 * c[2]!;
         const at = (n: number) => (w0 * a[n]! + w1 * b[n]! + w2 * c[n]!) / oow;

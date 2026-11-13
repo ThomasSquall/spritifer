@@ -3079,6 +3079,8 @@ function actorMark(w: World, r: Renderer, a: Actor, camX: number, camY: number, 
 const FOOT_STRIP = 4;
 /** Cell of the index of solid instances, px. */
 const SOLID_CELL = 64;
+/** Boxes wider than this are paired apart in touchingPairs. */
+const WIDE = 512;
 /** Solid instances from which collisions use the grid index (fewer: the plain scan, as always). */
 export const SOLID_INDEX_MIN = 256;
 
@@ -3198,22 +3200,74 @@ const NO_TOUCH: Set<Actor> = new Set();
  * Who touches whom. Boxes sorted by left edge only need comparing with the ones that start before they end, so scenes
  * with hundreds of props stay cheap. Pairs are recorded in actor order, so events fire in a stable order.
  */
-function touchingPairs(live: readonly Actor[]): Map<Actor, Set<Actor>> {
+/** Whether an actor reacts to what it touches: collision hooks in its components, or collision events of its type. */
+function listensToTouch(a: Actor): boolean {
+  return a.components.length > 0 || a.type.events.some((e) => e.trigger.type === 'collision' || e.trigger.type === 'overlapping');
+}
+
+/**
+ * Pairs of live actors whose boxes overlap, as sets per actor, in the order a full sweep gives them. Only pairs where at
+ * least one actor listens to touches can matter (collision hooks and events read them), so two inert pieces of scenery
+ * that overlap (a painted map's bases and pictures) are never paired: same result for everything that reads it.
+ */
+export function touchingPairs(live: readonly Actor[], stats?: { checks: number }): Map<Actor, Set<Actor>> {
   const n = live.length;
   const boxes = live.map((a) => a.box());
+  const listen = live.map(listensToTouch);
+  const listeners = listen.reduce((c, l) => c + (l ? 1 : 0), 0);
   const order = Array.from({ length: n }, (_, i) => i).sort((i, j) => boxes[i]!.x - boxes[j]!.x);
   const pairs: number[] = [];
-  for (let a = 0; a < n; a++) {
-    const i = order[a]!;
-    const bi = boxes[i]!;
-    const right = bi.x + bi.w;
-    for (let b = a + 1; b < n; b++) {
-      const j = order[b]!;
-      const bj = boxes[j]!;
-      if (bj.x >= right) break;
-      if (overlap(bi, bj)) pairs.push(i < j ? i * n + j : j * n + i);
+  let checks = 0;
+  if (listeners * 4 > n) {
+    // Many listeners: the plain sweep (every pair once), keeping the pairs a listener can read.
+    for (let a = 0; a < n; a++) {
+      const i = order[a]!;
+      const bi = boxes[i]!;
+      const right = bi.x + bi.w;
+      for (let b = a + 1; b < n; b++) {
+        const j = order[b]!;
+        const bj = boxes[j]!;
+        if (bj.x >= right) break;
+        checks++;
+        if ((listen[i] || listen[j]) && overlap(bi, bj)) pairs.push(i < j ? i * n + j : j * n + i);
+      }
+    }
+  } else {
+    // Few listeners (a painted map: thousands of inert pieces): sweep along x from listeners only. Very wide boxes
+    // (wider than WIDE px) are checked against every listener apart, so they don't make every leftward scan run to the start.
+    const wide: number[] = [];
+    let maxW = 0;
+    for (let i = 0; i < n; i++) {
+      if (boxes[i]!.w > WIDE) wide.push(i);
+      else maxW = Math.max(maxW, boxes[i]!.w);
+    }
+    const pos = new Int32Array(n);
+    order.forEach((i, k) => (pos[i] = k));
+    for (let i = 0; i < n; i++) {
+      if (!listen[i]) continue;
+      const bi = boxes[i]!;
+      for (let k = pos[i]! + 1; k < n; k++) {
+        const j = order[k]!;
+        const bj = boxes[j]!;
+        if (bj.x >= bi.x + bi.w) break;
+        checks++;
+        if (overlap(bi, bj)) pairs.push(i < j ? i * n + j : j * n + i);
+      }
+      for (let k = pos[i]! - 1; k >= 0; k--) {
+        const j = order[k]!;
+        const bj = boxes[j]!;
+        if (bj.x + maxW <= bi.x) break;
+        checks++;
+        if (overlap(bi, bj)) pairs.push(i < j ? i * n + j : j * n + i);
+      }
+      for (const j of wide) {
+        if (j === i) continue;
+        checks++;
+        if (overlap(bi, boxes[j]!)) pairs.push(i < j ? i * n + j : j * n + i);
+      }
     }
   }
+  if (stats) stats.checks = checks;
   pairs.sort((p, q) => p - q);
   const out = new Map<Actor, Set<Actor>>();
   const add = (a: Actor, b: Actor) => {
@@ -3221,7 +3275,10 @@ function touchingPairs(live: readonly Actor[]): Map<Actor, Set<Actor>> {
     if (!set) out.set(a, (set = new Set()));
     set.add(b);
   };
+  let last = -1;
   for (const p of pairs) {
+    if (p === last) continue;
+    last = p;
     const i = Math.floor(p / n);
     const j = p % n;
     add(live[i]!, live[j]!);

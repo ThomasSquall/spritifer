@@ -742,6 +742,77 @@ describe('index of solid instances', () => {
   });
 });
 
+describe('touching pairs', () => {
+  it('gives listeners the same contacts, in the same order, as pairing everything', () => {
+    const b = platformBundle();
+    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 90 }];
+    b.game.objects[0].events.push({ trigger: { type: 'overlapping', with: 'any' }, conditions: [], actions: [{ type: 'add', target: 'score', value: '1' }] });
+    b.game.objects.push(normalizeObject({ name: 'deco', sprite: 'coin' }));
+    b.scenes.level1.instances = [{ id: 'p', object: 'player', x: 40, y: 150 }];
+    for (let k = 0; k < 60; k++) b.scenes.level1.instances.push({ id: `d${k}`, object: 'deco', x: 20 + (k * 37) % 260, y: 140 + (k * 13) % 40, hitbox: { x: 0, y: 0, w: 6 + (k % 9) * 4, h: 8 } });
+    const w = new World(b);
+    const input = emptyInput();
+    input.down.add('right');
+    // Every frame against brute force: every deco overlapping the player, in instance order.
+    let touchedFrames = 0;
+    for (let f = 0; f < 120; f++) {
+      w.step(input);
+      const p = w.actors.find((a) => a.type.name === 'player')!;
+      const pb = p.box();
+      const expected = w.actors.filter((a) => a !== p && !a.destroyed && a.box().x < pb.x + pb.w && pb.x < a.box().x + a.box().w && a.box().y < pb.y + pb.h && pb.y < a.box().y + a.box().h).map((a) => a.sceneId);
+      expect([...p.touching].map((a) => a.sceneId)).toEqual(expected);
+      if (expected.length) touchedFrames++;
+    }
+    expect(touchedFrames).toBeGreaterThan(10);
+    expect(w.globals.score).toBeGreaterThan(0);
+  });
+});
+
+describe('touching pairs: cost and result with many listeners or a very wide box', () => {
+  const world = (n: number, listeners: number) => {
+    const b = platformBundle();
+    b.game.objects.push(normalizeObject({ name: 'ear', sprite: 'coin', events: [{ trigger: { type: 'overlapping', with: 'any' }, conditions: [], actions: [] }] }));
+    b.game.objects.push(normalizeObject({ name: 'rock', sprite: 'coin' }));
+    const inst: Instance[] = [{ id: 'big', object: 'rock', x: 0, y: 0, hitbox: { x: 0, y: 0, w: 4000, h: 4000 } }];
+    for (let k = 0; k < n; k++) inst.push({ id: `a${k}`, object: k < listeners ? 'ear' : 'rock', x: (k * 37) % 3900, y: (k * 53) % 3900, hitbox: { x: 0, y: 0, w: 10, h: 10 } });
+    b.scenes.level1.instances = inst;
+    return new World(b);
+  };
+  const brute = (live: World['actors']) => {
+    const out = new Map<unknown, string[]>();
+    const listens = (a: World['actors'][number]) => a.type.events.length > 0;
+    for (let i = 0; i < live.length; i++) for (let j = 0; j < live.length; j++) {
+      if (i === j) continue;
+      const a = live[i]!, c = live[j]!;
+      if (!listens(a) && !listens(c)) continue;
+      const p = a.box(), q = c.box();
+      if (p.x < q.x + q.w && q.x < p.x + p.w && p.y < q.y + q.h && q.y < p.y + p.h) {
+        if (!out.has(a)) out.set(a, []);
+        out.get(a)!.push(c.sceneId!);
+      }
+    }
+    return out;
+  };
+
+  it('finds the same pairs as checking everything, with many listeners and with few', async () => {
+    const { touchingPairs } = await import('../src/core/game/engine.js');
+    for (const listeners of [300, 20]) {
+      const w = world(300, listeners);
+      const got = touchingPairs(w.actors);
+      const want = brute(w.actors);
+      expect(new Map([...got].map(([a, s]) => [a, [...s].map((o) => o.sceneId)]))).toEqual(want);
+    }
+  });
+
+  it('stays close to one sweep when every instance listens and one box is as wide as the scene', async () => {
+    const { touchingPairs } = await import('../src/core/game/engine.js');
+    const w = world(3000, 3000);
+    const stats = { checks: 0 };
+    touchingPairs(w.actors, stats);
+    expect(stats.checks).toBeLessThan(3000 * 40);
+  });
+});
+
 describe('foot line strips: mirroring, sprite offset, blinking, zoom', () => {
   const sheet: Bitmap = { width: 128, height: 32, data: new Uint8ClampedArray(128 * 32 * 4) };
   for (let y = 0; y < 32; y++) for (let x = 0; x < 128; x++) sheet.data.set([(x * 37) % 256, (y * 53) % 256, ((x + y) * 19) % 256, x % 9 === 0 && y % 5 === 0 ? 0 : 255], (y * 128 + x) * 4);

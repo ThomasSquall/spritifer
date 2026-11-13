@@ -305,6 +305,18 @@ export interface Instance {
   hdPose?: 'flat' | 'stand';
   /** Draw order, over what its object type says. */
   order?: number;
+  /**
+   * Collision box of this instance, over its object type's (relative to the instance, like the type's). It is also the
+   * box the y-sort and the 2D-HD foot read: a picture cut out of a painted map stands where its base is.
+   */
+  hitbox?: Hitbox;
+}
+
+/** The hitbox that counts for a placed instance or an actor: its own, else its object type's. The one place to read it. */
+export function hitboxOf(inst: { hitbox?: Hitbox | (() => Hitbox); instHitbox?: Hitbox } | undefined, type: { hitbox?: Hitbox } | undefined): Hitbox | undefined {
+  // An actor carries it as instHitbox (its hitbox() is the resolved, mirrored box); a placed instance as hitbox.
+  const own = inst?.instHitbox ?? (typeof inst?.hitbox === 'object' ? inst.hitbox : undefined);
+  return own ?? type?.hitbox;
 }
 
 export interface SceneBackground {
@@ -743,6 +755,8 @@ export function normalizeScene(v: unknown): Scene {
     if (typeof I.group === 'string' && I.group) inst.group = I.group;
     if (I.hdPose === 'flat' || I.hdPose === 'stand') inst.hdPose = I.hdPose;
     if (typeof I.order === 'number') inst.order = I.order;
+    const ih = I.hitbox as Record<string, unknown> | undefined;
+    if (ih && typeof ih === 'object') inst.hitbox = { x: num(ih.x, 0), y: num(ih.y, 0), w: Math.max(1, num(ih.w, 8)), h: Math.max(1, num(ih.h, 8)) };
     return inst;
   });
   const backgrounds: SceneBackground[] = (Array.isArray(o.backgrounds) ? o.backgrounds : []).map((b: unknown) => {

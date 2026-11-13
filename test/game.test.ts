@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { compile, checkExpr } from '../src/core/game/expr.js';
-import { World, emptyInput, runPlaytest } from '../src/core/game/engine.js';
+import { World, emptyInput, renderWorld, runPlaytest } from '../src/core/game/engine.js';
 import { validateGame } from '../src/core/game/catalog.js';
-import { type GameBundle, type SpriteAsset, createGame, createScene, normalizeObject } from '../src/core/game/types.js';
+import { type GameBundle, type Instance, type Scene, type SpriteAsset, createGame, createScene, normalizeObject } from '../src/core/game/types.js';
 import { BUILTIN_FONT, PIXEL_OPERATOR, gameFont, measureText, rasterText } from '../src/core/game/font.js';
 import { wrapText } from '../src/core/game/script.js';
 import { nodeEvaluator } from '../src/server/scripts.js';
@@ -491,5 +491,73 @@ Narrator text without a speaker.
     const w = new World(b);
     expect(w.actors.find((a) => a.instName === 'Kid')!.asset!.name).toBe('hero');
     expect(w.actors.find((a) => a.instName === 'Elder')!.asset!.name).toBe('coin');
+  });
+});
+
+describe('instance hitbox', () => {
+  const scene = (wall: { hitbox?: { x: number; y: number; w: number; h: number }; flipX?: boolean } = {}) => {
+    const b = platformBundle();
+    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 80 }];
+    b.game.objects.push(normalizeObject({ name: 'cutout', sprite: 'wall', behaviors: [{ type: 'solid' }] }));
+    b.sprites.wall = box('wall', 64, 64);
+    b.scenes.level1.ySort = true;
+    b.scenes.level1.instances = [
+      { id: 'p', object: 'player', x: 8, y: 40 },
+      { id: 'w', object: 'cutout', x: 40, y: 0, ...wall },
+    ];
+    return b;
+  };
+  /** Order in which the frame draws the two sprites. */
+  const order = (w: World): string[] => {
+    const seen: string[] = [];
+    const r = { clear() {}, rect() {}, text() {}, image(s: string) { if (s === 'hero' || s === 'wall') seen.push(s); } };
+    renderWorld(w, r as unknown as Parameters<typeof renderWorld>[1]);
+    return seen;
+  };
+
+  it('collides with its own box, not the type\'s (the whole sprite)', () => {
+    const w = new World(scene({ hitbox: { x: 0, y: 48, w: 64, h: 16 } }));
+    const p = w.actors.find((a) => a.type.name === 'player')!;
+    const wall = w.actors.find((a) => a.type.name === 'cutout')!;
+    expect(wall.box()).toEqual({ x: 40, y: 48, w: 64, h: 16 });
+    // Feet above the base (box 20..36): walks across the picture, behind it in depth.
+    p.y = 20;
+    const input = emptyInput();
+    input.down.add('right');
+    for (let i = 0; i < 60; i++) w.step(input);
+    expect(p.x).toBeGreaterThan(60);
+    // Feet on the base's row: stopped at its left edge.
+    const v = new World(scene({ hitbox: { x: 0, y: 48, w: 64, h: 16 } }));
+    const q = v.actors.find((a) => a.type.name === 'player')!;
+    for (let i = 0; i < 60; i++) v.step(input);
+    expect(q.x + 16).toBeLessThanOrEqual(40.5);
+  });
+
+  it('sorts by its own box and mirrors it with the sprite', () => {
+    const w = new World(scene({ hitbox: { x: 0, y: 60, w: 10, h: 4 } }));
+    // Player feet (y 40 + 16) are above the wall's base (64): the wall is drawn after, in front.
+    expect(order(w)).toEqual(['hero', 'wall']);
+    // A base high up the picture (bottom at 24, the sprite ends at 64): now the player's feet are below it, so the wall
+    // is drawn first, behind. With the type's box (the whole sprite) it would still be in front.
+    const high = new World(scene({ hitbox: { x: 0, y: 20, w: 10, h: 4 } }));
+    expect(order(high)).toEqual(['wall', 'hero']);
+    expect(order(new World(scene({})))).toEqual(['hero', 'wall']);
+    const flipped = new World(scene({ hitbox: { x: 0, y: 60, w: 10, h: 4 }, flipX: true }));
+    expect(flipped.actors.find((a) => a.type.name === 'cutout')!.box()).toEqual({ x: 40 + 54, y: 60, w: 10, h: 4 });
+  });
+
+  it('stands in 2D-HD on the bottom of its own box', () => {
+    const w = new World(scene({ hitbox: { x: 0, y: 40, w: 64, h: 10 } }));
+    let foot: number | null = null;
+    let last: { kind: string; y?: number } = { kind: '' };
+    const r = { clear() {}, rect() {}, text() {}, mark(m: { kind: string; y?: number }) { last = m; }, image(s: string) { if (s === 'wall' && last.kind === 'stand') foot = last.y ?? null; } };
+    renderWorld(w, r as unknown as Parameters<typeof renderWorld>[1]);
+    const cam = w.camera;
+    expect(foot).toBe((50 - cam.y) * (cam.zoom ?? 1));
+  });
+
+  it('falls back to the type\'s box when it has none', () => {
+    const w = new World(scene());
+    expect(w.actors.find((a) => a.type.name === 'cutout')!.box()).toEqual({ x: 40, y: 0, w: 64, h: 64 });
   });
 });

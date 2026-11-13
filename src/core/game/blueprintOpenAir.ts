@@ -8,7 +8,7 @@ import { type Blueprint, type BpContext, type BpElement, type BpMount, type BpPl
 import { findWater } from './reflections.js';
 import type { SizeOf } from './sceneOps.js';
 import type { TileResolver } from './tilerules.js';
-import type { Instance, ObjectType, Scene } from './types.js';
+import { type Instance, type ObjectType, type Scene, hitboxOf } from './types.js';
 
 export interface BpSurface {
   solid: Uint8Array;
@@ -239,9 +239,10 @@ export function lintOpenAir(s: Scene, surface: BpSurface, ctx: OpenAirContext, a
   // A trunk the player walks through.
   for (const i of s.instances) {
     const o = ctx.types.get(i.object);
-    if (!o?.sway || !o.hitbox || !hasSprite(i) || o.behaviors.some((b) => b.type === 'solid') || i.activeIf) continue;
-    const cx = Math.floor((i.x + o.hitbox.x + o.hitbox.w / 2) / T);
-    const cy = Math.floor((i.y + o.hitbox.y + o.hitbox.h / 2) / T);
+    const hb = hitboxOf(i, o);
+    if (!o?.sway || !hb || !hasSprite(i) || o.behaviors.some((b) => b.type === 'solid') || i.activeIf) continue;
+    const cx = Math.floor((i.x + hb.x + hb.w / 2) / T);
+    const cy = Math.floor((i.y + hb.y + hb.h / 2) / T);
     if (walkable(cx, cy) && walkable(cx, cy - 1) && walkable(cx - 1, cy) && walkable(cx + 1, cy)) add('walk-through', `${i.object} stands in the open with nothing solid under its trunk: it can be walked through`, [cx, cy]);
   }
 

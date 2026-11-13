@@ -6,7 +6,7 @@
 import type { AtmosphereActor } from './atmosphere.js';
 import type { Renderer } from './engine.js';
 import type { TileResolver } from './tilerules.js';
-import type { SceneReflections, TileLayer } from './types.js';
+import { type SceneReflections, type TileLayer, hitboxOf } from './types.js';
 import { groupRows, swayBase, swayShift } from './wind.js';
 
 /** Three seconds in small steps: every frame of any animated rule, at any usual speed. */
@@ -106,7 +106,7 @@ export function reflectionBands(a: AtmosphereActor, cfg: SceneReflections, map: 
   if (!asset?.name || !asset.frames?.length) return [];
   const f = asset.frames[a.frameIndex?.() ?? 0] ?? asset.frames[0]!;
   const offset = a.type.spriteOffset;
-  const base = swayBase(a.type, f.h);
+  const base = swayBase({ hitbox: hitboxOf(a, a.type), spriteOffset: a.type.spriteOffset }, f.h);
   if (base <= 0) return [];
   const left = a.x + (offset?.x ?? 0);
   const foot = a.y + (offset?.y ?? 0) + base;

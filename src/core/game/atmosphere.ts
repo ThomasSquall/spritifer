@@ -6,7 +6,7 @@
 
 import type { Renderer } from './engine.js';
 import { resolveRelief } from './relief.js';
-import type { Hitbox, LightDef, ObjectSway, SceneAtmosphere, SceneMotes, SceneSun, SpriteAsset } from './types.js';
+import { type Hitbox, type LightDef, type ObjectSway, type SceneAtmosphere, type SceneMotes, type SceneSun, type SpriteAsset, hitboxOf } from './types.js';
 import { type SwayBand, groupRows, swayBase, swayShift } from './wind.js';
 
 /** An instance as the atmosphere passes see it (the engine's Actor, or a placed instance in the scene editor). */
@@ -21,6 +21,8 @@ export interface AtmosphereActor {
   readonly light: LightDef | undefined;
   readonly asset: { width: number; height: number; name?: string; frames?: readonly { x: number; y: number; w: number; h: number }[] } | undefined;
   readonly type: { hud?: boolean; shadow?: number; hitbox?: Hitbox; spriteOffset?: { x: number; y: number }; sway?: ObjectSway };
+  /** Its own collision box, over the type's (see hitboxOf). */
+  readonly instHitbox?: Hitbox;
   /** Mirrored and on which frame: the shadow cast by the sun follows the drawing. */
   readonly flipX?: boolean;
   frameIndex?(): number;
@@ -90,8 +92,9 @@ export function collectLights(w: AtmosphereWorld, camX: number, camY: number, zo
 /** Shadow width of an instance in pixels (0 = none). */
 function shadowWidth(a: AtmosphereActor): number {
   if (a.type.shadow !== undefined) return a.type.shadow;
-  if (!a.type.hitbox || a.z < 0) return 0;
-  return a.type.hitbox.w + 2;
+  const hb = hitboxOf(a, a.type);
+  if (!hb || a.z < 0) return 0;
+  return hb.w + 2;
 }
 
 /** A silhouette already laid on the ground: rows of [x, y, length] relative to the sprite, ready to draw. */
@@ -236,7 +239,7 @@ function castShadow(r: Renderer, a: AtmosphereActor, sunKey: string, dx: number,
   // With the sun exactly at the side every height falls on the same rows, and there is nothing to separate.
   let bands: SwayBand[] | undefined;
   if (a.type.sway && Math.abs(dy) >= 0.05 && Number.isInteger(zoom)) {
-    const shift = swayShift(a.type.sway, swayBase(a.type, f.h), a.x, a.y, clock);
+    const shift = swayShift(a.type.sway, swayBase({ hitbox: hitboxOf(a, a.type), spriteOffset: a.type.spriteOffset }, f.h), a.x, a.y, clock);
     const { bottom, reachY } = shape;
     bands = groupRows(shape.firstRow, shape.endRow, (row) => shift(Math.max(0, Math.round(bottom - (row - reachY) / dy))));
   }

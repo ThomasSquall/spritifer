@@ -8,7 +8,7 @@ import { draftBlueprint } from '../core/game/blueprintDraft.js';
 import { type BpSurface, draftPainted, isScatter, planPainted, surfaceOf } from '../core/game/blueprintOpenAir.js';
 import { TileResolver } from '../core/game/tilerules.js';
 import { compile } from '../core/game/expr.js';
-import type { GameProject, Instance, ObjectType, Scene, Value } from '../core/game/types.js';
+import { type GameProject, type Instance, type ObjectType, type Scene, type Value, hitboxOf } from '../core/game/types.js';
 import { resolveObjectTypes } from '../core/game/variants.js';
 import type { Workspace } from './store.js';
 
@@ -26,7 +26,8 @@ export function blueprintContext(ws: Workspace, tile: number, flowSprite?: strin
     sizeOf: (e) => sizes.get(e.sprite ?? types.get(e.object)?.sprite ?? '') ?? null,
     bodyOf: (i) => {
       const o = types.get(i.object);
-      return o?.hitbox && o.behaviors.some((b) => b.type === 'solid') ? { x: i.x + o.hitbox.x, y: i.y + o.hitbox.y, w: o.hitbox.w, h: o.hitbox.h } : null;
+      const hb = hitboxOf(i, o);
+      return hb && o?.behaviors.some((b) => b.type === 'solid') ? { x: i.x + hb.x, y: i.y + hb.y, w: hb.w, h: hb.h } : null;
     },
   };
   return { ctx, types };

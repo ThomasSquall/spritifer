@@ -933,6 +933,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       active_if: z.string().nullable().optional().describe('Expression: the instance exists only while true (null or "" = always)'),
       group: z.string().nullable().optional().describe('Named group (null clears)'),
       light: lightSchema.nullable().optional().describe('Light override (radius 0 = off, null = the object type\'s)'),
+      hitbox: z.object({ x: z.number(), y: z.number(), w: z.number().min(1), h: z.number().min(1) }).nullable().optional().describe('Collision box of these instances, relative to each (over the object type\'s; also used for the y-sort and the 2D-HD foot). null = the object type\'s'),
       props: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       components: z.record(z.string(), z.union([z.record(z.string(), z.union([valueSchema, z.null()])), z.null()])).optional().describe('Component params by component name (merged; null value deletes a param, null component removes the override)'),
     },
@@ -982,6 +983,10 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
             const l = a.light === null ? undefined : normalizeLight(a.light, true);
             if (l) i.light = l;
             else delete i.light;
+          }
+          if (a.hitbox !== undefined) {
+            if (a.hitbox === null) delete i.hitbox;
+            else i.hitbox = { x: a.hitbox.x, y: a.hitbox.y, w: a.hitbox.w, h: a.hitbox.h };
           }
           for (const [k, v] of Object.entries(a.props ?? {})) {
             i.props ??= {};

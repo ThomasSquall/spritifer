@@ -7,7 +7,7 @@
 import { ACTION_MAP, BEHAVIOR_MAP, CONDITION_MAP, TRIGGER_MAP, withDefaults } from './catalog.js';
 import { type ExprContext, MATH_FUNCTIONS, compile, fmt, parseTarget, toNum, truthy } from './expr.js';
 import { BUILTIN_FONT, type PixelFont, gameFont, measureText } from './font.js';
-import { type Behavior, type ComponentOverrides, type DataRow, type DataTable, type EventStep, type GameBundle, type GameEvent, type GameProject, type Hitbox, type Instance, type LightDef, type ObjectType, type Scene, type SpriteAsset, type Value, cellValue } from './types.js';
+import { type Behavior, type ComponentOverrides, type DataRow, type DataTable, type EventStep, type GameBundle, type GameEvent, type GameProject, type Hitbox, type Instance, type LightDef, type ObjectType, type Scene, type SpriteAsset, type Value, cellValue, hitboxOf } from './types.js';
 import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, fieldsOf, scaledRenderer, wrapText } from './script.js';
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
 import { resolveObjectTypes } from './variants.js';
@@ -150,6 +150,8 @@ export class Actor {
   sceneId?: string;
   /** The instance's own say on lying down or standing up in the 2D-HD perspective. */
   hdPose?: 'flat' | 'stand';
+  /** Its own collision box, from the placed instance (over the object type's). */
+  instHitbox?: Hitbox;
 
   constructor(id: number, type: ObjectType, asset: SpriteAsset | undefined, x: number, y: number, now: number) {
     this.id = id;
@@ -187,8 +189,9 @@ export class Actor {
   }
 
   hitbox(): Hitbox {
-    if (this.type.hitbox) {
-      const hb = this.type.hitbox;
+    const declared = hitboxOf(this, this.type);
+    if (declared) {
+      const hb = declared;
       // Mirror the hitbox with the sprite.
       return this.flipX && this.asset ? { x: this.asset.width - hb.x - hb.w, y: hb.y, w: hb.w, h: hb.h } : hb;
     }
@@ -703,6 +706,7 @@ export class World {
     if (inst.flipX) a.flipX = true;
     if (inst.light) a.light = inst.light.radius > 0 ? inst.light : undefined;
     if (inst.hdPose) a.hdPose = inst.hdPose;
+    if (inst.hitbox) a.instHitbox = inst.hitbox;
     if (inst.order !== undefined) a.z = inst.order;
     for (const t of inst.tags ?? []) a.tags.add(t);
     a.componentConfig = inst.components;
@@ -2977,7 +2981,7 @@ function drawActor(w: World, r: Renderer, a: Actor, camX: number, camY: number, 
     const opts = { flipX: a.flipX, opacity: a.opacity, angle: a.angle, ...(zoom !== 1 ? { scale: zoom } : {}) };
     // Bands need whole screen rows to meet without a seam; a zoom tween in progress draws the plant still.
     if (a.type.sway && !a.angle && Number.isInteger(zoom)) {
-      for (const b of swayBands(a.type.sway, f.h, swayBase(a.type, f.h), a.x, a.y, w.clock, a.swayPush)) r.image(a.asset.name, f.x, f.y + b.row, f.w, b.rows, x + b.offset * zoom, y + b.row * zoom, opts);
+      for (const b of swayBands(a.type.sway, f.h, swayBase({ hitbox: hitboxOf(a, a.type), spriteOffset: a.type.spriteOffset }, f.h), a.x, a.y, w.clock, a.swayPush)) r.image(a.asset.name, f.x, f.y + b.row, f.w, b.rows, x + b.offset * zoom, y + b.row * zoom, opts);
     } else r.image(a.asset.name, f.x, f.y, f.w, f.h, x, y, opts);
   }
   if (a.type.text !== undefined && a.textOverride) {

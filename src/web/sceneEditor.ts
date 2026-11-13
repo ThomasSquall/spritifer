@@ -5,7 +5,7 @@ import { swayBands, swayBase } from '../core/game/wind.js';
 import { RainField, drawShafts } from '../core/game/weather.js';
 import { type WaterMap, addWaterActors, drawReflections, findWater, reflectionZ } from '../core/game/reflections.js';
 import { type AtmosphereActor, type AtmosphereWorld, MoteField, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
-import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
+import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, hitboxOf, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
 import { CanvasRenderer } from '../runtime/canvasRenderer.js';
 import { atmosphereEditor, lightEditor } from './atmosphereUi.js';
 import { HdPreview } from './hdPreview.js';
@@ -398,7 +398,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     const obj = state.effective(inst.object);
     const fr = instanceFrame(inst);
     const asset = fr ? { width: fr.a.width, height: fr.a.height, name: fr.a.name, frames: [fr.f] } : undefined;
-    const hb = obj?.hitbox;
+    const hb = hitboxOf(inst, obj);
     const b = hb
       ? { x: inst.x + (inst.flipX && asset ? asset.width - hb.x - hb.w : hb.x), y: inst.y + hb.y, w: hb.w, h: hb.h }
       : instanceBox(inst);
@@ -565,7 +565,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
           const drawX = inst.x + (obj?.spriteOffset?.x ?? 0);
           const drawY = inst.y + (obj?.spriteOffset?.y ?? 0);
           // In the game look the wind moves plants as in Play; a whole sprite is one band that stays still.
-          const bands = look && obj?.sway ? swayBands(obj.sway, fr.f.h, swayBase(obj, fr.f.h), inst.x, inst.y, clock) : [{ row: 0, rows: fr.f.h, offset: 0 }];
+          const bands = look && obj?.sway ? swayBands(obj.sway, fr.f.h, swayBase({ hitbox: hitboxOf(inst, obj), spriteOffset: obj.spriteOffset }, fr.f.h), inst.x, inst.y, clock) : [{ row: 0, rows: fr.f.h, offset: 0 }];
           for (const b of bands) {
             const bandX = drawX + b.offset;
             relief?.r.captureNormals(fr.a.name, fr.f.x, fr.f.y + b.row, fr.f.w, b.rows, bandX - view.x, drawY + b.row - view.y, { flipX: !!inst.flipX, opacity: 1 });
@@ -1786,6 +1786,20 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       const inp = h('input', { type: 'number', class: 'num', value: String(get()), onchange: () => edit(() => set(Number(inp.value) || 0)) });
       return h('label', {}, label, inp);
     };
+    // Its own hitbox (collision, y-sort, 2D-HD foot), over the object type's: all empty = the type's.
+    const instanceHitboxRow = () => {
+      const keys4 = ['x', 'y', 'w', 'h'] as const;
+      const inputs = keys4.map((k) => h('input', { type: 'number', class: 'num tiny-num', value: inst.hitbox ? String(inst.hitbox[k]) : '', placeholder: obj?.hitbox ? String(obj.hitbox[k]) : '', onchange: () => edit(() => {
+        const vals = inputs.map((i) => i.value.trim());
+        if (vals.every((v) => v === '')) delete inst.hitbox;
+        else {
+          const base = inst.hitbox ?? obj?.hitbox ?? { x: 0, y: 0, w: 8, h: 8 };
+          const n = (i: number) => (vals[i] === '' ? base[keys4[i]!] : Number(vals[i]));
+          inst.hitbox = { x: n(0), y: n(1), w: Math.max(1, n(2)), h: Math.max(1, n(3)) };
+        }
+      }) }) as HTMLInputElement);
+      return h('label', { title: 'Collision box of this instance, relative to it (also the y-sort and the 2D-HD foot). Empty = the object type\'s' }, 'Hitbox', h('div', { class: 'row4' }, ...inputs));
+    };
     const parse = parseValue;
     const setProp = (k: string, v: Value | undefined) => {
       inst.props ??= {};
@@ -1869,6 +1883,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         activeIfRow(),
         h('label', { title: 'Named group inside this scene, for working on many instances at once (Groups tab). The game ignores it.' }, 'Group', h('input', { type: 'text', value: inst.group ?? '', placeholder: 'none', spellcheck: false, onchange: (e: Event) => edit(() => { const v = (e.target as HTMLInputElement).value.trim(); if (v) inst.group = v; else delete inst.group; }) })),
         h('div', { class: 'row2' }, num('x', () => inst.x, (v) => (inst.x = v)), num('y', () => inst.y, (v) => (inst.y = v))),
+        instanceHitboxRow(),
         h('div', {}, h('div', { class: 'muted small' }, keys.size ? 'Properties (empty = default of the type)' : 'Properties'), props,
           h('button', { class: 'small ghost', onclick: async () => {
             const k = await promptText('Instance property', 'Name (only this instance, e.g. hp, line, reward)', '');

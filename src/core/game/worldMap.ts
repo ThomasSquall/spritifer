@@ -1,7 +1,7 @@
 /** The scenes of a game and how they connect, plus the checks that need the map: unreachable scenes, one-way doors, things placed where nobody can get. */
 
 import type { Problem } from './catalog.js';
-import type { Instance, ObjectType, Scene } from './types.js';
+import { type Instance, type ObjectType, type Scene, hitboxOf } from './types.js';
 import { resolveObjectTypes } from './variants.js';
 import { type ProjectSources, findUsages } from './usages.js';
 
@@ -96,7 +96,8 @@ type SizeOf = (sprite: string | undefined) => { w: number; h: number } | undefin
 
 /** Center of what collides with the ground: the hitbox, or the bottom of the sprite when there is none. */
 function foot(i: Instance, o: ObjectType, sizeOf: SizeOf, tile: number): { x: number; y: number } {
-  if (o.hitbox) return { x: i.x + o.hitbox.x + o.hitbox.w / 2, y: i.y + o.hitbox.y + o.hitbox.h / 2 };
+  const hb = hitboxOf(i, o);
+  if (hb) return { x: i.x + hb.x + hb.w / 2, y: i.y + hb.y + hb.h / 2 };
   const size = sizeOf(i.sprite ?? o.sprite) ?? { w: tile, h: tile };
   return { x: i.x + size.w / 2, y: i.y + size.h - tile / 2 };
 }
@@ -142,7 +143,7 @@ export function checkMaps(p: ProjectSources, world: WorldMap, sizeOf: SizeOf): P
     // Stuck in a wall: anything with a body and a sprite. Invisible triggers are often placed on purpose over walls.
     for (const i of s.instances) {
       const o = types.get(i.object);
-      if (!o || o.hud || !(i.sprite ?? o.sprite) || !(o.hitbox && interactive(o))) continue;
+      if (!o || o.hud || !(i.sprite ?? o.sprite) || !(hitboxOf(i, o) && interactive(o))) continue;
       const c = cell(i, o);
       if (inside(c.x, c.y) && solid[c.y * s.cols + c.x]) out.push({ where: here(i), message: `stands on a solid tile (${c.x}, ${c.y})` });
     }
@@ -150,7 +151,8 @@ export function checkMaps(p: ProjectSources, world: WorldMap, sizeOf: SizeOf): P
     // Props glued together: two bodies in the same place. Alternatives for different moments of the story don't count.
     const bodies = s.instances.flatMap((i) => {
       const o = types.get(i.object);
-      return o?.hitbox && (i.sprite ?? o.sprite) && o.behaviors.some((b) => b.type === 'solid') ? [{ i, x: i.x + o.hitbox.x, y: i.y + o.hitbox.y, w: o.hitbox.w, h: o.hitbox.h }] : [];
+      const hb = hitboxOf(i, o);
+      return hb && (i.sprite ?? o?.sprite) && o?.behaviors.some((b) => b.type === 'solid') ? [{ i, x: i.x + hb.x, y: i.y + hb.y, w: hb.w, h: hb.h }] : [];
     });
     for (let a = 0; a < bodies.length; a++) {
       for (let b = a + 1; b < bodies.length; b++) {

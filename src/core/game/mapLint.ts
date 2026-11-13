@@ -9,7 +9,7 @@ import { lintOpenAir, planPainted, surfaceOf } from './blueprintOpenAir.js';
 import { type WallCell, findWalls } from './hd3d.js';
 import type { SizeOf } from './sceneOps.js';
 import type { TileResolver } from './tilerules.js';
-import type { ObjectType, Scene } from './types.js';
+import { type ObjectType, type Scene, hitboxOf } from './types.js';
 
 export interface LintContext {
   types: Map<string, ObjectType>;
@@ -124,7 +124,7 @@ function lintDecor(s: Scene, ctx: LintContext, add: (code: string, message: stri
   // A big picture over the only way through: the player walks across it as if it weren't there.
   for (const { i, x, y, w, h } of shown) {
     const o = ctx.types.get(i.object)!;
-    if (o.behaviors.some((b) => b.type === 'solid') || o.hitbox) continue;
+    if (o.behaviors.some((b) => b.type === 'solid') || hitboxOf(i, o)) continue;
     const footY = Math.floor((y + h - 1) / T);
     for (let cx = Math.floor((x + 8) / T); cx <= Math.floor((x + w - 9) / T); cx++) {
       if (footY < 0 || footY >= s.rows || cx < 0 || cx >= s.cols || solid(cx, footY)) continue;

@@ -574,10 +574,10 @@ export function renderReliefPreview(built: { sheet: Bitmap; asset: SpriteAsset }
   return encodePng(scale > 1 ? scaleBitmap(out, scale) : out);
 }
 
-export function renderViewport(world: World, sheets: Map<string, Bitmap>, scale = 1, hd = false): Buffer {
+export function renderViewport(world: World, sheets: Map<string, Bitmap>, scale = 1, hd = false, ui = true): Buffer {
   const r = new BitmapRenderer(world.game.width, world.game.height, sheets).useRelief(world.bundle.sprites, interfaceSize(world.game));
   const resolved = hd ? resolveHd(world.game.hd, world.scene.atmosphere?.hd, world.scene.atmosphere?.ambient) : null;
-  renderWorld(world, resolved ? new SoftHdRenderer(r, sheets, resolved) : r);
+  renderWorld(world, resolved ? new SoftHdRenderer(r, sheets, resolved) : r, { ui });
   return encodePng(scale > 1 ? scaleBitmap(r.out, scale) : r.out);
 }
 

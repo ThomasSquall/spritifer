@@ -1096,6 +1096,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       sample_at: z.array(z.number()).optional().describe('Times (s) to snapshot the state'),
       screenshots: z.boolean().optional().describe('Also screenshot every sample time'),
       hd: z.boolean().optional().describe('Screenshots with auto 2D-HD on'),
+      ui: z.boolean().optional().describe('false = screenshots of the world only: no HUD objects, script UI (minimap, banners), messages, fade or dialogs (default true)'),
       scale: z.number().int().min(1).max(4).optional(),
       seed: z.number().int().optional(),
       choices: z.array(z.number().int().min(0)).optional().describe('Menu answers for choose() dialogs, in order (default: first entry)'),
@@ -1119,7 +1120,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         seed: a.seed,
         vars: a.vars as Record<string, Value> | undefined,
         playerAt: a.player_at,
-        onSample: a.screenshots ? (w) => shots.push(renderViewport(w, loaded.sheets, scale, a.hd)) : undefined,
+        onSample: a.screenshots ? (w) => shots.push(renderViewport(w, loaded.sheets, scale, a.hd, a.ui ?? true)) : undefined,
       });
       const fmtState = (s: (typeof r)['final']) =>
         [
@@ -1135,7 +1136,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         ...r.samples.map((s) => `Sample:\n${fmtState(s)}`),
         `Final:\n${fmtState(r.final)}`,
       ].filter(Boolean);
-      return [...text(lines.join('\n')), ...shots.map(image), image(renderViewport(r.world, loaded.sheets, scale, a.hd))];
+      return [...text(lines.join('\n')), ...shots.map(image), image(renderViewport(r.world, loaded.sheets, scale, a.hd, a.ui ?? true))];
     },
     { readOnlyHint: true },
   );

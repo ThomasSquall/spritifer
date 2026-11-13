@@ -242,7 +242,7 @@ API globale (anche negli script semplici):
 
 Gli eventi possono usare le azioni **Dialog** (finestra RPG), **Run script function**, **Call component method** e **Lock player controls**, e il trigger **Player interacts**: si attiva quando il giocatore preme azione accanto all'istanza o rivolto verso di essa.
 
-Nel playtest di Claude gli script girano isolati (`node:vm`). I dialoghi si confermano da soli e `choices` sceglie le voci dei menu, così Claude può verificare missioni e battaglie senza browser.
+Nel playtest di Claude gli script girano isolati (`node:vm`). I dialoghi si confermano da soli e `choices` sceglie le voci dei menu, così Claude può verificare missioni e battaglie senza browser. Con `ui: false` gli screenshot del playtest mostrano solo il mondo (con la sfocatura e la luce del 2D-HD): niente oggetti HUD, interfaccia degli script (minimappa, banner), messaggi, dissolvenze né dialoghi. Nel motore è `renderWorld(w, r, { ui: false })`.
 
 ### RPG
 

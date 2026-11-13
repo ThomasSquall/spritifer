@@ -2822,8 +2822,15 @@ export interface Renderer {
 /** A renderer that draws nothing (headless UI). */
 export const NULL_RENDERER: Renderer = { clear() {}, image() {}, rect() {}, text() {} };
 
+/** Options for renderWorld. */
+export interface RenderWorldOptions {
+  /** false = stop right after the world (after endWorld, so 2D-HD blur and light are kept): no HUD objects, script UI,
+   * messages, fade or dialogs. Default true. */
+  ui?: boolean;
+}
+
 /** Draws the current world state with the camera applied. Coordinates are viewport pixels. */
-export function renderWorld(w: World, r: Renderer): void {
+export function renderWorld(w: World, r: Renderer, opts: RenderWorldOptions = {}): void {
   const scene = w.scene;
   const vw = w.game.width;
   const vh = w.game.height;
@@ -3012,6 +3019,7 @@ export function renderWorld(w: World, r: Renderer): void {
     const box = held?.box();
     r.endWorld(hd && { hd, subjectY: box ? ((box.y + box.h / 2 - camY) * zoom) / vh : 0.55, lights: hd.halo > 0 && hd.darkness > 0 ? collectLights(w, camX, camY, zoom) : [] });
   }
+  if (opts.ui === false) return;
   hud.sort((p, q) => p.z - q.z);
   const screen = scaledRenderer(r, w.uiScale);
   const sw = w.screenWidth;

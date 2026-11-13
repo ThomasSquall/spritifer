@@ -671,6 +671,34 @@ describe('foot line', () => {
 
 });
 
+describe('render without interface', () => {
+  it('draws only the world with ui: false, pixel for pixel the same picture with no HUD object and no message', () => {
+    const sheet: Bitmap = { width: 64, height: 32, data: new Uint8ClampedArray(64 * 32 * 4) };
+    for (let y = 0; y < 32; y++) for (let x = 0; x < 64; x++) sheet.data.set([(x * 37) % 256, (y * 53) % 256, ((x + y) * 19) % 256, 255], (y * 64 + x) * 4);
+    const sheets = new Map([['wall', sheet]]);
+    const make = (withUi: boolean) => {
+      const b = platformBundle();
+      b.game.objects[0].behaviors = [{ type: 'topdown', speed: 80 }, { type: 'camera' }];
+      b.game.objects.push(normalizeObject({ name: 'face', sprite: 'wall' }));
+      b.game.objects.push(normalizeObject({ name: 'hud', text: '"SCORE 12"', hud: true, textColor: '#ffffff' }));
+      b.sprites.wall = box('wall', 64, 32);
+      b.scenes.level1.ySort = true;
+      b.scenes.level1.instances = [{ id: 'p', object: 'player', x: 150, y: 40 }, { id: 'f', object: 'face', x: 60, y: 120 }];
+      if (withUi) b.scenes.level1.instances.push({ id: 'h', object: 'hud', x: 4, y: 4 });
+      const w = new World(b);
+      if (withUi) w.message = { text: 'HELLO', until: Infinity };
+      return w;
+    };
+    for (const hd of [false, true]) {
+      const bare = renderViewport(make(false), sheets, 1, hd);
+      expect(renderViewport(make(true), sheets, 1, hd, false).equals(bare)).toBe(true);
+      // the default still draws the interface
+      expect(renderViewport(make(true), sheets, 1, hd).equals(bare)).toBe(false);
+      expect(renderViewport(make(false), sheets, 1, hd, true).equals(bare)).toBe(true);
+    }
+  });
+});
+
 const SEEDS = [1, 2, 3, 4, 5, 6, 7, 8];
 describe('index of solid instances', () => {
   // Fast solids listed BEFORE the player move first in each step: a grid that kept them where the step began would let

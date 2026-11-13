@@ -88,18 +88,21 @@ describe('editor HTTP API', () => {
   });
 
   it('notifies websocket clients when a sprite file changes on disk', async () => {
+    // Its own sprite, and it waits for the message of its own write: file events of earlier tests can arrive late
+    // (they were what made this test fail now and then, and fail always when run alone).
+    expect((await api('/api/sprites', json({ name: 'watched', width: 2, height: 2 }))).status).toBe(201);
     const sock = new WebSocket(srv.url.replace('http', 'ws') + '/ws');
-    const got = new Promise<{ name: string; updatedBy?: string }>((resolve) => {
+    await new Promise((r) => sock.on('open', r));
+    const s = ws.load('watched');
+    const got = new Promise<{ name: string; updatedBy?: string; rev?: string }>((resolve) => {
       sock.on('message', (m) => {
         const msg = JSON.parse(String(m));
-        if (msg.type === 'sprite-changed' && msg.name === 'box') resolve(msg);
+        if (msg.type === 'sprite-changed' && msg.name === 'watched' && msg.updatedBy === 'claude') resolve(msg);
       });
     });
-    await new Promise((r) => sock.on('open', r));
-    const s = ws.load('box');
     ws.save(s, 'claude');
     const msg = await got;
-    expect(msg.updatedBy).toBe('claude');
+    expect(msg.rev).toBe(ws.readRaw('watched').rev);
     sock.close();
   });
 

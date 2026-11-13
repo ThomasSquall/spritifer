@@ -159,11 +159,24 @@ class GameState {
       this.emit();
       return true;
     }
-    if (kind === 'sprite') this.sprites = await api.list();
-    else this.scenes = await gameApi.listScenes();
-    this.emit();
+    // A burst of changes (a script rewriting hundreds of sprites) refreshes the list once, not once per file: each
+    // refresh fetches the whole list and redraws every page that listens.
+    let pending = this.listing[kind];
+    if (!pending) {
+      pending = new Promise<void>((r) => setTimeout(r, 120)).then(async () => {
+        // Changes that arrive while the list is being fetched start the next refresh.
+        this.listing[kind] = undefined;
+        if (kind === 'sprite') this.sprites = await api.list();
+        else this.scenes = await gameApi.listScenes();
+        this.emit();
+      });
+      this.listing[kind] = pending;
+    }
+    await pending;
     return true;
   }
+
+  private listing: { sprite?: Promise<void>; scene?: Promise<void> } = {};
 }
 
 export const state = new GameState();

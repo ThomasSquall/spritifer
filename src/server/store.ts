@@ -123,14 +123,35 @@ export class Workspace {
     return hash.digest('hex');
   }
 
+  /**
+   * Summaries by file name, with the stamp of the file they were read from. Sprite files can be many
+   * megabytes each, so a list only reads the ones whose time, size or inode changed since the last list
+   * (writes go through a rename, so another process saving a file always changes its stamp).
+   */
+  private readonly summaryCache = new Map<string, { stamp: string; summary: SpriteSummary }>();
+
   list(): SpriteSummary[] {
     const out: SpriteSummary[] = [];
+    const seen = new Set<string>();
     for (const entry of fs.readdirSync(this.dir)) {
       if (!entry.endsWith(SUFFIX)) continue;
       const full = path.join(this.dir, entry);
+      let st: fs.Stats;
+      try {
+        st = fs.statSync(full);
+      } catch {
+        continue; // Removed while listing.
+      }
+      seen.add(entry);
+      const stamp = `${st.mtimeMs}:${st.size}:${st.ino}`;
+      const cached = this.summaryCache.get(entry);
+      if (cached && cached.stamp === stamp) {
+        out.push(cached.summary);
+        continue;
+      }
       try {
         const json = JSON.parse(fs.readFileSync(full, 'utf8')) as SpriteFile;
-        out.push({
+        const summary: SpriteSummary = {
           name: json.name,
           width: json.width,
           height: json.height,
@@ -140,13 +161,17 @@ export class Workspace {
           category: json.category === null || isSpriteCategory(json.category) ? json.category
             : json.rig || json.pixelLabCharacterId ? 'characters' : json.grid ? 'tileset' : null,
           grid: json.grid ?? null,
-          updatedAt: fs.statSync(full).mtimeMs,
+          updatedAt: st.mtimeMs,
           rev: json.rev,
-        });
+        };
+        this.summaryCache.set(entry, { stamp, summary });
+        out.push(summary);
       } catch {
-        // Ignore partially written or foreign files.
+        // Ignore partially written or foreign files; they are read again on the next list.
+        this.summaryCache.delete(entry);
       }
     }
+    for (const entry of this.summaryCache.keys()) if (!seen.has(entry)) this.summaryCache.delete(entry);
     return out.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 

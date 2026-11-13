@@ -2206,13 +2206,22 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     rightTab = 'hierarchy';
     requestAnimationFrame(() => select(focusId, true));
   }
-  const unsub = state.subscribe(() => {
-    renderRight();
-    void loadAssets();
-  });
+  // Project changes come in bursts (a script rewriting hundreds of sprites): one refresh after the burst, not a full
+  // redraw per file. Each refresh rebuilds the right panel and reloads and redraws the whole scene, and it runs in the
+  // same page as the Play window, so a redraw per file took the running game down to a few frames per second.
+  let refreshTimer = 0;
+  const refreshSoon = () => {
+    clearTimeout(refreshTimer);
+    refreshTimer = window.setTimeout(() => {
+      renderRight();
+      void loadAssets();
+    }, 250);
+  };
+  const unsub = state.subscribe(refreshSoon);
 
   return {
     destroy() {
+      clearTimeout(refreshTimer);
       assetsRun++;
       void flush();
       unregister();
@@ -2243,7 +2252,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       await loadAssets();
     },
     refreshAssets() {
-      void loadAssets();
+      refreshSoon();
     },
     notesChanged() {
       void loadNotes();

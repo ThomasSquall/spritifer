@@ -671,6 +671,77 @@ describe('foot line', () => {
 
 });
 
+const SEEDS = [1, 2, 3, 4, 5, 6, 7, 8];
+describe('index of solid instances', () => {
+  // Fast solids listed BEFORE the player move first in each step: a grid that kept them where the step began would let
+  // the player into them (room-3001 #286.C). Every frame is compared, not only the last one.
+  const run = (seed: number, indexed: boolean) => {
+    const b = platformBundle();
+    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 90 }];
+    b.game.objects.push(normalizeObject({ name: 'block', sprite: 'coin', behaviors: [{ type: 'solid' }] }));
+    for (const sp of [90, 200, 400]) b.game.objects.push(normalizeObject({ name: `mover${sp}`, sprite: 'coin', behaviors: [{ type: 'solid' }, { type: 'patrol', speed: sp }] }));
+    let s = seed;
+    const rnd = () => ((s = (s * 1103515245 + 12345) % 2147483648) / 2147483648);
+    const inst: Instance[] = [];
+    for (let k = 0; k < 24; k++) inst.push({ id: `m${k}`, object: `mover${[90, 200, 400][k % 3]}`, x: 90 + Math.floor(rnd() * 120), y: 60 + Math.floor(rnd() * 60) });
+    inst.push({ id: 'p', object: 'player', x: 150, y: 90 });
+    for (let k = 0; k < 120; k++) inst.push({ id: `b${k}`, object: 'block', x: Math.floor(rnd() * 300), y: Math.floor(rnd() * 170), hitbox: { x: 0, y: 0, w: 4 + Math.floor(rnd() * 30), h: 4 + Math.floor(rnd() * 20) } });
+    b.scenes.level1.instances = inst;
+    const w = new World(b, { seed });
+    w.solidIndexMin = 1;
+    if (!indexed) (w as unknown as { solidsNear: () => unknown[] }).solidsNear = function (this: World) { return this.actors.filter((a) => !!a.behavior('solid')); };
+    const input = emptyInput();
+    const keys = ['left', 'right', 'up', 'down'];
+    const frames: number[][][] = [];
+    for (let f = 0; f < 400; f++) {
+      if (f % 25 === 0) { input.down.clear(); input.down.add(keys[Math.floor(rnd() * 4)]!); }
+      w.step(input);
+      frames.push(w.actors.map((a) => [a.x, a.y]));
+    }
+    return frames;
+  };
+
+  it('moves everything exactly as a scan of every instance would, frame by frame, with fast solids moving first', () => {
+    for (const seed of SEEDS) expect(run(seed, true)).toEqual(run(seed, false));
+  }, 20000);
+
+  it('sees a still solid that a script moves before the behaviors, in the same frame', async () => {
+    const run = async (indexed: boolean) => {
+      const b = platformBundle();
+      b.game.objects[0].behaviors = [{ type: 'topdown', speed: 120 }];
+      b.game.objects.push(normalizeObject({ name: 'block', sprite: 'coin', behaviors: [{ type: 'solid' }] }));
+      b.game.objects.push(normalizeObject({ name: 'gate', sprite: 'coin', behaviors: [{ type: 'solid' }] }));
+      const inst: Instance[] = [{ id: 'g', object: 'gate', x: 400, y: 0, hitbox: { x: 0, y: 0, w: 8, h: 192 } }, { id: 'p', object: 'player', x: 40, y: 90 }];
+      for (let k = 0; k < 300; k++) inst.push({ id: `b${k}`, object: 'block', x: 1000 + (k % 30) * 20, y: 300 + Math.floor(k / 30) * 20 });
+      b.scenes.level1.instances = inst;
+      // every frame, before the behaviors, the gate jumps right in front of the player
+      b.scripts = { 'g.js': "onUpdate(() => { const p = findOne('player'); const g = findOne('gate'); if (p && g) g.x = p.x + 17 })" };
+      const w = new World(b, { evaluator: nodeEvaluator });
+      w.solidIndexMin = 1;
+      if (!indexed) (w as unknown as { solidsNear: () => unknown[] }).solidsNear = function (this: World) { return this.actors.filter((a) => !!a.behavior('solid')); };
+      const input = emptyInput();
+      input.down.add('right');
+      const xs: number[] = [];
+      for (let f = 0; f < 30; f++) {
+        w.step(input);
+        await w.settle();
+        xs.push(w.actors.find((a) => a.sceneId === 'p')!.x);
+      }
+      return xs;
+    };
+    expect(await run(true)).toEqual(await run(false));
+  });
+
+  it('uses the plain scan below the threshold, so ordinary games are unchanged', () => {
+    const b = platformBundle();
+    b.game.objects.push(normalizeObject({ name: 'block', sprite: 'coin', behaviors: [{ type: 'solid' }] }));
+    b.scenes.level1.instances.push({ id: 'b0', object: 'block', x: 0, y: 0 });
+    const w = new World(b);
+    w.step(emptyInput());
+    expect((w as unknown as { solidIdx: unknown }).solidIdx).toBeNull();
+  });
+});
+
 describe('foot line strips: mirroring, sprite offset, blinking, zoom', () => {
   const sheet: Bitmap = { width: 128, height: 32, data: new Uint8ClampedArray(128 * 32 * 4) };
   for (let y = 0; y < 32; y++) for (let x = 0; x < 128; x++) sheet.data.set([(x * 37) % 256, (y * 53) % 256, ((x + y) * 19) % 256, x % 9 === 0 && y % 5 === 0 ? 0 : 255], (y * 128 + x) * 4);

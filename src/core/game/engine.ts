@@ -1182,6 +1182,7 @@ export class World {
     input = this.mapActions(input);
     this.input = input;
     if (!this.started) this.begin();
+    this.checkSolidIndex();
     this.scripts.latchInput(input);
     // Paused (pause menus, inventories): nothing moves; components get pausedUpdate, onDraw still runs.
     if (this.paused) {
@@ -1266,6 +1267,8 @@ export class World {
       a.flags.animEvents = [];
     }
 
+    // Scripts above may have moved a still solid (a gate, a tween): the grid hears of it before anything moves against it.
+    if (this.solidIdx) this.checkSolidIndex();
     for (const a of this.actors) if (!a.destroyed) this.updateBehaviors(a, dt);
     for (const a of this.actors) if (!a.destroyed) this.updateAnimation(a, dt);
 
@@ -1444,13 +1447,98 @@ export class World {
   isSolidAt(x: number, y: number): boolean {
     const ts = this.tileSize;
     if (this.solidAtTile(Math.floor(x / ts), Math.floor(y / ts))) return true;
-    return this.actors.some((o) => {
+    return this.solidsNear({ x, y, w: 1e-6, h: 1e-6 }).some((o) => {
       if (o.destroyed) return false;
       const s = o.behavior('solid');
       if (!s || s.oneWay === true) return false;
       const b = o.box();
       return x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
     });
+  }
+
+  // ------------------------------------------------------------------ index of solid instances
+  // Maps made of many solid instances (a field of rocks, hundreds of painted bases) would scan every instance for every
+  // move. From SOLID_INDEX_MIN solid instances on, the ones that cannot move by themselves are kept in a grid of
+  // SOLID_CELL px; the others (any behavior besides 'solid', script components, a speed) are "dynamic" and checked every
+  // time, and so is one that has moved since the grid was made. The index is checked at the start of each step and
+  // rebuilt when instances come, go, gain or lose the solid behavior. Callers get the candidates in the order of the
+  // instance list, as a full scan would give them. With fewer solids nothing changes: every instance is a candidate.
+  /** Solid instances from which the grid is used (fewer: the plain scan of every instance, as always). */
+  solidIndexMin = SOLID_INDEX_MIN;
+  private solidIdx: { count: number; grid: Map<number, Actor[]>; boxes: Map<Actor, Rect>; dynamic: Set<Actor>; order: Map<Actor, number> } | null = null;
+
+  private buildSolidIndex(dynamic: Set<Actor> = new Set()): NonNullable<World['solidIdx']> {
+    const grid = new Map<number, Actor[]>();
+    const boxes = new Map<Actor, Rect>();
+    const order = new Map<Actor, number>();
+    const keep = new Set<Actor>();
+    this.actors.forEach((a, i) => {
+      order.set(a, i);
+      if (a.destroyed || !a.behavior('solid')) return;
+      if (dynamic.has(a) || a.vx || a.vy || a.components.length || a.behaviors.some((b) => b.type !== 'solid')) {
+        keep.add(a);
+        return;
+      }
+      const b = a.box();
+      boxes.set(a, { x: b.x, y: b.y, w: b.w, h: b.h });
+      for (let cy = Math.floor(b.y / SOLID_CELL); cy <= Math.floor((b.y + b.h) / SOLID_CELL); cy++) {
+        for (let cx = Math.floor(b.x / SOLID_CELL); cx <= Math.floor((b.x + b.w) / SOLID_CELL); cx++) {
+          const k = cy * 65536 + cx;
+          const list = grid.get(k);
+          if (list) list.push(a);
+          else grid.set(k, [a]);
+        }
+      }
+    });
+    return { count: this.actors.length, grid, boxes, dynamic: keep, order };
+  }
+
+  /** Start of a step: the grid only with many solids; solids that moved become dynamic; a changed set rebuilds it. */
+  private checkSolidIndex(): void {
+    let solids = 0;
+    for (const a of this.actors) if (!a.destroyed && a.behavior('solid')) solids++;
+    if (solids < this.solidIndexMin) {
+      this.solidIdx = null;
+      return;
+    }
+    const idx = this.solidIdx;
+    if (!idx) {
+      this.solidIdx = this.buildSolidIndex();
+      return;
+    }
+    // the instance list is a new array every step: membership is checked by position, not by identity
+    let rebuild = idx.count !== this.actors.length;
+    for (let i = 0; i < this.actors.length; i++) {
+      const a = this.actors[i]!;
+      if (!rebuild && idx.order.get(a) !== i) rebuild = true;
+      const solid = !a.destroyed && !!a.behavior('solid');
+      const known = idx.boxes.get(a);
+      if (solid !== (!!known || idx.dynamic.has(a))) rebuild = true;
+      if (known) {
+        const b = a.box();
+        if (b.x !== known.x || b.y !== known.y || b.w !== known.w || b.h !== known.h) {
+          idx.dynamic.add(a);
+          rebuild = true;
+        }
+      }
+    }
+    if (rebuild) this.solidIdx = this.buildSolidIndex(idx.dynamic);
+  }
+
+  /** Solid instances that may overlap `r` (a superset), in instance-list order. Without the grid: every instance. */
+  private solidsNear(r: Rect): Actor[] {
+    let idx = this.solidIdx;
+    if (!idx) return this.actors;
+    // an instance created during this step is not in the grid yet
+    if (idx.count !== this.actors.length) idx = this.solidIdx = this.buildSolidIndex(idx.dynamic);
+    const seen = new Set<Actor>(idx.dynamic);
+    for (let cy = Math.floor(r.y / SOLID_CELL); cy <= Math.floor((r.y + r.h) / SOLID_CELL); cy++) {
+      for (let cx = Math.floor(r.x / SOLID_CELL); cx <= Math.floor((r.x + r.w) / SOLID_CELL); cx++) {
+        for (const a of idx.grid.get(cy * 65536 + cx) ?? []) seen.add(a);
+      }
+    }
+    const order = idx.order;
+    return [...seen].sort((p, q) => (order.get(p) ?? 1e9) - (order.get(q) ?? 1e9));
   }
 
   /** Instances whose hitbox overlaps a rectangle. */
@@ -1713,7 +1801,7 @@ export class World {
     const y0 = Math.floor(box.y / ts);
     const y1 = Math.floor((box.y + box.h - 1e-6) / ts);
     for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) if (this.solidAtTile(tx, ty)) out.push({ x: tx * ts, y: ty * ts, w: ts, h: ts });
-    for (const o of this.actors) {
+    for (const o of this.solidsNear(box)) {
       if (o === self || o.destroyed) continue;
       const s = o.behavior('solid');
       if (!s) continue;
@@ -2989,6 +3077,10 @@ function actorMark(w: World, r: Renderer, a: Actor, camX: number, camY: number, 
 
 /** Width of the strips a picture with a foot line is cut into: each takes the ground under its middle. */
 const FOOT_STRIP = 4;
+/** Cell of the index of solid instances, px. */
+const SOLID_CELL = 64;
+/** Solid instances from which collisions use the grid index (fewer: the plain scan, as always). */
+export const SOLID_INDEX_MIN = 256;
 
 interface FootStrip {
   /** Columns of the frame, and the ground (world y) at each edge and in the middle. */

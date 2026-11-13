@@ -945,6 +945,20 @@ describe('fast movement against a thin fine wall', () => {
   });
 });
 
+describe('player of an F8 mark', () => {
+  it('finds a platformer without a camera, and the one the camera follows otherwise', async () => {
+    const { playerOf } = await import('../src/runtime/markEndpoint.js');
+    const b = platformBundle();
+    b.game.objects[0].behaviors = [{ type: 'platformer', speed: 100, jump: 300 }];
+    const w = new World(b);
+    expect(playerOf(w)).toBe(w.actors.find((a) => a.sceneId === 'p'));
+    const b2 = platformBundle();
+    const w2 = new World(b2);
+    w2.step(emptyInput());
+    expect(playerOf(w2)).toBe(w2.cameraHeld);
+  });
+});
+
 describe('fine collision run lengths', () => {
   it('refuses runs that are not plain base-36 numbers', async () => {
     const { decodeFineSolid } = await import('../src/core/game/fineSolid.js');

@@ -58,6 +58,7 @@ import { USAGE_KINDS, findUsages, formatUsages } from '../core/game/usages.js';
 import { type GameTest, normalizeTest } from '../core/game/gameTests.js';
 import { type ScatterRecipe, deleteGroup, extractRegion, listGroups, pasteRegion, regenerateGroup, renameGroup, scatterIntoGroup } from '../core/game/sceneOps.js';
 import { formatEditorContext, formatNotes, listNotes, setNote } from './context.js';
+import { listMarks } from './marks.js';
 import { formatHistory, undoChange } from './history.js';
 import { architectureReport, formatTestRun, instanceSizes, loadSources, mapReport, runTests } from './projectTools.js';
 import { enableGit, gitCommit, gitCommitFiles, gitDiff, gitLog, gitPull, gitPush, gitRestore, gitSetRemote, gitStatus } from './projectGit.js';
@@ -1687,6 +1688,26 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
     const n = setNote(ws, { ...a, remove: a.delete }, AUTHOR);
     return text(n ? `Saved.\n${formatNotes([n])}` : 'Deleted.');
   });
+
+  tool('list_marks', 'Problems the person marked while playing (F8 in Play from the editor or play.html; Shift+F8 adds a note): number, time, scene, player position and feet box, facing, camera, 2D-HD on/off, game variables, note, the trail of the last 5 seconds (one position every 100 ms, oldest first) and the path of the photo of the frame as it was on screen. Stored in the project in marks/.', {
+    after: z.number().int().min(0).optional().describe('Only the marks after this number'),
+  }, (a) => {
+    const marks = listMarks(ws.dir, a.after ?? 0);
+    if (!marks.length) return text(a.after ? `No marks after #${a.after}.` : 'No marks yet: the person presses F8 while playing to mark a problem.');
+    const fmt = (m: (typeof marks)[number]) => {
+      const p = m.player;
+      const tr = m.trail ?? [];
+      return [
+        `#${m.n} ${m.time ?? ''} scene ${m.scene ?? '?'}${m.note ? ` — "${m.note}"` : ''}`,
+        p ? `  player at ${p.x},${p.y}, feet [${p.feet.x},${p.feet.y},${p.feet.w},${p.feet.h}]${p.facing ? `, facing ${p.facing}` : ''}` : '  no player',
+        m.camera ? `  camera ${m.camera.x},${m.camera.y} zoom ${m.camera.zoom}, 2D-HD ${m.hd ? 'on' : 'off'}` : '',
+        tr.length ? `  trail (${tr.length}, oldest first): ${tr.map((q) => q.join(',')).join(' ')}` : '',
+        m.vars ? `  vars ${JSON.stringify(m.vars)}` : '',
+        `  photo ${m.photo ? `${ws.dir}/${m.photo}` : 'none'}`,
+      ].filter(Boolean).join('\n');
+    };
+    return text(marks.map(fmt).join('\n\n'));
+  }, { readOnlyHint: true });
 
   tool('get_world_map', 'How the scenes connect: every door, event, script or data entry that leads to a scene, which scenes nothing leads to, and one-way doors.', {}, () => {
     const { world } = mapReport(ws);

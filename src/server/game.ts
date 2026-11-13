@@ -128,20 +128,26 @@ export function loadGameBundle(ws: Workspace, opts: { images?: boolean } = {}): 
 // ---------------------------------------------------------------------------
 // Web export
 
-const RUNTIME_CANDIDATES = [
-  fileURLToPath(new URL('../runtime/player.js', import.meta.url)), // dist/server → dist/runtime
-  fileURLToPath(new URL('../../dist/runtime/player.js', import.meta.url)), // src/server (tests, tsx)
+const runtimeCandidates = (file: string) => [
+  fileURLToPath(new URL(`../runtime/${file}`, import.meta.url)), // dist/server → dist/runtime
+  fileURLToPath(new URL(`../../dist/runtime/${file}`, import.meta.url)), // src/server (tests, tsx)
 ];
 
-export function loadRuntime(): string {
-  for (const f of RUNTIME_CANDIDATES) if (fs.existsSync(f)) return fs.readFileSync(f, 'utf8');
+/**
+ * The game runtime: 'export' for exported games (no editor tools inside), 'dev' for the game page served by the editor
+ * (F8 "mark here"). Without a dev build, the export one (the game plays, F8 does nothing).
+ */
+export function loadRuntime(kind: 'export' | 'dev' = 'export'): string {
+  const files = kind === 'dev' ? ['player-dev.js', 'player.js'] : ['player.js'];
+  for (const file of files) for (const f of runtimeCandidates(file)) if (fs.existsSync(f)) return fs.readFileSync(f, 'utf8');
   throw new Error('Game runtime not built. Run `npm run build` in the Spritifer folder.');
 }
 
 const escapeHtml = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
 /** A single self-contained HTML file that plays the game (works offline, on itch.io, any static host). */
-export function buildGameHtml(bundle: GameBundle, runtime: string): string {
+/** `dev`: the game page served by the editor; it tells the runtime where the editor's tools answer (F8 marks). */
+export function buildGameHtml(bundle: GameBundle, runtime: string, dev?: { marks: string }): string {
   // JSON inside <script>: escape "<" so "</script>" in strings can't close the tag.
   const data = JSON.stringify(bundle).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
   return `<!doctype html>
@@ -156,6 +162,7 @@ export function buildGameHtml(bundle: GameBundle, runtime: string): string {
 <body>
 <div id="game"></div>
 <script>window.SPRITIFER_GAME=${data};</script>
+${dev ? `<script>window.SPRITIFER_DEV=${JSON.stringify(dev).replace(/</g, '\\u003c')};</script>\n` : ''}
 <script>${runtime.replace(/<\/script/gi, '<\\/script')}</script>
 </body>
 </html>

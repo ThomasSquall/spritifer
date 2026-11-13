@@ -108,3 +108,133 @@ describe('editor HTTP API', () => {
     expect((await api('/api/nope')).status).toBe(404);
   });
 });
+
+describe('mark here (F8)', () => {
+  const png = () => encodePng({ width: 2, height: 1, data: new Uint8ClampedArray([255, 0, 0, 255, 0, 0, 255, 255]) }).toString('base64');
+
+  it('stores numbered reports with their photo in the project, and lists them', async () => {
+    const r1 = await api('/api/game/marks', json({ report: { scene: 'town', player: { x: 10, y: 20, feet: { x: 1, y: 2, w: 3, h: 4 }, facing: 'up' }, trail: [[1, 2], [3, 4]], note: ' here ', vars: { story: 3 } }, png: png() }));
+    expect(r1.status).toBe(201);
+    const a = (await r1.json()) as { n: number; file: string; photo: string };
+    expect(a).toEqual({ n: 1, file: 'marks/mark_0001.json', photo: 'marks/mark_0001.png' });
+    expect(decodePng(fs.readFileSync(path.join(dir, a.photo))).width).toBe(2);
+    const b = (await (await api('/api/game/marks', json({ report: { scene: 'town' } }))).json()) as { n: number; photo: string | null };
+    expect(b.n).toBe(2);
+    expect(b.photo).toBeNull();
+    const all = (await (await api('/api/game/marks')).json()) as { n: number; note?: string; trail?: number[][]; vars?: Record<string, unknown> }[];
+    expect(all.map((m) => m.n)).toEqual([1, 2]);
+    expect(all[0]).toMatchObject({ note: 'here', trail: [[1, 2], [3, 4]], vars: { story: 3 } });
+    expect(((await (await api('/api/game/marks?after=1')).json()) as unknown[]).length).toBe(1);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'marks', 'index.json'), 'utf8'))).toHaveLength(2);
+  });
+
+  it('names the files itself: paths or numbers in the request never leave the project marks folder', async () => {
+    const res = await api('/api/game/marks', json({ report: { scene: 'x', file: '../../evil.json', photo: '../evil.png', n: 999 }, png: png(), file: '../evil' }));
+    const m = (await res.json()) as { n: number; file: string; photo: string };
+    expect(m.n).toBe(3);
+    expect(m.file).toBe('marks/mark_0003.json');
+    expect(m.photo).toBe('marks/mark_0003.png');
+    for (const f of ['evil.json', 'evil.png', 'evil', '../evil.json', '../evil.png', '../evil']) expect(fs.existsSync(path.join(dir, f))).toBe(false);
+    expect(fs.readdirSync(path.join(dir, 'marks')).sort()).toEqual(['index.json', 'mark_0001.json', 'mark_0001.png', 'mark_0002.json', 'mark_0003.json', 'mark_0003.png']);
+    // a photo that is not a PNG is refused
+    expect((await api('/api/game/marks', json({ report: {}, png: Buffer.from('<svg/>').toString('base64') }))).status).toBe(400);
+    expect((await api('/api/game/marks', json({ nothing: true }))).status).toBe(400);
+  });
+});
+
+describe('mark here in an exported game', () => {
+  it("has an endpoint only where the editor's server flagged the page, and only back to that server", async () => {
+    const { markEndpoint } = await import('../src/runtime/markEndpoint.js');
+    const flag = { marks: 'marks' };
+    expect(markEndpoint(flag, 'http://127.0.0.1:7420/api/game/play.html?hd=1')).toBe('http://127.0.0.1:7420/api/game/marks');
+    expect(markEndpoint(flag, 'http://127.0.0.1:7420/api/p/crystal-vale/game/play.html')).toBe('http://127.0.0.1:7420/api/p/crystal-vale/game/marks');
+    // an exported game hosted at the same kind of address has no flag: nothing
+    expect(markEndpoint(undefined, 'https://someone.example/game/play.html')).toBeNull();
+    expect(markEndpoint(undefined, 'http://127.0.0.1:7420/api/game/play.html')).toBeNull();
+    expect(markEndpoint({ marks: 'https://elsewhere.example/steal' }, 'http://127.0.0.1:7420/api/game/play.html')).toBeNull();
+    expect(markEndpoint(flag, 'file:///Users/x/Valdora.html')).toBeNull();
+  });
+
+  it('flags play.html served by the editor, not export.html, and leaves the F8 code out of the exported runtime', async () => {
+    // both runtimes built from the sources now (not whatever dist/ holds), into a folder of their own
+    const { build } = await import('vite');
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'spritifer-runtime-'));
+    const saved = process.env.RUNTIME_KIND;
+    try {
+      for (const kind of ['export', 'dev']) {
+        process.env.RUNTIME_KIND = kind;
+        await build({ configFile: path.resolve('vite.runtime.config.ts'), logLevel: 'silent', build: { outDir: out, emptyOutDir: false } });
+      }
+    } finally {
+      if (saved === undefined) delete process.env.RUNTIME_KIND;
+      else process.env.RUNTIME_KIND = saved;
+    }
+    const exported = fs.readFileSync(path.join(out, 'player.js'), 'utf8');
+    const dev = fs.readFileSync(path.join(out, 'player-dev.js'), 'utf8');
+    expect(exported).not.toContain('Marked #');
+    expect(exported).not.toContain('SPRITIFER_DEV');
+    expect(exported).not.toContain('toDataURL');
+    expect(dev).toContain('Marked #');
+    fs.rmSync(out, { recursive: true, force: true });
+    ws.saveScene({ ...(await import('../src/core/game/types.js')).createScene({ name: 'start', cols: 4, rows: 4, tileSize: 16 }) }, 'test');
+    const play = await (await api('/api/game/play.html')).text();
+    const exp = await (await api('/api/game/export.html')).text();
+    expect(play).toContain('window.SPRITIFER_DEV={"marks":"marks"}');
+    expect(exp).not.toContain('SPRITIFER_DEV');
+  });
+});
+
+describe('mark here: guards of the endpoint', () => {
+  const png = () => encodePng({ width: 2, height: 1, data: new Uint8ClampedArray([255, 0, 0, 255, 0, 0, 255, 255]) }).toString('base64');
+
+  it('refuses pages from elsewhere and bodies that are not JSON', async () => {
+    const other = await api('/api/game/marks', { method: 'POST', headers: { 'content-type': 'application/json', origin: 'http://evil.example' }, body: JSON.stringify({ report: { scene: 'x' } }) });
+    expect(other.status).toBe(403);
+    const crossSite = await api('/api/game/marks', { method: 'POST', headers: { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' }, body: JSON.stringify({ report: { scene: 'x' } }) });
+    expect(crossSite.status).toBe(403);
+    const text = await api('/api/game/marks', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: JSON.stringify({ report: { scene: 'x' } }) });
+    expect(text.status).toBe(415);
+    expect((await api('/api/game/marks', { headers: { origin: 'http://evil.example' } })).status).toBe(403);
+  });
+
+  it('checks the whole PNG and keeps only simple game variables', async () => {
+    const fake = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.from('not really a png')]).toString('base64');
+    expect((await api('/api/game/marks', json({ report: { scene: 'x' }, png: fake }))).status).toBe(400);
+    const res = await api('/api/game/marks', json({ report: { scene: 'x', vars: { story: 3, ok_flag: true, 'bad key!': 1, nested: { a: 1 }, long: 'x'.repeat(500) } }, png: png() }));
+    expect(res.status).toBe(201);
+    const { n } = (await res.json()) as { n: number };
+    const stored = ((await (await api('/api/game/marks')).json()) as { n: number; vars: Record<string, unknown> }[]).find((m) => m.n === n)!;
+    expect(stored.vars).toEqual({ story: 3, ok_flag: true, long: 'x'.repeat(200) });
+  });
+
+  it('stops at the limits of the marks folder', async () => {
+    const { saveMark, MarkError } = await import('../src/server/marks.js');
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'spritifer-marks-'));
+    const limits = { maxMarks: 2, maxTotalBytes: 1 << 20, maxPngBytes: 1 << 20, maxPngSide: 64 };
+    saveMark(d, { scene: 'a' }, null, limits);
+    saveMark(d, { scene: 'b' }, null, limits);
+    expect(() => saveMark(d, { scene: 'c' }, null, limits)).toThrow(MarkError);
+    const big = encodePng({ width: 100, height: 1, data: new Uint8ClampedArray(400) });
+    expect(() => saveMark(fs.mkdtempSync(path.join(os.tmpdir(), 'spritifer-marks-')), {}, big, limits)).toThrow(/impossible size/);
+    expect(() => saveMark(fs.mkdtempSync(path.join(os.tmpdir(), 'spritifer-marks-')), {}, big, { ...limits, maxTotalBytes: 10 })).toThrow(/full/);
+    // a small file that declares a huge picture is refused from its header, without decoding it
+    const huge = Buffer.from(encodePng({ width: 1, height: 1, data: new Uint8ClampedArray(4) }));
+    huge.writeUInt32BE(14000, 16);
+    huge.writeUInt32BE(14000, 20);
+    const t0 = performance.now();
+    expect(() => saveMark(fs.mkdtempSync(path.join(os.tmpdir(), 'spritifer-marks-')), {}, huge)).toThrow(/impossible size/);
+    expect(performance.now() - t0).toBeLessThan(200);
+    // a second IHDR after a small first one (a decoder may honour the second): refused from the chunks, without decoding
+    const zlib = await import('node:zlib');
+    const one = Buffer.from(encodePng({ width: 1, height: 1, data: new Uint8ClampedArray(4) }));
+    const ihdr = Buffer.from(one.subarray(8, 8 + 25));
+    ihdr.writeUInt32BE(14000, 8);
+    ihdr.writeUInt32BE(14000, 12);
+    ihdr.writeUInt32BE(zlib.crc32(ihdr.subarray(4, 21)) >>> 0, 21);
+    const two = Buffer.concat([one.subarray(0, 33), ihdr, one.subarray(33)]);
+    const t1 = performance.now();
+    expect(() => saveMark(fs.mkdtempSync(path.join(os.tmpdir(), 'spritifer-marks-')), {}, two)).toThrow(/not a PNG/);
+    expect(performance.now() - t1).toBeLessThan(200);
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+});

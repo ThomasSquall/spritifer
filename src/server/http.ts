@@ -30,6 +30,7 @@ import { type HistoryKind, undoChange } from './history.js';
 import { loadSources, mapReport, runTests } from './projectTools.js';
 import { PAINTED, buildBlueprint, currentBlueprint, draftFromScene } from './blueprints.js';
 import { renderPlan } from './planView.js';
+import { MarkError, type MarkReport, listMarks, saveMark } from './marks.js';
 import { enableGit, gitCommit, gitCommitFiles, gitDiff, gitFileAt, gitLog, gitPull, gitPush, gitRestore, gitSetRemote, gitStatus } from './projectGit.js';
 
 const WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
@@ -452,12 +453,32 @@ async function handleGame(ws: Workspace, req: http.IncomingMessage, res: http.Se
   if ((sub === 'play.html' || sub === 'export.html') && method === 'GET') {
     const { bundle } = loadGameBundle(ws, { images: true });
     if (!Object.keys(bundle.scenes).length) throw new HttpError(409, 'The game has no scenes yet');
-    const html = buildGameHtml(bundle, loadRuntime());
+    // play.html is the game served by the editor (F8 marks back to this server); export.html is the exported game
+    const html = sub === 'play.html' ? buildGameHtml(bundle, loadRuntime('dev'), { marks: 'marks' }) : buildGameHtml(bundle, loadRuntime());
     const headers: Record<string, string> = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
     if (url.searchParams.has('download')) headers['content-disposition'] = `attachment; filename="${(bundle.game.title.replace(/[^A-Za-z0-9_-]+/g, '_') || 'game')}.html"`;
     res.writeHead(200, headers);
     res.end(html);
     return;
+  }
+  if (sub === 'marks') {
+    // "Mark here" (F8 in a game played from this server): the report and the frame go into the project's marks/ folder.
+    // Only from the local editor (a page elsewhere or a host on the network cannot write or read them).
+    assertLocalEditor(req, 'Marks');
+    if (method === 'GET') return sendJson(res, 200, listMarks(ws.dir, Number(url.searchParams.get('after')) || 0));
+    if (method === 'POST') {
+      if (req.headers['content-type']?.split(';')[0] !== 'application/json') throw new HttpError(415, 'Expected JSON');
+      const body = (await readJson(req, 24 * 1024 * 1024)) as { report?: MarkReport; png?: string };
+      if (!body || typeof body.report !== 'object' || !body.report) throw new HttpError(400, 'Expected { report, png }');
+      const png = typeof body.png === 'string' && body.png ? Buffer.from(body.png.replace(/^data:image\/png;base64,/, ''), 'base64') : null;
+      try {
+        const m = saveMark(ws.dir, body.report, png);
+        return sendJson(res, 201, { n: m.n, file: m.file, photo: m.photo });
+      } catch (err) {
+        throw new HttpError(err instanceof MarkError ? err.status : 400, (err as Error).message);
+      }
+    }
+    throw new HttpError(405, 'Method not allowed');
   }
   if (sub === 'export' && method === 'POST') return sendJson(res, 200, exportGame(ws));
   if (sub === 'export-android' && method === 'POST') return sendJson(res, 200, await exportAndroid(ws));

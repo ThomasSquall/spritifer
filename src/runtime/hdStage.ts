@@ -93,6 +93,12 @@ export class HdStage {
     return this.perspective;
   }
 
+  /** Copies the 2D-HD picture into a 2D context (call it in the frame it was drawn: WebGL keeps nothing after). */
+  drawInto(g: CanvasRenderingContext2D, width: number, height: number): void {
+    if (this.canvas.style.display === 'none' || !this.compositor) return;
+    g.drawImage(this.canvas, 0, 0, width, height);
+  }
+
   /** Lets the GPU go at once: browsers allow only a few of these canvases. */
   dispose(): void {
     this.stop();

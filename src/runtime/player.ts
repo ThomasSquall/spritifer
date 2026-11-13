@@ -8,6 +8,10 @@ import { CanvasRenderer } from './canvasRenderer.js';
 import { HdStage } from './hdStage.js';
 import { type GameBundle, type Value, interfaceSize } from '../core/game/types.js';
 import { SoundBoard } from './audio.js';
+import { playerOf } from './markEndpoint.js';
+
+/** The runtime of the game page served by the editor (F8 marks); false in exported games, where that code is left out. */
+const DEV = typeof __SPRITIFER_DEV__ !== 'undefined' && __SPRITIFER_DEV__;
 
 export interface PlayerOptions {
   scene?: string;
@@ -33,6 +37,23 @@ export interface PlayerOptions {
   hd?: boolean;
   /** Called with the 2D-HD state at start and whenever it changes. */
   onHdChange?: (on: boolean) => void;
+  /** "Mark here": F8 (Shift+F8 with a note) sends a report of the spot and the frame as it is on screen. Without it F8
+   * does nothing (exported games). Resolves to the number given to the report. */
+  onMark?: (report: MarkReport, photo: HTMLCanvasElement) => Promise<number>;
+}
+
+/** What F8 reports: where the player is, how the camera looks, the game state and the last 5 seconds of the trail. */
+export interface MarkReport {
+  time: string;
+  scene: string;
+  player: { x: number; y: number; feet: { x: number; y: number; w: number; h: number }; facing: string } | null;
+  camera: { x: number; y: number; zoom: number };
+  hd: boolean;
+  vars: Record<string, Value>;
+  sceneVars: Record<string, Value>;
+  note?: string;
+  /** Player positions, oldest first, one every 100 ms of game time. */
+  trail: [number, number][];
 }
 
 /** A run of the game played by hand, ready to be replayed headless. */
@@ -343,6 +364,78 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
   let clicks: [number, number][] = [];
   let pointer: [number, number] | null = null;
   let showHitboxes = !!opts.debug;
+  // ---------------------------------------------------------------- mark here (F8)
+  let markWanted: { note: boolean } | null = null;
+  let markLabel: { text: string; until: number } | null = null;
+  const trail: [number, number][] = [];
+  let trailAt = -1;
+  let trailWorld: World | null = null;
+  const playerActor = () => playerOf(world) as ReturnType<World['actors']['find']> | null;
+  const sampleTrail = () => {
+    if (trailWorld !== world || world.clock < trailAt) {
+      trailWorld = world;
+      trail.length = 0;
+      trailAt = -1;
+    }
+    if (trailAt >= 0 && world.clock - trailAt < 0.1) return;
+    // looked for at most every 100 ms, found or not
+    trailAt = world.clock;
+    const a = playerActor();
+    if (!a) return;
+    trail.push([Math.round(a.x * 10) / 10, Math.round(a.y * 10) / 10]);
+    if (trail.length > 50) trail.shift();
+  };
+  /** The frame as it is on screen: the 2D-HD picture (if any) under the game canvas with its interface. */
+  const photo = (): HTMLCanvasElement => {
+    const r = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(game.width, Math.round(r.width * dpr));
+    const hgt = Math.max(game.height, Math.round(r.height * dpr));
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = hgt;
+    const g = c.getContext('2d')!;
+    g.imageSmoothingEnabled = false;
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, w, hgt);
+    stage.drawInto(g, w, hgt);
+    g.drawImage(canvas, 0, 0, w, hgt);
+    return c;
+  };
+  const takeMark = (withNote: boolean) => {
+    const shot = photo();
+    const a = playerActor();
+    const snap = world.snapshot();
+    const report: MarkReport = {
+      time: new Date().toISOString(),
+      scene: snap.scene,
+      player: a ? { x: Math.round(a.x * 10) / 10, y: Math.round(a.y * 10) / 10, feet: (({ x, y, w, h }) => ({ x, y, w, h }))(a.box()), facing: a.facing } : null,
+      camera: { x: Math.round(world.camera.x * 10) / 10, y: Math.round(world.camera.y * 10) / 10, zoom: world.zoom },
+      hd: hdOn,
+      vars: snap.globals,
+      sceneVars: snap.sceneVars,
+      trail: trail.slice(),
+    };
+    if (withNote) {
+      // window.prompt stops the page: the game waits while the note is written
+      const note = window.prompt('Note for this mark (one line)');
+      last = performance.now();
+      acc = 0;
+      if (note === null) return;
+      if (note.trim()) report.note = note.trim();
+    }
+    codes.clear();
+    opts.onMark!(report, shot).then(
+      (n) => {
+        markLabel = { text: `Marked #${n}`, until: performance.now() + 1500 };
+        drawn = false;
+      },
+      (err: unknown) => {
+        markLabel = { text: `Mark failed: ${(err as Error).message}`.slice(0, 60), until: performance.now() + 3000 };
+        drawn = false;
+      },
+    );
+  };
 
   const onKeyDown = (e: KeyboardEvent) => {
     sound.unlock();
@@ -364,6 +457,11 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     if (e.code === 'F6') {
       if (!e.repeat) setHd(!hdOn);
       e.preventDefault();
+      return;
+    }
+    if (DEV && e.code === 'F8') {
+      if (opts.onMark && !e.repeat) markWanted = { note: e.shiftKey };
+      if (opts.onMark) e.preventDefault();
       return;
     }
     const keys = logicalKeys(e.code);
@@ -614,8 +712,14 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     }
     if (steps >= maxSteps) acc = 0;
     busy = false;
+    // the trail only exists for F8, which only exists in the game served by the editor
+    if (DEV && steps && opts.onMark) sampleTrail();
+    if (DEV && markLabel && performance.now() > markLabel.until) {
+      markLabel = null;
+      drawn = false;
+    }
     // Nothing moved (a screen faster than the game): the picture on it is already right.
-    if (steps === 0 && !paused && drawn) return;
+    if (steps === 0 && !paused && drawn && !markWanted) return;
     drawn = true;
     renderWorld(world, stage.target(world));
     if (showHitboxes) {
@@ -646,6 +750,23 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
         ctx.strokeRect(Math.round((b.x - ox) * z) + 0.5, Math.round((b.y - oy) * z) + 0.5, Math.max(0, b.w * z - 1), Math.max(0, b.h * z - 1));
       }
       ctx.globalAlpha = 1;
+    }
+    if (DEV && markWanted) {
+      // the photo is taken here, in the frame just drawn (a WebGL canvas reads back empty later), before the label
+      const m = markWanted;
+      markWanted = null;
+      takeMark(m.note);
+    }
+    if (DEV && markLabel) {
+      ctx.font = '8px monospace';
+      const tw = Math.ceil(ctx.measureText(markLabel.text).width) + 8;
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(4, 4, tw, 12);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#ffe14d';
+      ctx.textBaseline = 'top';
+      ctx.fillText(markLabel.text, 8, 6);
     }
     if (fpsOn) {
       const end = performance.now();

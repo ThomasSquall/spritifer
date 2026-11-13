@@ -2,12 +2,17 @@
 
 import type { GameBundle } from '../core/game/types.js';
 import { mountPlayer } from './player.js';
+import { markEndpoint } from './markEndpoint.js';
 import { type WorldEdit, editWorld, inspectWorld } from '../core/game/debug.js';
 
 declare global {
   interface Window {
     SPRITIFER_GAME?: GameBundle;
+    /** Set by the editor's server in the game page it serves (play.html): where its tools answer. */
+    SPRITIFER_DEV?: { marks?: string };
   }
+  /** true in the runtime for the game page served by the editor, false in exported games (vite.runtime.config.ts). */
+  const __SPRITIFER_DEV__: boolean;
 }
 
 const bundle = window.SPRITIFER_GAME;
@@ -42,6 +47,21 @@ if (!bundle) {
     onFpsChange: (on) => {
       if (inFrame) window.parent.postMessage({ source: 'spritifer-game', type: 'fps', on }, '*');
     },
+    // "Mark here" (F8): only in the game page served by the editor's server, which stores the reports in the project.
+    // An exported game has no such page, and F8 does nothing there.
+    onMark: __SPRITIFER_DEV__ && markEndpoint(window.SPRITIFER_DEV, location.href)
+      ? async (report, photo) => {
+          const res = await fetch(markEndpoint(window.SPRITIFER_DEV, location.href)!, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ report, png: photo.toDataURL('image/png') }),
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const n = ((await res.json()) as { n: number }).n;
+          post('log', `Marked #${n} (F8)`);
+          return n;
+        }
+      : undefined,
     onLog: (m) => {
       post('log', m);
       if (m.startsWith('ERROR')) console.warn('[game]', m);

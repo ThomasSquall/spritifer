@@ -10,7 +10,7 @@
   "scripts": {
     "build": "npm run build:web && npm run build:runtime && npm run build:server",
     "build:web": "vite build",
-    "build:runtime": "vite build -c vite.runtime.config.ts",
+    "build:runtime": "node scripts/build-runtime.mjs",
     "build:server": "tsc -p tsconfig.server.json",
     "dev": "node scripts/dev.mjs",
     "dev:web": "vite",

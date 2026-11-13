@@ -65,15 +65,16 @@ function startServer() {
 }
 
 /** Vite prints every output file; only errors and the end of each build are worth a line. */
-function bundle(label, args, reminder) {
+function bundle(label, args, reminder, env = {}) {
   run(label, bin('vite'), ['build', '--watch', ...args], (line) => {
     if (/built in/.test(line)) console.log(`[${label}] rebuilt, ${reminder}`);
     else if (/error/i.test(line)) console.error(`[${label}] ${line}`);
-  }, { SPRITIFER_DEV: '1' });
+  }, { SPRITIFER_DEV: '1', ...env });
 }
 
 bundle('web', [], 'reload the editor page');
-bundle('runtime', ['-c', 'vite.runtime.config.ts'], 'press Play or reload the game');
+bundle('runtime', ['-c', 'vite.runtime.config.ts'], 'export again to update exported games');
+bundle('runtime-dev', ['-c', 'vite.runtime.config.ts'], 'press Play or reload the game', { RUNTIME_KIND: 'dev' });
 
 // The server starts after the first compile, so that compile doesn't restart it straight away.
 let serverStarted = false;

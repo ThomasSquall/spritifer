@@ -178,7 +178,7 @@ I file finiscono dentro l'HTML esportato e nell'APK.
 **Pathfinding.** `await this.self.pathTo(x, y, speed)` fa camminare l'istanza aggirando muri e oggetti solidi (A* sui tile, senza tagliare gli angoli) e restituisce `true` all'arrivo. Il resto dell'API:
 
 - `self.stopMoving()` interrompe il movimento;
-- `findPath(x1, y1, x2, y2)` restituisce i punti di passaggio, o `null` se non c'è strada.
+- `findPath(x1, y1, x2, y2)` restituisce i punti di passaggio, o `null` se non c'è strada. Con `width` (px) il camminatore è un quadrato di quel lato: `pathTo` passa il lato maggiore della hitbox, quindi un passaggio più stretto di quel lato non si trova, ma nessun percorso porta contro un muro. Fuori dalla scena conta come solido. Limiti dichiarati della ricerca sulle celle fini: (1) un passaggio largo esattamente quanto chi cammina può non essere trovato; (2) una meta irraggiungibile su una mappa grande costa decine di ms: chi chiama spesso passi un `maxNodes` più basso; (3) con celle più grandi della tile e ostacoli sottili può mancare una strada che esiste (i passi fra centri di tile si controllano a campioni, il percorso finale con il box spazzato, più severo), ma un percorso non passa mai dentro un muro.
 
 In libreria ci sono anche `ai/Roam` (girovaga intorno a casa, si ferma durante i dialoghi) e `ai/ChasePath` (insegue il bersaglio aggirando i muri e rinuncia quando è lontano).
 

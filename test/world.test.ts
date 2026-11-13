@@ -196,6 +196,28 @@ describe('pathfinding', () => {
     expect(r.logs.some((l) => l.endsWith('cancelled false'))).toBe(true);
   });
 
+  it('pathTo plans for the longer side of the walker hitbox, so a tall walker is not sent into a low gap (room-3001 #344.4)', async () => {
+    const b = bundle({
+      objects: [{ name: 'npc', sprite: 'box', hitbox: { x: 4, y: 0, w: 8, h: 24 } }],
+      scripts: { Walk: "export default class Walk extends Behaviour { async start() { await this.self.pathTo(260, 60, 200) } }" },
+    });
+    b.game.objects[1].behaviors = [{ type: 'script', name: 'Walk' }];
+    b.scenes.a.instances.push({ id: 'n', object: 'npc', x: 120, y: 40 });
+    const widths: number[] = [];
+    const orig = World.prototype.findPath;
+    World.prototype.findPath = function (this: World, ...args: Parameters<World['findPath']>) {
+      widths.push(Number(args[4]?.width));
+      return orig.apply(this, args);
+    };
+    try {
+      await runPlaytest(b, { seconds: 0.5, evaluator: nodeEvaluator });
+    } finally {
+      World.prototype.findPath = orig;
+    }
+    expect(widths).toContain(24);
+    expect(widths).not.toContain(8);
+  });
+
   it('Roam wanders near home and ChasePath hunts the player around a wall', async () => {
     const lib = Object.fromEntries(LIBRARY.filter((c) => ['Roam', 'ChasePath'].includes(c.name)).map((c) => [`ai/${c.name}`, c.code]));
     const b = bundle({

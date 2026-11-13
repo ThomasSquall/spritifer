@@ -1098,7 +1098,9 @@ export class ScriptHost {
     this.stopMoving(a);
     const token = this.pathTokens.get(a) ?? 0;
     const b = a.box();
-    const path = this.world.findPath(b.x + b.w / 2, b.y + b.h / 2, x, y, { diagonal: opts.diagonal, partial: true, ignore: [a] });
+    // the walker is treated as a square as big as the longer side of its hitbox: careful (a narrow way may be missed), never
+    // sent into a gap it does not fit (room-3001 #344.4)
+    const path = this.world.findPath(b.x + b.w / 2, b.y + b.h / 2, x, y, { diagonal: opts.diagonal, partial: true, ignore: [a], width: Math.max(b.w, b.h) });
     if (!path || !path.length) return false;
     const steps = opts.maxSteps && opts.maxSteps > 0 ? path.slice(0, opts.maxSteps) : path;
     for (const p of steps) {
@@ -1740,7 +1742,16 @@ export class ScriptHost {
           ...(typeof on === 'function' ? { onMessage: (m: string) => this.run('vfx onMessage', on as (m: string) => void, m) } : {}),
         });
       },
-      findPath: (x1: number, y1: number, x2: number, y2: number, opts: { diagonal?: boolean; partial?: boolean } = {}) => w.findPath(Number(x1), Number(y1), Number(x2), Number(y2), opts ?? {}),
+      findPath: (x1: number, y1: number, x2: number, y2: number, opts: { diagonal?: boolean; partial?: boolean; width?: number } = {}) => {
+        // only known options, with their types: a script cannot hand the engine anything else
+        const o = (opts && typeof opts === 'object' ? opts : {}) as Record<string, unknown>;
+        const width = Number(o.width);
+        return w.findPath(Number(x1), Number(y1), Number(x2), Number(y2), {
+          ...(typeof o.diagonal === 'boolean' ? { diagonal: o.diagonal } : {}),
+          ...(o.partial === true ? { partial: true } : {}),
+          ...(Number.isFinite(width) && width > 0 ? { width } : {}),
+        });
+      },
       player: () => this.handle(w.actors.find((a) => !a.destroyed && a.behaviors.some((b) => (b.type === 'platformer' || b.type === 'topdown') && b.controls !== false))),
       spawn: (name: string, x: number, y: number, props: Record<string, Value> = {}, opts: { sprite?: string; name?: string; animation?: string } = {}) =>
         this.handle(w.spawn(String(name), Number(x), Number(y), 0, 0, { props: props ?? {}, sprite: opts?.sprite ? String(opts.sprite) : undefined, name: opts?.name ? String(opts.name) : undefined, animation: opts?.animation ? String(opts.animation) : undefined })),

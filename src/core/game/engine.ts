@@ -7,7 +7,7 @@
 import { ACTION_MAP, BEHAVIOR_MAP, CONDITION_MAP, TRIGGER_MAP, withDefaults } from './catalog.js';
 import { type ExprContext, MATH_FUNCTIONS, compile, fmt, parseTarget, toNum, truthy } from './expr.js';
 import { BUILTIN_FONT, type PixelFont, gameFont, measureText } from './font.js';
-import { type FineSolid, decodeFineSolid, fineSolidAt, fineSolidRects, fineTileCover } from './fineSolid.js';
+import { type FineSolid, decodeFineSolid, fineSolidAt, fineSolidRects } from './fineSolid.js';
 import { type Behavior, type ComponentOverrides, type DataRow, type DataTable, type EventStep, type GameBundle, type GameEvent, type GameProject, type Hitbox, type Instance, type LightDef, type ObjectType, type Scene, type SpriteAsset, type Value, cellValue, hitboxOf } from './types.js';
 import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, fieldsOf, scaledRenderer, wrapText } from './script.js';
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
@@ -1684,7 +1684,378 @@ export class World {
    * Returns waypoints (tile centers, the last one the exact target) or null when unreachable;
    * with `partial` it goes as close as it can instead.
    */
-  findPath(x1: number, y1: number, x2: number, y2: number, opts: { diagonal?: boolean; partial?: boolean; ignore?: Actor[]; maxNodes?: number } = {}): { x: number; y: number }[] | null {
+  /**
+   * Fine collision as the path finder sees it (room-3001 #286.H, #305): the summed area of the fine cells (is anything
+   * solid in this box?), and per walker width the tiles whose center has no room and the free moves between tiles.
+   * Computed once per scene and width (a few widths kept), not at every call.
+   */
+  private finePaths: { fine: FineSolid; sat: Int32Array; byWidth: Map<number, { closed: Uint8Array; pass: Uint8Array }> } | null = null;
+  /** Search arrays reused from one call to the next (one set per grid size), valid where `seen` holds this call's stamp. */
+  private pathScratch = new Map<number, { stamp: number; seen: Uint32Array; done: Uint32Array; g: Float64Array; from: Int32Array; known: Int8Array; knownAt: Uint32Array }>();
+
+  private scratchFor(n: number) {
+    let sc = this.pathScratch.get(n);
+    if (!sc) {
+      if (this.pathScratch.size >= 2) this.pathScratch.delete(this.pathScratch.keys().next().value!);
+      sc = { stamp: 0, seen: new Uint32Array(n), done: new Uint32Array(n), g: new Float64Array(n), from: new Int32Array(n), known: new Int8Array(n), knownAt: new Uint32Array(n) };
+      this.pathScratch.set(n, sc);
+    }
+    sc.stamp++;
+    if (sc.stamp >= 0xffffffff) {
+      sc.stamp = 1;
+      sc.seen.fill(0);
+      sc.done.fill(0);
+      sc.knownAt.fill(0);
+    }
+    return sc;
+  }
+
+  /** Fine collision in a box; outside the scene counts as solid (a walker is never sent along the edge of the map). */
+  private fineBlockedIn(x0: number, y0: number, x1: number, y1: number): boolean {
+    const f = this.fine!;
+    if (x0 < 0 || y0 < 0 || x1 > f.cols * f.cell || y1 > f.rows * f.cell) return true;
+    return this.fineSolidIn(x0, y0, x1, y1);
+  }
+
+  private fineSolidIn(x0: number, y0: number, x1: number, y1: number): boolean {
+    const f = this.fine!;
+    const fp = this.finePathTables();
+    const W = f.cols + 1;
+    const cx0 = Math.max(0, Math.floor(x0 / f.cell));
+    const cy0 = Math.max(0, Math.floor(y0 / f.cell));
+    const cx1 = Math.min(f.cols, Math.floor((x1 - 1e-6) / f.cell) + 1);
+    const cy1 = Math.min(f.rows, Math.floor((y1 - 1e-6) / f.cell) + 1);
+    if (cx1 <= cx0 || cy1 <= cy0) return false;
+    const sat = fp.sat;
+    return sat[cy1 * W + cx1]! - sat[cy0 * W + cx1]! - sat[cy1 * W + cx0]! + sat[cy0 * W + cx0]! > 0;
+  }
+
+  private finePathTables(): NonNullable<World['finePaths']> {
+    const f = this.fine!;
+    if (this.finePaths && this.finePaths.fine === f) return this.finePaths;
+    const W = f.cols + 1;
+    const sat = new Int32Array(W * (f.rows + 1));
+    for (let y = 0; y < f.rows; y++) {
+      let run = 0;
+      for (let x = 0; x < f.cols; x++) {
+        run += f.bits[y * f.cols + x]!;
+        sat[(y + 1) * W + x + 1] = sat[y * W + x + 1]! + run;
+      }
+    }
+    return (this.finePaths = { fine: f, sat, byWidth: new Map() });
+  }
+
+  private finePathFor(width: number): { closed: Uint8Array; pass: Uint8Array } {
+    const t = this.finePathTables();
+    const hit = t.byWidth.get(width);
+    if (hit) {
+      // least recently used goes first: a width asked again moves to the end
+      t.byWidth.delete(width);
+      t.byWidth.set(width, hit);
+      return hit;
+    }
+    const ts = this.tileSize;
+    const cols = this.scene.cols;
+    const rows = this.scene.rows;
+    const f = this.fine!;
+    const half = width / 2;
+    const closed = new Uint8Array(cols * rows);
+    const pass = new Uint8Array(cols * rows * 8);
+    const dirs = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]] as const;
+    for (let ty = 0; ty < rows; ty++) {
+      for (let tx = 0; tx < cols; tx++) {
+        const k = ty * cols + tx;
+        const cx = tx * ts + ts / 2;
+        const cy = ty * ts + ts / 2;
+        closed[k] = this.fineBlockedIn(cx - half, cy - half, cx + half, cy + half) ? 1 : 0;
+        dirs.forEach(([dx, dy], d) => {
+          const len = Math.hypot(dx, dy) * ts;
+          const n = Math.max(1, Math.ceil(len / Math.max(1, f.cell / 2)));
+          let ok = true;
+          for (let i = 0; i <= n && ok; i++) {
+            const px = cx + (dx * ts * i) / n;
+            const py = cy + (dy * ts * i) / n;
+            if (this.fineBlockedIn(px - half, py - half, px + half, py + half)) ok = false;
+          }
+          pass[k * 8 + d] = ok ? 1 : 0;
+        });
+      }
+    }
+    if (t.byWidth.size >= 4) t.byWidth.delete(t.byWidth.keys().next().value!);
+    const out = { closed, pass };
+    t.byWidth.set(width, out);
+    return out;
+  }
+
+  /**
+   * findPath on a scene with fine collision. First over tiles, with the first move taken from where the walker really is
+   * and the last one into the real target (a walker against a thin wall, or a target next to one, is not stuck because
+   * the CENTER of its tile has no room). If that finds nothing, over the fine cells themselves, so a gap narrower than a
+   * tile or away from tile centers is found too. Waypoints are then pulled tight along free lines.
+   */
+  private findPathFine(x1: number, y1: number, x2: number, y2: number, opts: { diagonal?: boolean; partial?: boolean; ignore?: Actor[]; maxNodes?: number; width?: number }): { x: number; y: number }[] | null {
+    const ts = this.tileSize;
+    const cols = this.scene.cols;
+    const rows = this.scene.rows;
+    const f = this.fine!;
+    const wIn = Number(opts.width);
+    const w0 = Number.isFinite(wIn) && wIn > 0 ? Math.min(wIn, 4 * ts) : Math.min(ts / 2, 8);
+    // a walker at least a cell wide is rounded up to whole cells; a smaller one keeps its size (a cell of 32 px does not
+    // make an 8 px walker 32 px wide) and the moves between cells are then checked along the way (room-3001 #344.6)
+    const width = f.cell <= w0 ? Math.ceil(w0 / f.cell) * f.cell : Math.ceil(w0);
+    const half = width / 2;
+    const W = cols * ts;
+    const H = rows * ts;
+    const insidePx = (x: number, y: number) => x >= 0 && y >= 0 && x < W && y < H;
+    if (!insidePx(x1, y1)) return null;
+    const diag = opts.diagonal !== false;
+    // other solids: solid tiles and solid instances (not jump-through ones)
+    const boxes: Rect[] = [];
+    for (const o of this.actors) {
+      if (o.destroyed || opts.ignore?.includes(o)) continue;
+      const sb = o.behavior('solid');
+      if (!sb || sb.oneWay === true) continue;
+      boxes.push(o.box());
+    }
+    const rectFree = (x0: number, y0: number, x1_: number, y1_: number) => {
+      if (x0 < 0 || y0 < 0 || x1_ > W || y1_ > H || this.fineSolidIn(x0, y0, x1_, y1_)) return false;
+      for (let ty = Math.max(0, Math.floor(y0 / ts)); ty <= Math.min(rows - 1, Math.floor((y1_ - 1e-6) / ts)); ty++) {
+        for (let tx = Math.max(0, Math.floor(x0 / ts)); tx <= Math.min(cols - 1, Math.floor((x1_ - 1e-6) / ts)); tx++) if (this.solidAtTile(tx, ty)) return false;
+      }
+      for (const b of boxes) if (b.x < x1_ && x0 < b.x + b.w && b.y < y1_ && y0 < b.y + b.h) return false;
+      return true;
+    };
+    const boxFree = (cx: number, cy: number) => rectFree(cx - half, cy - half, cx + half, cy + half);
+    // A segment is free when the walker's box is free all along it. Each short piece is checked with the box that covers
+    // the walker at both of its ends, so nothing can hide between two samples, not even the corner of a thin post (a bit
+    // careful near corners, never through a solid: room-3001 #344.6).
+    const stepPx = Math.max(0.5, Math.min(width, f.cell) / 2);
+    const segmentFree = (ax: number, ay: number, bx: number, by: number) => {
+      const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / stepPx));
+      let px = ax, py = ay;
+      if (!boxFree(px, py)) return false;
+      for (let i = 1; i <= n; i++) {
+        const qx = ax + ((bx - ax) * i) / n, qy = ay + ((by - ay) * i) / n;
+        if (!rectFree(Math.min(px, qx) - half, Math.min(py, qy) - half, Math.max(px, qx) + half, Math.max(py, qy) + half)) return false;
+        px = qx;
+        py = qy;
+      }
+      return true;
+    };
+    const mIn = Number(opts.maxNodes);
+    const tileLimit = Number.isFinite(mIn) && mIn >= 1 ? Math.floor(mIn) : 20000;
+    // the fine search looks at up to 8 times as many nodes as the tile search (room-3001 #344.2)
+    const fineLimit = 8 * tileLimit;
+    let goalFree = insidePx(x2, y2) && boxFree(x2, y2);
+    if (!goalFree && !opts.partial) return null;
+    if (!goalFree) {
+      // no room for the walker at the target: with partial, the free spot nearest to it within a small radius becomes the
+      // target; if there is none, only the (cheap) tile search runs, for 'as close as it can get'
+      const R = Math.max(2 * width, 2 * ts);
+      const st = Math.max(1, f.cell / 2);
+      let best: { x: number; y: number; d: number } | null = null;
+      for (let dy = -R; dy <= R; dy += st) {
+        for (let dx = -R; dx <= R; dx += st) {
+          const d = dx * dx + dy * dy;
+          if (d > R * R || (best && d >= best.d)) continue;
+          const px = x2 + dx, py = y2 + dy;
+          if (insidePx(px, py) && boxFree(px, py)) best = { x: px, y: py, d };
+        }
+      }
+      if (best) {
+        x2 = best.x;
+        y2 = best.y;
+        goalFree = true;
+      }
+    }
+    const pull = (pts: { x: number; y: number }[], first: { x: number; y: number }) => {
+      // keep the farthest waypoint still in a free line from the current one (looking a bounded way ahead). When no line
+      // is free, nothing is pulled: the walker goes through the unpulled path (from the walker, first the center of the
+      // node it stands in), never in a straight line through a wall (room-3001 #344.6)
+      const out: { x: number; y: number }[] = [];
+      let cx = x1, cy = y1, i = 0;
+      while (i < pts.length) {
+        let j = Math.min(pts.length - 1, i + 64);
+        while (j > i && !segmentFree(cx, cy, pts[j]!.x, pts[j]!.y)) j--;
+        if (j === i && !segmentFree(cx, cy, pts[i]!.x, pts[i]!.y)) {
+          // the first leg may go through the center of the start node; any other leg with no free line is not a way
+          if (i === 0 && (first.x !== cx || first.y !== cy) && segmentFree(cx, cy, first.x, first.y) && segmentFree(first.x, first.y, pts[0]!.x, pts[0]!.y)) out.push(first);
+          else return null;
+        }
+        out.push(pts[j]!);
+        cx = pts[j]!.x;
+        cy = pts[j]!.y;
+        i = j + 1;
+      }
+      return out;
+    };
+    const pulled = (pts: { x: number; y: number }[], first: { x: number; y: number }) => {
+      const r = pull(pts, first);
+      return r ?? (opts.partial ? [] : null);
+    };
+    if (goalFree && segmentFree(x1, y1, x2, y2)) return [{ x: x2, y: y2 }];
+
+    // A* on a grid of n cells whose neighbors are given by `step`
+    const search = (n: number, start: number, goal: number, hx: (i: number) => number, step: (cur: number, visit: (ni: number, cost: number) => void) => void, limit: number) => {
+      const sc = this.scratchFor(n);
+      const stamp = sc.stamp;
+      const { seen, done } = sc;
+      const g = sc.g;
+      const from = sc.from;
+      const gAt = (i: number) => (seen[i] === stamp ? g[i]! : Infinity);
+      const heap: [number, number][] = [[hx(start), start]];
+      seen[start] = stamp;
+      g[start] = 0;
+      from[start] = -1;
+      let best = start;
+      let found = false;
+      const push = (fv: number, i: number) => {
+        heap.push([fv, i]);
+        let k = heap.length - 1;
+        while (k > 0) {
+          const p = (k - 1) >> 1;
+          if (heap[p]![0] <= heap[k]![0]) break;
+          [heap[p], heap[k]] = [heap[k]!, heap[p]!];
+          k = p;
+        }
+      };
+      const pop = () => {
+        const top = heap[0]!;
+        const last = heap.pop()!;
+        if (heap.length) {
+          heap[0] = last;
+          let k = 0;
+          for (;;) {
+            const l = 2 * k + 1, r = l + 1;
+            let m = k;
+            if (l < heap.length && heap[l]![0] < heap[m]![0]) m = l;
+            if (r < heap.length && heap[r]![0] < heap[m]![0]) m = r;
+            if (m === k) break;
+            [heap[m], heap[k]] = [heap[k]!, heap[m]!];
+            k = m;
+          }
+        }
+        return top;
+      };
+      for (let c = 0; heap.length && c < limit; c++) {
+        const [, cur] = pop();
+        if (done[cur] === stamp) continue;
+        done[cur] = stamp;
+        if (cur === goal) {
+          found = true;
+          best = cur;
+          break;
+        }
+        if (hx(cur) < hx(best)) best = cur;
+        step(cur, (ni, cost) => {
+          const gc = g[cur]! + cost;
+          if (gc < gAt(ni)) {
+            seen[ni] = stamp;
+            g[ni] = gc;
+            from[ni] = cur;
+            push(gc + hx(ni), ni);
+          }
+        });
+      }
+      const chain: number[] = [];
+      for (let i = best; i !== -1 && i !== start; i = from[i]!) chain.push(i);
+      chain.reverse();
+      return { found, chain };
+    };
+
+    // 1) tiles
+    const sx = Math.floor(x1 / ts), sy = Math.floor(y1 / ts);
+    const gx = Math.max(0, Math.min(cols - 1, Math.floor(x2 / ts))), gy = Math.max(0, Math.min(rows - 1, Math.floor(y2 / ts)));
+    const fp = this.finePathFor(width);
+    const blocked = new Uint8Array(cols * rows);
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) if (this.solidAtTile(x, y) || fp.closed[y * cols + x]) blocked[y * cols + x] = 1;
+    for (const b of boxes) {
+      for (let ty = Math.max(0, Math.floor(b.y / ts)); ty <= Math.min(rows - 1, Math.floor((b.y + b.h - 0.01) / ts)); ty++) {
+        for (let tx = Math.max(0, Math.floor(b.x / ts)); tx <= Math.min(cols - 1, Math.floor((b.x + b.w - 0.01) / ts)); tx++) blocked[ty * cols + tx] = 1;
+      }
+    }
+    const start = sy * cols + sx;
+    const goal = gy * cols + gx;
+    const center = (i: number) => ({ x: (i % cols) * ts + ts / 2, y: Math.floor(i / cols) * ts + ts / 2 });
+    const tileOpen = (x: number, y: number) => x >= 0 && y >= 0 && x < cols && y < rows && (!blocked[y * cols + x] || (y * cols + x === goal && goalFree));
+    const ht = (i: number) => {
+      const dx = Math.abs((i % cols) - gx), dy = Math.abs(Math.floor(i / cols) - gy);
+      return diag ? Math.max(dx, dy) + (Math.SQRT2 - 1) * Math.min(dx, dy) : dx + dy;
+    };
+    const tiles = search(cols * rows, start, goal, ht, (cur, visit) => {
+      const cx = cur % cols, cy = Math.floor(cur / cols);
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = cx + dx, ny = cy + dy;
+          if (!tileOpen(nx, ny)) continue;
+          if (dx && dy && (!diag || !tileOpen(cx + dx, cy) || !tileOpen(cx, cy + dy))) continue; // no corner cutting
+          const ni = ny * cols + nx;
+          // the first move from where the walker is, the last one into the real target; the others from the table
+          const a = cur === start ? { x: x1, y: y1 } : center(cur);
+          const b = ni === goal && goalFree ? { x: x2, y: y2 } : center(ni);
+          const ok = cur === start || ni === goal ? segmentFree(a.x, a.y, b.x, b.y) : !!fp.pass[cur * 8 + (dy + 1) * 3 + (dx + 1) - ((dy + 1) * 3 + (dx + 1) > 4 ? 1 : 0)];
+          if (ok) visit(ni, dx && dy ? Math.SQRT2 : 1);
+        }
+      }
+    }, tileLimit);
+    // start and target in the same tile with no free line between them: the tile chain is empty, the fine cells decide
+    if (tiles.found && goalFree && tiles.chain.length) {
+      const pts = tiles.chain.map(center);
+      pts[pts.length - 1] = { x: x2, y: y2 };
+      return pulled(pts, center(start));
+    }
+
+    // the target has no room even nearby: 'as close as it can get' over the tiles, without the fine search
+    if (!goalFree) {
+      const pts = tiles.chain.map(center);
+      return pts.length ? pulled(pts, center(start)) : [];
+    }
+    // 2) the fine cells: a node is free when the walker fits around the center of its cell
+    const fc = f.cols, fr = f.rows, cell = f.cell;
+    const ksc = this.scratchFor(fc * fr);
+    const kstamp = ksc.stamp;
+    const known = ksc.known;
+    const kseen = ksc.knownAt;
+    const nodeFree = (i: number) => {
+      if (kseen[i] !== kstamp) {
+        kseen[i] = kstamp;
+        known[i] = boxFree((i % fc) * cell + cell / 2, Math.floor(i / fc) * cell + cell / 2) ? 1 : -1;
+      }
+      return known[i] === 1;
+    };
+    const s2 = Math.min(fr - 1, Math.floor(y1 / cell)) * fc + Math.min(fc - 1, Math.floor(x1 / cell));
+    const gfx = Math.max(0, Math.min(fc - 1, Math.floor(x2 / cell))), gfy = Math.max(0, Math.min(fr - 1, Math.floor(y2 / cell)));
+    const g2 = gfy * fc + gfx;
+    const hf = (i: number) => {
+      const dx = Math.abs((i % fc) - gfx), dy = Math.abs(Math.floor(i / fc) - gfy);
+      return diag ? Math.max(dx, dy) + (Math.SQRT2 - 1) * Math.min(dx, dy) : dx + dy;
+    };
+    const open = (x: number, y: number) => x >= 0 && y >= 0 && x < fc && y < fr && (nodeFree(y * fc + x) || (y * fc + x === g2 && goalFree));
+    const fineRes = search(fc * fr, s2, g2, hf, (cur, visit) => {
+      const cx = cur % fc, cy = Math.floor(cur / fc);
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          if (!open(cx + dx, cy + dy)) continue;
+          if (dx && dy && (!diag || !open(cx + dx, cy) || !open(cx, cy + dy))) continue;
+          // a cell wider than the walker: room at both centers says nothing about a thin post between them (#344.6)
+          if (cell > width && !segmentFree(cx * cell + cell / 2, cy * cell + cell / 2, (cx + dx) * cell + cell / 2, (cy + dy) * cell + cell / 2)) continue;
+          visit((cy + dy) * fc + cx + dx, dx && dy ? Math.SQRT2 : 1);
+        }
+      }
+    }, fineLimit);
+    if (!fineRes.found && !opts.partial) return null;
+    const pts = fineRes.chain.map((i) => ({ x: (i % fc) * cell + cell / 2, y: Math.floor(i / fc) * cell + cell / 2 }));
+    if (fineRes.found && goalFree) {
+      if (pts.length) pts[pts.length - 1] = { x: x2, y: y2 };
+      else pts.push({ x: x2, y: y2 });
+    }
+    return pts.length ? pulled(pts, { x: (s2 % fc) * cell + cell / 2, y: Math.floor(s2 / fc) * cell + cell / 2 }) : [];
+  }
+
+  findPath(x1: number, y1: number, x2: number, y2: number, opts: { diagonal?: boolean; partial?: boolean; ignore?: Actor[]; maxNodes?: number; width?: number } = {}): { x: number; y: number }[] | null {
+    if (this.fine) return this.findPathFine(x1, y1, x2, y2, opts);
     const ts = this.tileSize;
     const cols = this.scene.cols;
     const rows = this.scene.rows;
@@ -1697,11 +2068,6 @@ export class World {
     // Blocked cells: solid tiles + cells covered by solid instances (not jump-through ones).
     const blocked = new Uint8Array(cols * rows);
     for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) if (this.solidAtTile(x, y)) blocked[y * cols + x] = 1;
-    // Fine collision, the careful way: a tile with any solid fine cell is closed, so a path never enters one.
-    if (this.fine) {
-      const cover = fineTileCover(this.fine, ts, cols, rows);
-      for (let k = 0; k < cover.length; k++) if (cover[k]! > 0) blocked[k] = 1;
-    }
     for (const o of this.actors) {
       if (o.destroyed || opts.ignore?.includes(o)) continue;
       const sb = o.behavior('solid');

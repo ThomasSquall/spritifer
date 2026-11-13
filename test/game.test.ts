@@ -831,6 +831,83 @@ describe('fine collision', () => {
     expect(Math.max(...near.map((q) => q.x))).toBeLessThan(96);
   });
 
+  it('finds the gap in a thin fine wall and goes through it, and closes tiles a big cell covers', () => {
+    // the same 8 px wall at x 96..103 with a gap 24 px high at y 96..119
+    const cols = 80;
+    const rows = 48;
+    const bits = new Array(cols * rows).fill(0);
+    for (let y = 0; y < rows; y++) if (y < 24 || y >= 30) for (let x = 24; x < 26; x++) bits[y * cols + x] = 1;
+    const w = world(encodeFineSolid(bits, cols, rows, 4));
+    const path = w.findPath(40, 20, 200, 20, { width: 8 })!;
+    expect(path).not.toBeNull();
+    // it crosses x 100 inside the gap
+    const crossing = path.findIndex((q, i) => i > 0 && path[i - 1]!.x < 100 && q.x >= 100);
+    expect(crossing).toBeGreaterThan(0);
+    const a = path[crossing - 1]!, b = path[crossing]!;
+    const yAt = a.y + ((100 - a.x) * (b.y - a.y)) / (b.x - a.x);
+    expect(yAt).toBeGreaterThanOrEqual(96);
+    expect(yAt).toBeLessThan(120);
+    // too wide for the gap: no way through
+    expect(w.findPath(40, 20, 200, 20, { width: 28 })).toBeNull();
+    // cells of 32 px on 16 px tiles: one solid cell closes the four tiles under it
+    const big = new Array(10 * 6).fill(0);
+    for (let y = 0; y < 6; y++) big[y * 10 + 3] = 1; // x 96..127, full height
+    const v = world(encodeFineSolid(big, 10, 6, 32));
+    expect(v.findPath(40, 20, 200, 20)).toBeNull();
+  });
+
+  it('lets a walker leave or reach a tile whose center touches a thin wall, and finds a narrow gap away from tile centers', () => {
+    // a wall ONE cell thick (x 96..99) and a 16 px walker standing at x 100..116 (center 108), touching it: the center of
+    // its tile (x 104) has no room for it, yet it can go right, and a path can bring it back to that same spot
+    {
+      const cols = 80, rows = 48;
+      const thin = new Array(cols * rows).fill(0);
+      for (let y = 0; y < rows; y++) thin[y * cols + 24] = 1;
+      const t = world(encodeFineSolid(thin, cols, rows, 4));
+      const out = t.findPath(108, 100, 200, 140, { width: 16 });
+      expect(out).not.toBeNull();
+      expect(out![out!.length - 1]).toEqual({ x: 200, y: 140 });
+      const back = t.findPath(200, 140, 108, 100, { width: 16 });
+      expect(back).not.toBeNull();
+      expect(back![back!.length - 1]).toEqual({ x: 108, y: 100 });
+      // one pixel closer and it would stand in the wall: that target is refused
+      expect(t.findPath(200, 140, 107, 100, { width: 16 })).toBeNull();
+    }
+    const w = world();
+    // a wall with a 12 px gap at y 100..111, which holds no tile center (tile centers are at 8, 24, ..., 104 +-8)
+    const cols = 80, rows = 48;
+    const bits = new Array(cols * rows).fill(0);
+    for (let y = 0; y < rows; y++) if (y < 25 || y >= 28) for (let x = 24; x < 26; x++) bits[y * cols + x] = 1;
+    const v = world(encodeFineSolid(bits, cols, rows, 4));
+    const through = v.findPath(40, 20, 200, 20, { width: 8 });
+    expect(through).not.toBeNull();
+    for (let k = 1; k < through!.length; k++) {
+      const a = through![k - 1]!, b = through![k]!;
+      if (a.x < 100 && b.x >= 100) {
+        const yAt = a.y + ((100 - a.x) * (b.y - a.y)) / (b.x - a.x);
+        expect(yAt).toBeGreaterThanOrEqual(100);
+        expect(yAt).toBeLessThan(112);
+      }
+    }
+    // partial: as close as it can get to the other side of a full wall
+    const near = w.findPath(40, 20, 200, 20, { partial: true, width: 8 })!;
+    expect(near.length).toBeGreaterThan(0);
+    expect(near[near.length - 1]!.x).toBeGreaterThan(80);
+    expect(near[near.length - 1]!.x).toBeLessThan(96);
+  });
+
+  it('keeps one table per walker width, and a width that is not a number does not switch the walls off', () => {
+    const w = world();
+    w.findPath(40, 20, 200, 20, { width: 8 });
+    const tables = (w as unknown as { finePaths: { byWidth: Map<number, object> } }).finePaths;
+    const t8 = tables.byWidth.get(8);
+    w.findPath(40, 20, 200, 20, { width: 12 });
+    w.findPath(40, 20, 200, 20, { width: 8 });
+    expect(tables.byWidth.get(8)).toBe(t8);
+    expect(tables.byWidth.get(12)).toBeDefined();
+    for (const bad of [NaN, 'wide' as unknown as number, -3, Infinity]) expect(w.findPath(40, 20, 200, 20, { width: bad })).toBeNull();
+  });
+
   it('is left out, with the reason, when its size does not fit the scene', () => {
     const s = normalizeSceneForTest({ ...platformBundle().scenes.level1, collisionFine: { cell: 4, cols: 10, rows: 10, rle: '64' } } as unknown as Scene);
     expect(s.collisionFine).toBeUndefined();
@@ -1010,7 +1087,100 @@ describe('foot line strips: mirroring, sprite offset, blinking, zoom', () => {
   });
 });
 
-describe('foot line points', () => {
+describe('fine paths: third review (room-3001 #344)', () => {
+  // scene 320x192 (16 px tiles), fine cells of `cell` px from a list of solid rectangles in px
+  const fineWorld = (rects: [number, number, number, number][], cell = 4, solids: [number, number, number, number][] = []) => {
+    const b = platformBundle();
+    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 90 }];
+    b.game.objects.push(normalizeObject({ name: 'post', sprite: 'coin', behaviors: [{ type: 'solid' }] }));
+    const sc = b.scenes.level1;
+    const cols = Math.ceil(320 / cell), rows = Math.ceil(192 / cell);
+    const bits = new Array(cols * rows).fill(0);
+    for (const [x, y, w, h] of rects) for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
+      if (cx * cell < x + w && cx * cell + cell > x && cy * cell < y + h && cy * cell + cell > y) bits[cy * cols + cx] = 1;
+    }
+    (sc as unknown as Record<string, unknown>).collisionFine = encodeFineSolid(bits, cols, rows, cell);
+    sc.instances = [{ id: 'p', object: 'player', x: 4, y: 4 }, ...solids.map(([x, y, w, h], k) => ({ id: `s${k}`, object: 'post', x, y, hitbox: { x: 0, y: 0, w, h } }))];
+    return new World({ ...b, scenes: { level1: normalizeSceneForTest(sc) } });
+  };
+  // the walker (a square `width` wide) never overlaps anything solid along the path, sampled every half pixel
+  const clear = (w: World, path: { x: number; y: number }[], from: { x: number; y: number }, width: number) => {
+    const h = width / 2;
+    let a = from;
+    for (const b of path) {
+      const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) * 2));
+      for (let i = 0; i <= n; i++) {
+        const cx = a.x + ((b.x - a.x) * i) / n, cy = a.y + ((b.y - a.y) * i) / n;
+        for (let y = cy - h + 0.25; y < cy + h; y += 0.5) for (let x = cx - h + 0.25; x < cx + h; x += 0.5) if (w.isSolidAt(x, y)) return false;
+      }
+      a = b;
+    }
+    return true;
+  };
+
+  it('1. finds the way around a post when start and target are in the same tile', () => {
+    // a post 4x8 px at x 100..103 between a 4 px walker at (98,56) and its target at (108,56): same tile (96..111)
+    const w = fineWorld([[100, 52, 4, 8]]);
+    const path = w.findPath(98, 56, 108, 56, { width: 4 });
+    expect(path).not.toBeNull();
+    expect(path!.length).toBeGreaterThan(0);
+    expect(path![path!.length - 1]).toEqual({ x: 108, y: 56 });
+    expect(clear(w, path!, { x: 98, y: 56 }, 4)).toBe(true);
+  });
+
+  it('2. the fine search keeps to maxNodes, and a target with no room goes to the free spot nearest to it', () => {
+    // a wall across the map with a 12 px gap away from tile centers: only the fine search finds it
+    const w = fineWorld([[96, 0, 8, 100], [96, 112, 8, 80]]);
+    expect(w.findPath(40, 20, 200, 20, { width: 8 })).not.toBeNull();
+    expect(w.findPath(40, 20, 200, 20, { width: 8, maxNodes: 20 })).toBeNull();
+    // the target inside the wall, with partial: the path ends next to it, on a free spot
+    const near = w.findPath(40, 20, 100, 20, { width: 8, partial: true })!;
+    const end = near[near.length - 1]!;
+    expect(end.x).toBeLessThanOrEqual(92);
+    expect(Math.hypot(end.x - 100, end.y - 20)).toBeLessThanOrEqual(32);
+    expect(clear(w, near, { x: 40, y: 20 }, 8)).toBe(true);
+  });
+
+  it('3. outside the scene is solid: a 16 px walker is not sent along a 12 px strip at the top edge', () => {
+    // a wall from y 12 down to the bottom: the only opening is a 12 px strip along the top edge
+    const w = fineWorld([[96, 12, 8, 180]]);
+    expect(w.findPath(40, 100, 200, 100, { width: 16 })).toBeNull();
+    expect(w.findPath(40, 100, 200, 100, { width: 8 })).not.toBeNull();
+  });
+
+  it('6. a path never crosses a solid in a straight line, also with cells bigger than the tiles and thin solid posts', () => {
+    let rnd = 344;
+    const r = () => ((rnd = (rnd * 1103515245 + 12345) % 2147483648) / 2147483648);
+    let checked = 0;
+    for (let m = 0; m < 30; m++) {
+      const rects: [number, number, number, number][] = [];
+      for (let k = 0; k < 4; k++) rects.push([Math.floor(r() * 9) * 32, Math.floor(r() * 5) * 32, 32, 32]);
+      const posts: [number, number, number, number][] = [];
+      for (let k = 0; k < 6; k++) posts.push([Math.floor(r() * 300), Math.floor(r() * 170), 6, 6 + Math.floor(r() * 20)]);
+      const w = fineWorld(rects, 32, posts);
+      for (let q = 0; q < 8; q++) {
+        const a = { x: 4 + Math.floor(r() * 312), y: 4 + Math.floor(r() * 184) };
+        const b = { x: 4 + Math.floor(r() * 312), y: 4 + Math.floor(r() * 184) };
+        if (!clear(w, [a], a, 8) || !clear(w, [b], b, 8)) continue; // the walker must fit where it starts and ends
+        const path = w.findPath(a.x, a.y, b.x, b.y, { width: 8 });
+        if (!path || !path.length) continue;
+        checked++;
+        expect(clear(w, path, a, 8)).toBe(true);
+      }
+    }
+    expect(checked).toBeGreaterThan(50);
+  });
+
+  it('7. the tables per width forget the least recently used one, not the first one made', () => {
+    const w = fineWorld([[96, 0, 8, 192]]);
+    for (const width of [4, 8, 12, 16]) w.findPath(40, 20, 200, 20, { width });
+    w.findPath(40, 20, 200, 20, { width: 4 });
+    w.findPath(40, 20, 200, 20, { width: 20 });
+    const t = (w as unknown as { finePaths: { byWidth: Map<number, object> } }).finePaths.byWidth;
+    expect(t.has(4)).toBe(true);
+    expect(t.has(8)).toBe(false);
+  });
+
   it('8. a scene keeps foot line points left to right as given, the first of each x, without sorting them', () => {
     const sc = (fl: [number, number][]) => normalizeSceneForTest({ name: 's', instances: [{ id: 'f', object: 'o', x: 0, y: 0, footLine: fl }] } as unknown as Scene).instances[0]!.footLine;
     expect(sc([[0, 1], [10, 1], [10, 9], [20, 9]])).toEqual([[0, 1], [10, 1], [20, 9]]);
@@ -1032,27 +1202,5 @@ describe('fine cells bigger than a tile', () => {
     // cells of 4 px on tiles of 16: the same as before (a share of the tile)
     const g = decodeFineSolid(encodeFineSolid([1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 4, 4, 4), 16, 16).fine!;
     expect(fineTileCover(g, 16, 1, 1)[0]).toBeCloseTo(0.25);
-  });
-});
-
-describe('fine collision on paths: a tile with a solid fine cell is closed', () => {
-  it('never sends a path into a tile that has a solid fine cell, and goes around', () => {
-    const b = platformBundle();
-    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 90 }];
-    const sc = b.scenes.level1;
-    // one 4 px cell at x 100, y 52 (tile 6,3), and a column of cells at x 164..167 from the top down to y 128 (tile column 10, rows 0..7)
-    const cols = 80;
-    const rows = 48;
-    const bits = new Array(cols * rows).fill(0);
-    bits[13 * cols + 25] = 1;
-    for (let y = 0; y < 32; y++) bits[y * cols + 41] = 1;
-    (sc as unknown as Record<string, unknown>).collisionFine = encodeFineSolid(bits, cols, rows, 4);
-    sc.instances = [{ id: 'p', object: 'player', x: 40, y: 100 }];
-    const w = new World({ ...b, scenes: { level1: normalizeSceneForTest(sc) } });
-    const path = w.findPath(40, 56, 260, 56)!;
-    expect(path).not.toBeNull();
-    const closed = (x: number, y: number) => (Math.floor(x / 16) === 6 && Math.floor(y / 16) === 3) || (Math.floor(x / 16) === 10 && Math.floor(y / 16) <= 7);
-    for (const q of path) expect(closed(q.x, q.y)).toBe(false);
-    expect(Math.max(...path.map((q) => q.y))).toBeGreaterThanOrEqual(128);
   });
 });

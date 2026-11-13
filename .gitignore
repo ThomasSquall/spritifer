@@ -6,3 +6,5 @@ sprites/
 .claude/settings.local.json
 examples/*/export/
 .env.local
+# Game material that belongs to the game folder, not to the editor
+docs/valdora-prologo/

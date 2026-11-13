@@ -8,3 +8,9 @@ examples/*/export/
 .env.local
 # Game material that belongs to the game folder, not to the editor
 docs/valdora-prologo/
+
+# Local working material (Valdora phase 6, generated images, colouring tests)
+codex_fase6/
+generated_images/
+polpo-test-colored/
+/valdora_*.png

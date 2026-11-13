@@ -1,5 +1,6 @@
 /** Work on whole parts of a map: copy and paste regions, scatter instances, named groups that can be redone. */
 
+import { fineBlockedTiles } from './fineSolid.js';
 import { type Instance, type Scene, newGameId } from './types.js';
 
 export interface TileRect {
@@ -135,6 +136,7 @@ export function scatter(scene: Scene, recipe: ScatterRecipe, sizeOf: SizeOf, gro
   const tile = scene.tileSize;
   const minD2 = (recipe.minDistance ?? tile) ** 2;
   const solidLayers = recipe.avoidSolid === false ? [] : scene.layers.filter((l) => l.solid);
+  const fineTiles = recipe.avoidSolid === false ? null : fineBlockedTiles(scene);
   const only = recipe.onTiles ? scene.layers.find((l) => l.name === recipe.onTiles!.layer) : undefined;
   if (recipe.onTiles && !only) throw new Error(`No layer "${recipe.onTiles.layer}"`);
   const allowed = recipe.onTiles ? new Set(recipe.onTiles.tiles) : null;
@@ -157,7 +159,7 @@ export function scatter(scene: Scene, recipe: ScatterRecipe, sizeOf: SizeOf, gro
     const bx = (region.x + random() * region.w) * tile;
     const by = (region.y + random() * region.h) * tile;
     const k = Math.floor(by / tile) * scene.cols + Math.floor(bx / tile);
-    if (solidLayers.some((l) => l.tiles[k] >= 0)) continue;
+    if (solidLayers.some((l) => l.tiles[k] >= 0) || fineTiles?.[k]) continue;
     if (only && !allowed!.has(only.tiles[k])) continue;
     if (bases.some((b) => (b.x - bx) ** 2 + (b.y - by) ** 2 < minD2)) continue;
     const item = pick();

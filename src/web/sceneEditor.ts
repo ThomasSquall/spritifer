@@ -1,11 +1,12 @@
 /** Scene editor: paint tile layers, place and move instances, edit scene settings and events. */
 
+import { decodeFineSolid } from '../core/game/fineSolid.js';
 import { TileResolver, type TilesetRules, tilesetFrame } from '../core/game/tilerules.js';
 import { swayBands, swayBase } from '../core/game/wind.js';
 import { RainField, drawShafts } from '../core/game/weather.js';
 import { type WaterMap, addWaterActors, drawReflections, findWater, reflectionZ } from '../core/game/reflections.js';
 import { type AtmosphereActor, type AtmosphereWorld, MoteField, drawClouds, drawShadows, postProcess } from '../core/game/atmosphere.js';
-import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, footLineProblem, hitboxOf, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene } from '../core/game/types.js';
+import { type Instance, type Scene, type SceneMotes, type TileLayer, type Value, footLineProblem, hitboxOf, interfaceSize, newGameId, normalizeScene, normalizeTags, resizeScene, setTileSize } from '../core/game/types.js';
 import { CanvasRenderer } from '../runtime/canvasRenderer.js';
 import { atmosphereEditor, lightEditor } from './atmosphereUi.js';
 import { HdPreview } from './hdPreview.js';
@@ -441,6 +442,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
     return reliefRenderer;
   }
 
+  let fineCache: { rle: string; fine: ReturnType<typeof decodeFineSolid>['fine'] } | null = null;
   function draw(): void {
     const dpr = window.devicePixelRatio || 1;
     const W = scene.cols * ts();
@@ -513,6 +515,27 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         ctx.globalAlpha = 1;
       } });
     });
+    // The scene's fine collision (read only here): blue cells over the map, where the walls layer is shown.
+    const fineData = scene.collisionFine;
+    // shown with the walls layer, or always when the map has no solid layer to show or hide
+    const wallsShown = !scene.layers.some((l) => l.solid) || scene.layers.some((l) => l.solid && l.visible);
+    if (fineData && wallsShown) {
+      items.push({ z: 1000, o: 0, d: () => {
+        const key = `${fineData.cell}:${fineData.cols}x${fineData.rows}:${scene.cols * ts()}x${scene.rows * ts()}:${fineData.rle}`;
+        if (fineCache?.rle !== key) fineCache = { rle: key, fine: decodeFineSolid(fineData, scene.cols * ts(), scene.rows * ts()).fine };
+        const fine = fineCache.fine;
+        if (!fine) return;
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = '#29adff';
+        const c = fine.cell;
+        for (let cy = Math.max(0, Math.floor(ty0 * ts() / c)); cy <= Math.min(fine.rows - 1, Math.ceil(((ty1 + 1) * ts()) / c)); cy++) {
+          for (let cx = Math.max(0, Math.floor(tx0 * ts() / c)); cx <= Math.min(fine.cols - 1, Math.ceil(((tx1 + 1) * ts()) / c)); cx++) {
+            if (fine.bits[cy * fine.cols + cx]) ctx.fillRect(cx * c, cy * c, c, c);
+          }
+        }
+        ctx.globalAlpha = 1;
+      } });
+    }
     // With an atmosphere: shadows between the ground and the instances, HUD instances above the lighting.
     const actors = atm ? previewActors() : [];
     const sprites = Object.fromEntries(assets) as Record<string, LoadedAsset>;
@@ -1565,7 +1588,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
       snapshot();
       if (tsSel.value) {
         scene.tileset = tsSel.value;
-        scene.tileSize = state.sprite(tsSel.value)?.grid?.width ?? scene.tileSize;
+        setTileSize(scene, state.sprite(tsSel.value)?.grid?.width ?? scene.tileSize);
       } else delete scene.tileset;
       changed();
       await loadAssets();

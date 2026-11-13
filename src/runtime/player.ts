@@ -619,6 +619,22 @@ export async function mountPlayer(container: HTMLElement, bundle: GameBundle, op
     drawn = true;
     renderWorld(world, stage.target(world));
     if (showHitboxes) {
+      // The scene's fine collision, as filled cells: where one bumps into the painted map.
+      const fine = world.fine;
+      if (fine) {
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = '#29adff';
+        const z = world.zoom;
+        const cx0 = Math.max(0, Math.floor(world.camera.x / fine.cell));
+        const cy0 = Math.max(0, Math.floor(world.camera.y / fine.cell));
+        const cx1 = Math.min(fine.cols - 1, Math.ceil((world.camera.x + canvas.width / z) / fine.cell));
+        const cy1 = Math.min(fine.rows - 1, Math.ceil((world.camera.y + canvas.height / z) / fine.cell));
+        for (let cy = cy0; cy <= cy1; cy++) {
+          for (let cx = cx0; cx <= cx1; cx++) {
+            if (fine.bits[cy * fine.cols + cx]) ctx.fillRect(Math.round((cx * fine.cell - world.camera.x) * z), Math.round((cy * fine.cell - world.camera.y) * z), Math.ceil(fine.cell * z), Math.ceil(fine.cell * z));
+          }
+        }
+      }
       ctx.globalAlpha = 0.8;
       ctx.strokeStyle = '#ff004d';
       ctx.lineWidth = 1;

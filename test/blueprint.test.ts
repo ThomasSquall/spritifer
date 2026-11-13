@@ -246,3 +246,21 @@ describe('architecture of maps without a blueprint', () => {
     expect(lint((s, g) => wall(s, g, 5, 5, 10, 10))).toContain('free-block');
   });
 });
+
+describe('architecture lint on a map whose walls are only fine cells', () => {
+  it('reads the fine cells even without a solid layer: a picture across a one-tile passage is reported', async () => {
+    const { encodeFineSolid } = await import('../src/core/game/fineSolid.js');
+    const { normalizeObject } = await import('../src/core/game/types.js');
+    const s = createScene({ name: 's', cols: 20, rows: 20, tileSize: 32 });
+    s.layers = [{ name: 'ground', tiles: new Array(400).fill(1), solid: false, visible: true }];
+    // fine walls (8 px cells) filling tile columns 0..9 and 11..19 on tile row 10: a passage one tile wide at column 10
+    const cols = 80, rows = 80;
+    const bits = new Array(cols * rows).fill(0);
+    for (let y = 40; y < 44; y++) for (let x = 0; x < cols; x++) if (x < 40 || x >= 44) bits[y * cols + x] = 1;
+    s.collisionFine = encodeFineSolid(bits, cols, rows, 8);
+    s.instances = [{ id: 'pic', object: 'pic', x: 300, y: 270 }]; // its foot is on tile row 10
+    const types = new Map([['pic', normalizeObject({ name: 'pic', sprite: 'pic' })]]);
+    const codes = lintScene(s, { types, sizeOf: () => ({ w: 64, h: 64 }), resolver: () => new TileResolver(undefined) }).map((p) => p.code);
+    expect(codes).toContain('covers-path');
+  });
+});

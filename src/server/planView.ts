@@ -1,5 +1,6 @@
 /** A drawing of a map's plan: rooms, walls, water and what stands where, with names. What the map is, without the art. */
 
+import { fineBlockedTiles } from '../core/game/fineSolid.js';
 import { type Blueprint, type BpPlan, type BpProblem, CELL, originOf, planBlueprint } from '../core/game/blueprint.js';
 import { planPainted, surfaceOf } from '../core/game/blueprintOpenAir.js';
 import { TileResolver, type TilesetRules } from '../core/game/tilerules.js';
@@ -15,7 +16,8 @@ const MOUNT: Record<string, string> = { floor: '#ffd166', wall: '#ff8c42', flat:
 function planOfScene(s: Scene): BpPlan {
   const kinds = new Uint8Array(s.cols * s.rows);
   const solid = s.layers.find((l) => l.solid)?.tiles;
-  for (let i = 0; i < kinds.length; i++) kinds[i] = solid && solid[i]! >= 0 ? (solid[i] === 3 ? CELL.WATER : CELL.TOP) : CELL.FLOOR;
+  const fine = fineBlockedTiles(s);
+  for (let i = 0; i < kinds.length; i++) kinds[i] = solid && solid[i]! >= 0 ? (solid[i] === 3 ? CELL.WATER : CELL.TOP) : fine?.[i] ? CELL.TOP : CELL.FLOOR;
   return { cols: s.cols, rows: s.rows, wallRows: 3, kinds, spaces: new Int16Array(kinds.length).fill(-1), runs: [], problems: [] };
 }
 

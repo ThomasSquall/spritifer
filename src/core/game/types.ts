@@ -3,6 +3,7 @@
  * Everything here is plain JSON so the editor, the MCP server and the exported runtime share it.
  */
 
+import { type FineSolidData, decodeFineSolid, encodeFineSolid } from './fineSolid.js';
 import { type TilesetRules, normalizeTilesetRules } from './tilerules.js';
 import type { SpriteRelief } from '../sprite.js';
 import type { VfxGraph } from './vfxGraph.js';
@@ -337,6 +338,15 @@ export function footLineProblem(line: [number, number][]): string | null {
   return null;
 }
 
+/** Keeps a fine collision that fits the scene; one that doesn't is dropped and the reason kept for the validator. */
+function normalizeFine(v: unknown, cols: number, rows: number, tileSize: number): { collisionFine?: FineSolidData; collisionFineError?: string } {
+  if (!v || typeof v !== 'object') return {};
+  const o = v as Record<string, unknown>;
+  const d: FineSolidData = { cell: Number(o.cell), cols: Number(o.cols), rows: Number(o.rows), rle: typeof o.rle === 'string' ? o.rle : '' };
+  const r = decodeFineSolid(d, cols * tileSize, rows * tileSize);
+  return r.fine ? { collisionFine: d } : { collisionFineError: r.error };
+}
+
 /** The hitbox that counts for a placed instance or an actor: its own, else its object type's. The one place to read it. */
 export function hitboxOf(inst: { hitbox?: Hitbox | (() => Hitbox); instHitbox?: Hitbox } | undefined, type: { hitbox?: Hitbox } | undefined): Hitbox | undefined {
   // An actor carries it as instHitbox (its hitbox() is the resolved, mirrored box); a placed instance as hitbox.
@@ -375,6 +385,10 @@ export interface Scene {
   hdCells?: HdCells;
   /** Stretches of wall fronts that stand forward in the 2D-HD perspective (piers). */
   hdJuts?: HdJut[];
+  /** Fine collision: small solid cells (see fineSolid.ts), for obstacles painted rather than tiled. Always solid; story blocks stay instances. */
+  collisionFine?: FineSolidData;
+  /** Why a stored collisionFine was left out (sizes that don't match the scene): the validator reports it. */
+  collisionFineError?: string;
   /** Music when the scene starts: an audio file name, "-" for silence; absent = keep what plays. */
   music?: string;
   /** Sounds that loop while the scene lasts (wind, crickets, dripping): they fade across scene changes. */
@@ -815,6 +829,7 @@ export function normalizeScene(v: unknown): Scene {
     ...(o.persistent === true ? { persistent: true } : {}),
     ...(normalizeHdCells(o.hdCells) ? { hdCells: normalizeHdCells(o.hdCells) } : {}),
     ...(normalizeHdJuts(o.hdJuts) ? { hdJuts: normalizeHdJuts(o.hdJuts) } : {}),
+    ...normalizeFine(o.collisionFine, cols, rows, Math.max(1, Math.min(256, Math.round(num(o.tileSize, 16))))),
     ...(typeof o.music === 'string' && o.music ? { music: o.music } : {}),
     ...(normalizeAmbience(o.ambience) ? { ambience: normalizeAmbience(o.ambience) } : {}),
     variables: vars(o.variables),
@@ -839,10 +854,32 @@ function normalizeGroups(v: unknown): Record<string, SceneGroup> | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
+/** Fits the fine collision (pixels) to a new map size in pixels: kept from the top left, new cells free. */
+function fitFine(scene: Scene, widthPx: number, heightPx: number): void {
+  if (!scene.collisionFine) return;
+  const t = scene.tileSize;
+  const old = decodeFineSolid(scene.collisionFine, scene.cols * t, scene.rows * t).fine;
+  if (!old) return;
+  const nc = Math.ceil(widthPx / old.cell);
+  const nr = Math.ceil(heightPx / old.cell);
+  const bits = new Uint8Array(nc * nr);
+  for (let y = 0; y < Math.min(nr, old.rows); y++) bits.set(old.bits.subarray(y * old.cols, y * old.cols + Math.min(nc, old.cols)), y * nc);
+  scene.collisionFine = encodeFineSolid(bits, nc, nr, old.cell);
+}
+
+/** Changes the tile size (another tileset): the map is then cols x rows of the new size, and the fine collision follows. */
+export function setTileSize(scene: Scene, tileSize: number): void {
+  if (tileSize === scene.tileSize) return;
+  fitFine(scene, scene.cols * tileSize, scene.rows * tileSize);
+  scene.tileSize = tileSize;
+}
+
 /** Resizes a scene's tile layers, keeping the top-left content. */
 export function resizeScene(scene: Scene, cols: number, rows: number): void {
   cols = Math.max(1, Math.min(1024, Math.round(cols)));
   rows = Math.max(1, Math.min(1024, Math.round(rows)));
+  // The fine collision follows the map like the tile layers: kept from the top left, new cells free.
+  fitFine(scene, cols * scene.tileSize, rows * scene.tileSize);
   for (const l of scene.layers) {
     const next = new Array<number>(cols * rows).fill(-1);
     for (let y = 0; y < Math.min(rows, scene.rows); y++) {

@@ -1,5 +1,6 @@
 /** The scenes of a game and how they connect, plus the checks that need the map: unreachable scenes, one-way doors, things placed where nobody can get. */
 
+import { fineBlockedTiles } from './fineSolid.js';
 import type { Problem } from './catalog.js';
 import { type Instance, type ObjectType, type Scene, hitboxOf } from './types.js';
 import { resolveObjectTypes } from './variants.js';
@@ -120,6 +121,9 @@ export function checkMaps(p: ProjectSources, world: WorldMap, sizeOf: SizeOf): P
   for (const s of p.scenes) {
     const solid = new Uint8Array(s.cols * s.rows);
     for (const l of s.layers) if (l.solid) l.tiles.forEach((t, k) => { if (t >= 0) solid[k] = 1; });
+    // Fine collision: a tile more than half covered counts as solid, as for paths.
+    fineBlockedTiles(s)?.forEach((v, k) => { if (v) solid[k] = 1; });
+    if (s.collisionFineError) out.push({ where: `scene ${s.name}`, message: s.collisionFineError });
     const cell = (i: Instance, o: ObjectType) => {
       const f = foot(i, o, sizeOf, s.tileSize);
       return { x: Math.floor(f.x / s.tileSize), y: Math.floor(f.y / s.tileSize) };

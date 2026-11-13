@@ -34,6 +34,7 @@ import {
   normalizeScene,
   normalizeTable,
   resizeScene,
+  setTileSize,
   footLineProblem,
 } from '../core/game/types.js';
 import { exportAndroid } from './android.js';
@@ -712,7 +713,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
             const ts = ws.load(a.tileset);
             if (!ts.grid) throw new Error(`Sprite "${a.tileset}" has no tile grid`);
             s.tileset = a.tileset;
-            s.tileSize = ts.grid.width;
+            setTileSize(s, ts.grid.width);
           }
         }
         if (a.background !== undefined) s.background = a.background;

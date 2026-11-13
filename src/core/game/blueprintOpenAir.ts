@@ -7,6 +7,7 @@
 import { type Blueprint, type BpContext, type BpElement, type BpMount, type BpPlan, type BpProblem, type BpSpace, CELL, type CellKind, elementAt } from './blueprint.js';
 import { findWater } from './reflections.js';
 import type { SizeOf } from './sceneOps.js';
+import { fineBlockedTiles } from './fineSolid.js';
 import type { TileResolver } from './tilerules.js';
 import { type Instance, type ObjectType, type Scene, hitboxOf } from './types.js';
 
@@ -15,10 +16,11 @@ export interface BpSurface {
   water: Uint8Array;
 }
 
-export function surfaceOf(s: Pick<Scene, 'layers' | 'cols' | 'rows'>, resolver: TileResolver): BpSurface {
+export function surfaceOf(s: Pick<Scene, 'layers' | 'cols' | 'rows'> & Partial<Pick<Scene, 'collisionFine' | 'tileSize'>>, resolver: TileResolver): BpSurface {
   const total = s.cols * s.rows;
   const solid = new Uint8Array(total);
   for (const l of s.layers) if (l.solid) l.tiles.forEach((t, i) => { if (t >= 0) solid[i] = 1; });
+  if (s.collisionFine && s.tileSize) fineBlockedTiles({ collisionFine: s.collisionFine, cols: s.cols, rows: s.rows, tileSize: s.tileSize })?.forEach((v, i) => { if (v) solid[i] = 1; });
   return { solid, water: findWater(s.layers, s.cols, s.rows, resolver).grid };
 }
 

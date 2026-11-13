@@ -1,5 +1,6 @@
 /** What the find-usages, world map and test features need from a project, for the editor and the MCP server alike. */
 
+import { fineBlockedTiles } from '../core/game/fineSolid.js';
 import type { Problem } from '../core/game/catalog.js';
 import { type GameTest, type TestOutcome, runGameTest } from '../core/game/gameTests.js';
 import type { SizeOf } from '../core/game/sceneOps.js';
@@ -42,6 +43,7 @@ export function mapReport(ws: Workspace): { world: WorldMap; problems: Problem[]
   const minimaps = Object.fromEntries(sources.scenes.map((s) => {
     const solid = new Array<string>(s.cols * s.rows).fill('0');
     for (const l of s.layers) if (l.solid) l.tiles.forEach((t, k) => { if (t >= 0) solid[k] = '1'; });
+    fineBlockedTiles(s)?.forEach((v, k) => { if (v) solid[k] = '1'; });
     return [s.name, solid.join('')];
   }));
   return { world, problems: checkMaps(sources, world, (sprite) => sizes.get(sprite ?? '')), minimaps };

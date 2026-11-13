@@ -768,6 +768,89 @@ describe('touching pairs', () => {
   });
 });
 
+import { encodeFineSolid } from '../src/core/game/fineSolid.js';
+
+describe('fine collision', () => {
+  const world = (fine?: object) => {
+    const b = platformBundle();
+    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 90 }];
+    const sc = b.scenes.level1;
+    // A wall 8 px thick at x 96..103, full height, on a 4 px grid (scene 320x192).
+    const cols = 80;
+    const rows = 48;
+    const bits = new Array(cols * rows).fill(0);
+    for (let y = 0; y < rows; y++) for (let x = 24; x < 26; x++) bits[y * cols + x] = 1;
+    (sc as unknown as Record<string, unknown>).collisionFine = fine ?? encodeFineSolid(bits, cols, rows, 4);
+    sc.instances = [{ id: 'p', object: 'player', x: 40, y: 100 }];
+    return new World(normalizeBundle(b));
+  };
+  const normalizeBundle = (b: GameBundle) => ({ ...b, scenes: { level1: normalizeSceneForTest(b.scenes.level1) } });
+
+  it('stops movement, answers isSolidAt and raycast, and blocks paths where it covers a tile', () => {
+    const w = world();
+    const p = w.actors.find((a) => a.type.name === 'player')!;
+    const input = emptyInput();
+    input.down.add('right');
+    for (let i = 0; i < 90; i++) w.step(input);
+    expect(p.x + 16).toBeLessThanOrEqual(96.5);
+    expect(w.isSolidAt(97, 20)).toBe(true);
+    expect(w.isSolidAt(105, 20)).toBe(false);
+    expect(w.raycast(40, 20, 200, 20)!.x).toBeCloseTo(96, 0);
+    // A wall 8 px thick across the whole map: no path crosses it, even if it covers only half of a tile column
+    // (room-3001 #286.H: before, the path went straight through what movement and raycast stop).
+    expect(w.findPath(40, 20, 200, 20)).toBeNull();
+    const near = w.findPath(40, 20, 200, 20, { partial: true })!;
+    expect(Math.max(...near.map((q) => q.x))).toBeLessThan(96);
+  });
+
+  it('is left out, with the reason, when its size does not fit the scene', () => {
+    const s = normalizeSceneForTest({ ...platformBundle().scenes.level1, collisionFine: { cell: 4, cols: 10, rows: 10, rle: '64' } } as unknown as Scene);
+    expect(s.collisionFine).toBeUndefined();
+    expect(s.collisionFineError).toMatch(/do not cover/);
+  });
+});
+
+describe('changing the tile size of a scene with fine collision', () => {
+  it('keeps the fine cells (in pixels, from the top left) when the tileset has another grid', async () => {
+    const { setTileSize } = await import('../src/core/game/types.js');
+    const { encodeFineSolid, decodeFineSolid } = await import('../src/core/game/fineSolid.js');
+    const s = createScene({ name: 't', cols: 4, rows: 3, tileSize: 16 });
+    const bits = new Uint8Array(16 * 12);
+    bits[0] = 1;
+    bits[5 * 16 + 7] = 1;
+    s.collisionFine = encodeFineSolid(bits, 16, 12, 4);
+    setTileSize(s, 32); // now 128 x 96 px
+    const again = normalizeSceneForTest(JSON.parse(JSON.stringify(s)));
+    expect(again.collisionFineError).toBeUndefined();
+    const f = decodeFineSolid(again.collisionFine!, 128, 96).fine!;
+    expect([f.cols, f.rows]).toEqual([32, 24]);
+    expect(f.bits[0]).toBe(1);
+    expect(f.bits[5 * 32 + 7]).toBe(1);
+    expect(f.bits.reduce((a, b) => a + b, 0)).toBe(2);
+  });
+});
+
+describe('resizing a scene with fine collision', () => {
+  it('keeps the fine cells from the top left, new ones free, and the saved scene still has them', async () => {
+    const { resizeScene } = await import('../src/core/game/types.js');
+    const { encodeFineSolid, decodeFineSolid } = await import('../src/core/game/fineSolid.js');
+    const s = createScene({ name: 'r', cols: 4, rows: 3, tileSize: 16 });
+    const bits = new Uint8Array(16 * 12);
+    bits[0] = 1; // top left cell
+    bits[11 * 16 + 15] = 1; // bottom right cell: cut away when the map shrinks
+    bits[5 * 16 + 7] = 1;
+    s.collisionFine = encodeFineSolid(bits, 16, 12, 4);
+    resizeScene(s, 6, 2);
+    const again = normalizeSceneForTest(JSON.parse(JSON.stringify(s)));
+    expect(again.collisionFineError).toBeUndefined();
+    const f = decodeFineSolid(again.collisionFine!, 6 * 16, 2 * 16).fine!;
+    expect([f.cols, f.rows]).toEqual([24, 8]);
+    expect(f.bits[0]).toBe(1);
+    expect(f.bits[5 * 24 + 7]).toBe(1);
+    expect(f.bits.reduce((a, b) => a + b, 0)).toBe(2);
+  });
+});
+
 describe('touching pairs: cost and result with many listeners or a very wide box', () => {
   const world = (n: number, listeners: number) => {
     const b = platformBundle();
@@ -810,6 +893,36 @@ describe('touching pairs: cost and result with many listeners or a very wide box
     const stats = { checks: 0 };
     touchingPairs(w.actors, stats);
     expect(stats.checks).toBeLessThan(3000 * 40);
+  });
+});
+
+describe('fast movement against a thin fine wall', () => {
+  it('stops at a wall one cell thick even when a step of half a tile would jump it', () => {
+    for (const [tile, hbw, speed] of [[32, 8, 800], [64, 12, 1000]] as const) {
+      const scene = createScene({ name: 'level1', cols: Math.ceil(640 / tile), rows: Math.ceil(192 / tile), tileSize: tile, tileset: 'tiles' });
+      const cols = Math.ceil((scene.cols * tile) / 4);
+      const rows = Math.ceil((scene.rows * tile) / 4);
+      const bits = new Array(cols * rows).fill(0);
+      for (let y = 0; y < rows; y++) bits[y * cols + 75] = 1; // a wall 4 px thick at x 300..303
+      (scene as unknown as Record<string, unknown>).collisionFine = encodeFineSolid(bits, cols, rows, 4);
+      scene.instances = [{ id: 'p', object: 'runner', x: 100, y: 60, hitbox: { x: 0, y: 0, w: hbw, h: hbw } }];
+      const game = createGame({ title: 'T', startScene: 'level1', objects: [normalizeObject({ name: 'runner', sprite: 'hero', behaviors: [{ type: 'topdown', speed }] })] });
+      const w = new World({ game, scenes: { level1: normalizeSceneForTest(JSON.parse(JSON.stringify(scene))) }, sprites: { hero: box('hero', hbw, hbw) }, scripts: {}, audio: {}, data: {}, dialogues: {}, vfx: {} } as unknown as GameBundle);
+      const input = emptyInput();
+      input.down.add('right');
+      for (let f = 0; f < 60; f++) w.step(input);
+      const p = w.actors.find((a) => a.sceneId === 'p')!;
+      expect(p.box().x + p.box().w).toBeLessThanOrEqual(300);
+    }
+  });
+});
+
+describe('fine collision run lengths', () => {
+  it('refuses runs that are not plain base-36 numbers', async () => {
+    const { decodeFineSolid } = await import('../src/core/game/fineSolid.js');
+    const ok = decodeFineSolid({ cell: 4, cols: 4, rows: 1, rle: '1,2,1' }, 16, 4);
+    expect(ok.fine).not.toBeNull();
+    for (const rle of ['1.9,3', '2!,2', '2,,2', ' 2,2', '2,2,']) expect(decodeFineSolid({ cell: 4, cols: 4, rows: 1, rle }, 16, 4).fine).toBeNull();
   });
 });
 
@@ -861,5 +974,43 @@ describe('foot line points', () => {
     expect(sc([[0, 1], [10, 1], [10, 9], [20, 9]])).toEqual([[0, 1], [10, 1], [20, 9]]);
     expect(sc([[0, 1], [20, 9], [10, 5], [30, 2]])).toEqual([[0, 1], [20, 9], [30, 2]]);
     expect(sc([[0, 1], [5, 2]])).toEqual([[0, 1], [5, 2]]);
+  });
+});
+
+describe('fine cells bigger than a tile', () => {
+  it('cover every tile under them for lint, scatter and the minimap, and a tile still needs more than half', async () => {
+    const { fineTileCover, decodeFineSolid } = await import('../src/core/game/fineSolid.js');
+    // cells of 32 px on tiles of 16: one solid cell covers four tiles completely
+    const f = decodeFineSolid(encodeFineSolid([0, 1, 0, 0], 2, 2, 32), 64, 64).fine!;
+    const cover = Array.from(fineTileCover(f, 16, 4, 4));
+    expect(cover.filter((c) => c >= 1).length).toBe(4);
+    expect(cover[0 * 4 + 2]).toBe(1);
+    expect(cover[1 * 4 + 3]).toBe(1);
+    expect(cover[0]).toBe(0);
+    // cells of 4 px on tiles of 16: the same as before (a share of the tile)
+    const g = decodeFineSolid(encodeFineSolid([1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 4, 4, 4), 16, 16).fine!;
+    expect(fineTileCover(g, 16, 1, 1)[0]).toBeCloseTo(0.25);
+  });
+});
+
+describe('fine collision on paths: a tile with a solid fine cell is closed', () => {
+  it('never sends a path into a tile that has a solid fine cell, and goes around', () => {
+    const b = platformBundle();
+    b.game.objects[0].behaviors = [{ type: 'topdown', speed: 90 }];
+    const sc = b.scenes.level1;
+    // one 4 px cell at x 100, y 52 (tile 6,3), and a column of cells at x 164..167 from the top down to y 128 (tile column 10, rows 0..7)
+    const cols = 80;
+    const rows = 48;
+    const bits = new Array(cols * rows).fill(0);
+    bits[13 * cols + 25] = 1;
+    for (let y = 0; y < 32; y++) bits[y * cols + 41] = 1;
+    (sc as unknown as Record<string, unknown>).collisionFine = encodeFineSolid(bits, cols, rows, 4);
+    sc.instances = [{ id: 'p', object: 'player', x: 40, y: 100 }];
+    const w = new World({ ...b, scenes: { level1: normalizeSceneForTest(sc) } });
+    const path = w.findPath(40, 56, 260, 56)!;
+    expect(path).not.toBeNull();
+    const closed = (x: number, y: number) => (Math.floor(x / 16) === 6 && Math.floor(y / 16) === 3) || (Math.floor(x / 16) === 10 && Math.floor(y / 16) <= 7);
+    for (const q of path) expect(closed(q.x, q.y)).toBe(false);
+    expect(Math.max(...path.map((q) => q.y))).toBeGreaterThanOrEqual(128);
   });
 });

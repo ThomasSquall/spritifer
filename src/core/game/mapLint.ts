@@ -3,6 +3,7 @@
  * of nowhere, big sprites thrown across the only way through. Pure and browser-safe.
  */
 
+import { fineBlockedTiles } from './fineSolid.js';
 import type { Problem } from './catalog.js';
 import { planBlueprint } from './blueprint.js';
 import { lintOpenAir, planPainted, surfaceOf } from './blueprintOpenAir.js';
@@ -39,7 +40,10 @@ export function lintScene(s: Scene, ctx: LintContext): MapIssue[] {
     return out;
   }
   const solidLayers = s.layers.filter((l) => l.solid);
-  if (!solidLayers.length) return out;
+  // Fine collision counts where a tile is more than half covered (see fineSolid.ts), also on a map with no solid layer.
+  const fineTiles = fineBlockedTiles(s);
+  if (!solidLayers.length && !fineTiles) return out;
+  if (fineTiles) solidLayers.push({ name: '(fine)', solid: true, visible: false, tiles: Array.from(fineTiles, (v) => (v ? 0 : -1)) });
   const cells: (WallCell | null)[] = findWalls(s.layers, s.cols, s.rows, ctx.resolver(s.tileset ?? ''), WALL_ROWS, s.hdCells, undefined, undefined, s.tileSize);
   const isWall = (x: number, y: number) => x >= 0 && y >= 0 && x < s.cols && y < s.rows && !!cells[y * s.cols + x];
   if (!cells.some(Boolean)) {

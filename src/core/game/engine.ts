@@ -7,6 +7,7 @@
 import { ACTION_MAP, BEHAVIOR_MAP, CONDITION_MAP, TRIGGER_MAP, withDefaults } from './catalog.js';
 import { type ExprContext, MATH_FUNCTIONS, compile, fmt, parseTarget, toNum, truthy } from './expr.js';
 import { BUILTIN_FONT, type PixelFont, gameFont, measureText } from './font.js';
+import { type FineSolid, decodeFineSolid, fineSolidAt, fineSolidRects, fineTileCover } from './fineSolid.js';
 import { type Behavior, type ComponentOverrides, type DataRow, type DataTable, type EventStep, type GameBundle, type GameEvent, type GameProject, type Hitbox, type Instance, type LightDef, type ObjectType, type Scene, type SpriteAsset, type Value, cellValue, hitboxOf } from './types.js';
 import { type Behaviour, type ScriptEvaluator, ScriptHost, componentState, fieldsOf, scaledRenderer, wrapText } from './script.js';
 import { type DialogueBook, buildDialogueBook, runDialogue } from './dialogue.js';
@@ -366,6 +367,8 @@ export class World {
   /** Data tables (data/<name>.json) by name. */
   readonly data: Record<string, DataTable>;
   private solidLayers: number[][] = [];
+  /** The scene's fine collision (cells smaller than a tile), if it has one. */
+  fine: FineSolid | null = null;
   private started = false;
   private gameStarted = false;
   /** Per persistent scene: what happened to each placed instance. */
@@ -679,6 +682,7 @@ export class World {
     this.cameraTarget = undefined;
     this.lookX = 0;
     this.solidLayers = scene.layers.filter((l) => l.solid).map((l) => l.tiles);
+    this.fine = scene.collisionFine ? decodeFineSolid(scene.collisionFine, scene.cols * scene.tileSize, scene.rows * scene.tileSize).fine : null;
     this.scripts?.resetScene();
     this.dormant.clear();
     this.sceneMemory = remembered;
@@ -1447,6 +1451,7 @@ export class World {
   isSolidAt(x: number, y: number): boolean {
     const ts = this.tileSize;
     if (this.solidAtTile(Math.floor(x / ts), Math.floor(y / ts))) return true;
+    if (this.fine && fineSolidAt(this.fine, x, y)) return true;
     return this.solidsNear({ x, y, w: 1e-6, h: 1e-6 }).some((o) => {
       if (o.destroyed) return false;
       const s = o.behavior('solid');
@@ -1606,6 +1611,40 @@ export class World {
         }
       }
     }
+    if (solids && this.fine) {
+      // Fine cells: the same walk over the smaller grid.
+      const fc = this.fine.cell;
+      let tx = Math.floor(x1 / fc);
+      let ty = Math.floor(y1 / fc);
+      const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+      const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+      const tDeltaX = stepX ? fc / Math.abs(dx) : Infinity;
+      const tDeltaY = stepY ? fc / Math.abs(dy) : Infinity;
+      let tMaxX = stepX > 0 ? ((tx + 1) * fc - x1) / dx : stepX < 0 ? (tx * fc - x1) / dx : Infinity;
+      let tMaxY = stepY > 0 ? ((ty + 1) * fc - y1) / dy : stepY < 0 ? (ty * fc - y1) / dy : Infinity;
+      let t = 0;
+      let nx = 0;
+      let ny = 0;
+      for (let i = 0; i < 65536 && t <= 1; i++) {
+        if (fineSolidAt(this.fine, (tx + 0.5) * fc, (ty + 0.5) * fc)) {
+          consider(t, nx, ny, null);
+          break;
+        }
+        if (tMaxX < tMaxY) {
+          t = tMaxX;
+          tMaxX += tDeltaX;
+          tx += stepX;
+          nx = -stepX;
+          ny = 0;
+        } else {
+          t = tMaxY;
+          tMaxY += tDeltaY;
+          ty += stepY;
+          nx = 0;
+          ny = -stepY;
+        }
+      }
+    }
     const anyInstance = f.instances === true || !!f.tag || !!f.object;
     for (const a of this.actors) {
       if (a.destroyed || a.type.hud || (f.ignore && f.ignore.includes(a))) continue;
@@ -1658,6 +1697,11 @@ export class World {
     // Blocked cells: solid tiles + cells covered by solid instances (not jump-through ones).
     const blocked = new Uint8Array(cols * rows);
     for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) if (this.solidAtTile(x, y)) blocked[y * cols + x] = 1;
+    // Fine collision, the careful way: a tile with any solid fine cell is closed, so a path never enters one.
+    if (this.fine) {
+      const cover = fineTileCover(this.fine, ts, cols, rows);
+      for (let k = 0; k < cover.length; k++) if (cover[k]! > 0) blocked[k] = 1;
+    }
     for (const o of this.actors) {
       if (o.destroyed || opts.ignore?.includes(o)) continue;
       const sb = o.behavior('solid');
@@ -1801,6 +1845,7 @@ export class World {
     const y0 = Math.floor(box.y / ts);
     const y1 = Math.floor((box.y + box.h - 1e-6) / ts);
     for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) if (this.solidAtTile(tx, ty)) out.push({ x: tx * ts, y: ty * ts, w: ts, h: ts });
+    if (this.fine) out.push(...fineSolidRects(this.fine, box));
     for (const o of this.solidsNear(box)) {
       if (o === self || o.destroyed) continue;
       const s = o.behavior('solid');
@@ -1825,7 +1870,8 @@ export class World {
   /** Moves along one axis, stopping at solids. Returns true when blocked. */
   moveAxis(a: Actor, d: number, axis: 'x' | 'y'): boolean {
     if (d === 0) return false;
-    const maxStep = Math.max(1, this.tileSize / 2 - 1);
+    // With fine collision a step never passes a whole cell, or a fast actor would jump over a wall one cell thick.
+    const maxStep = Math.max(1, Math.min(this.tileSize / 2 - 1, this.fine ? this.fine.cell : Infinity));
     const steps = Math.ceil(Math.abs(d) / maxStep);
     const sub = d / steps;
     for (let i = 0; i < steps; i++) {

@@ -1884,6 +1884,7 @@ export async function mountSceneEditor(root: HTMLElement, name: string, onBack: 
         h('label', { title: 'Named group inside this scene, for working on many instances at once (Groups tab). The game ignores it.' }, 'Group', h('input', { type: 'text', value: inst.group ?? '', placeholder: 'none', spellcheck: false, onchange: (e: Event) => edit(() => { const v = (e.target as HTMLInputElement).value.trim(); if (v) inst.group = v; else delete inst.group; }) })),
         h('div', { class: 'row2' }, num('x', () => inst.x, (v) => (inst.x = v)), num('y', () => inst.y, (v) => (inst.y = v))),
         instanceHitboxRow(),
+        h('label', { title: '2D-HD: a flat instance lies this many px above the ground (the top of a wall). Empty or 0 = on the ground' }, 'HD lift', h('input', { type: 'number', class: 'num', min: '0', value: inst.hdLift ? String(inst.hdLift) : '', placeholder: obj?.hdLift ? String(obj.hdLift) : '0', onchange: (e: Event) => edit(() => { const v = Number((e.target as HTMLInputElement).value); if (v > 0) inst.hdLift = v; else delete inst.hdLift; }) })),
         h('div', {}, h('div', { class: 'muted small' }, keys.size ? 'Properties (empty = default of the type)' : 'Properties'), props,
           h('button', { class: 'small ghost', onclick: async () => {
             const k = await promptText('Instance property', 'Name (only this instance, e.g. hp, line, reward)', '');

@@ -90,6 +90,8 @@ export interface ObjectType {
   hdPose?: 'flat' | 'stand';
   /** In the 2D-HD perspective, pixels a sprite hung on a wall stands out from it (a relief, a statue in a niche). */
   hdRelief?: number;
+  /** In the 2D-HD perspective, a flat sprite lies this many pixels above the ground (the top of a wall): it lies where the ground is that many pixels further down the picture. */
+  hdLift?: number;
   /** In the 2D-HD perspective, the solid a standing sprite is wrapped on: a column is round, a pillar has corners. */
   hdShape?: HdShape;
   /** Moved by the wind when drawn (trees, tall plants): the hitbox and the art don't change. */
@@ -310,6 +312,8 @@ export interface Instance {
    * box the y-sort and the 2D-HD foot read: a picture cut out of a painted map stands where its base is.
    */
   hitbox?: Hitbox;
+  /** In the 2D-HD perspective, a flat instance lies this many pixels above the ground (a wall top), over its object type's. */
+  hdLift?: number;
 }
 
 /** The hitbox that counts for a placed instance or an actor: its own, else its object type's. The one place to read it. */
@@ -535,6 +539,7 @@ export function normalizeObject(v: unknown): ObjectType {
   if (light) obj.light = light;
   if (typeof o.shadow === 'number' && Number.isFinite(o.shadow)) obj.shadow = Math.max(0, Math.round(o.shadow));
   if (o.hdPose === 'flat' || o.hdPose === 'stand') obj.hdPose = o.hdPose;
+  if (typeof o.hdLift === 'number' && o.hdLift > 0) obj.hdLift = o.hdLift;
   if (typeof o.hdRelief === 'number' && o.hdRelief > 0) obj.hdRelief = Math.min(40, Math.round(o.hdRelief));
   if ((HD_SHAPES as readonly unknown[]).includes(o.hdShape)) obj.hdShape = o.hdShape as HdShape;
   const sway = normalizeSway(o.sway);
@@ -756,6 +761,7 @@ export function normalizeScene(v: unknown): Scene {
     if (I.hdPose === 'flat' || I.hdPose === 'stand') inst.hdPose = I.hdPose;
     if (typeof I.order === 'number') inst.order = I.order;
     const ih = I.hitbox as Record<string, unknown> | undefined;
+    if (typeof I.hdLift === 'number' && I.hdLift > 0) inst.hdLift = I.hdLift;
     if (ih && typeof ih === 'object') inst.hitbox = { x: num(ih.x, 0), y: num(ih.y, 0), w: Math.max(1, num(ih.w, 8)), h: Math.max(1, num(ih.h, 8)) };
     return inst;
   });

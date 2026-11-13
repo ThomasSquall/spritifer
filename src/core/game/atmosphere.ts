@@ -20,9 +20,11 @@ export interface AtmosphereActor {
   readonly destroyed: boolean;
   readonly light: LightDef | undefined;
   readonly asset: { width: number; height: number; name?: string; frames?: readonly { x: number; y: number; w: number; h: number }[] } | undefined;
-  readonly type: { hud?: boolean; shadow?: number; hitbox?: Hitbox; spriteOffset?: { x: number; y: number }; sway?: ObjectSway };
+  readonly type: { hud?: boolean; shadow?: number; hitbox?: Hitbox; spriteOffset?: { x: number; y: number }; sway?: ObjectSway; hdLift?: number };
   /** Its own collision box, over the type's (see hitboxOf). */
   readonly instHitbox?: Hitbox;
+  /** Lifted flat sprite (a wall top): it casts no contact shadow of its own. */
+  readonly hdLift?: number;
   /** Mirrored and on which frame: the shadow cast by the sun follows the drawing. */
   readonly flipX?: boolean;
   frameIndex?(): number;
@@ -92,6 +94,7 @@ export function collectLights(w: AtmosphereWorld, camX: number, camY: number, zo
 /** Shadow width of an instance in pixels (0 = none). */
 function shadowWidth(a: AtmosphereActor): number {
   if (a.type.shadow !== undefined) return a.type.shadow;
+  if ((a.hdLift ?? a.type.hdLift ?? 0) > 0) return 0;
   const hb = hitboxOf(a, a.type);
   if (!hb || a.z < 0) return 0;
   return hb.w + 2;

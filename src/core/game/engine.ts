@@ -152,6 +152,8 @@ export class Actor {
   hdPose?: 'flat' | 'stand';
   /** Its own collision box, from the placed instance (over the object type's). */
   instHitbox?: Hitbox;
+  /** Height above the ground of a flat instance in 2D-HD (a wall top), from the placed instance. */
+  hdLift?: number;
 
   constructor(id: number, type: ObjectType, asset: SpriteAsset | undefined, x: number, y: number, now: number) {
     this.id = id;
@@ -707,6 +709,7 @@ export class World {
     if (inst.light) a.light = inst.light.radius > 0 ? inst.light : undefined;
     if (inst.hdPose) a.hdPose = inst.hdPose;
     if (inst.hitbox) a.instHitbox = inst.hitbox;
+    if (inst.hdLift) a.hdLift = inst.hdLift;
     if (inst.order !== undefined) a.z = inst.order;
     for (const t of inst.tags ?? []) a.tags.add(t);
     a.componentConfig = inst.components;
@@ -2965,6 +2968,9 @@ function actorMark(w: World, r: Renderer, a: Actor, camX: number, camY: number, 
     return flat ? { kind: 'top', h, z: a.z } : { kind: 'stand', x, y: y + h, z: a.z };
   }
   const frame = a.asset?.frames[a.frameIndex()] ?? a.asset?.frames[0];
+  // A flat sprite lifted above the ground (the top of a wall): lies where a wall cell's top lies, H pixels up.
+  const lift = a.hdLift ?? a.type.hdLift ?? 0;
+  if (flat && lift > 0) return { kind: 'top', h: lift * zoom, z: a.z };
   return flat ? { kind: 'ground' } : { kind: 'stand', x, y, z: a.z, ...(a.type.hdShape && frame && !a.angle ? { solid: { shape: a.type.hdShape, frame } } : {}) };
 }
 

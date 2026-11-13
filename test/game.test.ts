@@ -561,3 +561,26 @@ describe('instance hitbox', () => {
     expect(w.actors.find((a) => a.type.name === 'cutout')!.box()).toEqual({ x: 40, y: 0, w: 64, h: 64 });
   });
 });
+
+describe('hd lift', () => {
+  const marks = (lift?: number): { kind: string; h?: number }[] => {
+    const b = platformBundle();
+    b.game.objects.push(normalizeObject({ name: 'crest', sprite: 'wall' }));
+    b.sprites.wall = box('wall', 32, 32);
+    b.scenes.level1.instances = [{ id: 'c', object: 'crest', x: 40, y: 0, hdPose: 'flat', ...(lift ? { hdLift: lift } : {}) }];
+    const w = new World(b);
+    const seen: { kind: string; h?: number }[] = [];
+    let last: { kind: string; h?: number } = { kind: '' };
+    const r = { clear() {}, rect() {}, text() {}, mark(m: { kind: string; h?: number }) { last = m; }, image(s: string) { if (s === 'wall') seen.push(last); } };
+    renderWorld(w, r as unknown as Parameters<typeof renderWorld>[1]);
+    return seen;
+  };
+
+  it('lies a lifted flat instance on top of a wall, H pixels up', () => {
+    expect(marks(28)).toEqual([{ kind: 'top', h: 28, z: 0 }]);
+  });
+
+  it('keeps flat instances without it on the ground', () => {
+    expect(marks()).toEqual([{ kind: 'ground' }]);
+  });
+});

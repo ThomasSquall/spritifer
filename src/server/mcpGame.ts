@@ -414,6 +414,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       light: lightSchema.nullable().optional().describe('Light it gives off (seen in scenes with an atmosphere: darker ambient + glow). null removes'),
       shadow: z.number().min(0).nullable().optional().describe('Contact shadow width in px (0 = none, null = automatic: hitbox width). Flat things (rugs, doormats, flowerbeds) want 0'),
       hd_pose: z.enum(['flat', 'stand']).nullable().optional().describe('In the 2D-HD perspective: lies on the ground or stands up. null = automatic (flat when z is below 0)'),
+      hd_lift: z.number().min(0).nullable().optional().describe('2D-HD: a flat sprite lies this many px above the ground (the top of a wall). null or 0 = on the ground'),
       hd_shape: z.enum(HD_SHAPES).nullable().optional().describe('In the 2D-HD perspective, the solid a standing sprite is wrapped on: round for columns and barrels, octagon, hexagon, square (a corner towards the camera). The width of each row gives its size. null = flat'),
       hd_relief: z.number().int().min(0).max(40).optional().describe('In the 2D-HD perspective, pixels a sprite hung on a wall stands out from it: its outline is extruded (a relief, statues in a niche). 0 = none'),
       sway: z.object({ amount: z.number().min(0).max(24).describe('Pixels the top of the sprite travels; the foot stays still. Trees want 2-4'), speed: z.number().min(0.1).max(5).optional().describe('1 = normal'), react: z.number().min(0).max(24).optional().describe('Pixels a character walking through pushes the top aside, springing back after. Grass and ferns want 2-4') }).nullable().optional().describe('Wind: bends the sprite when drawn, without new art or frames, with gusts travelling across the map. The hitbox does not move. null = off'),
@@ -493,6 +494,10 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
         if (a.hd_pose !== undefined) {
           if (a.hd_pose === null) delete o.hdPose;
           else o.hdPose = a.hd_pose;
+        }
+        if (a.hd_lift !== undefined) {
+          if (!a.hd_lift) delete o.hdLift;
+          else o.hdLift = a.hd_lift;
         }
         if (a.shadow !== undefined) {
           if (a.shadow === null) delete o.shadow;
@@ -933,6 +938,7 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
       active_if: z.string().nullable().optional().describe('Expression: the instance exists only while true (null or "" = always)'),
       group: z.string().nullable().optional().describe('Named group (null clears)'),
       light: lightSchema.nullable().optional().describe('Light override (radius 0 = off, null = the object type\'s)'),
+      hd_lift: z.number().min(0).nullable().optional().describe('2D-HD: a flat instance lies this many px above the ground (the top of a wall). null or 0 = on the ground'),
       hitbox: z.object({ x: z.number(), y: z.number(), w: z.number().min(1), h: z.number().min(1) }).nullable().optional().describe('Collision box of these instances, relative to each (over the object type\'s; also used for the y-sort and the 2D-HD foot). null = the object type\'s'),
       props: z.record(z.string(), z.union([valueSchema, z.null()])).optional(),
       components: z.record(z.string(), z.union([z.record(z.string(), z.union([valueSchema, z.null()])), z.null()])).optional().describe('Component params by component name (merged; null value deletes a param, null component removes the override)'),
@@ -983,6 +989,10 @@ const valueSchema = z.union([z.number(), z.string(), z.boolean()]);
             const l = a.light === null ? undefined : normalizeLight(a.light, true);
             if (l) i.light = l;
             else delete i.light;
+          }
+          if (a.hd_lift !== undefined) {
+            if (!a.hd_lift) delete i.hdLift;
+            else i.hdLift = a.hd_lift;
           }
           if (a.hitbox !== undefined) {
             if (a.hitbox === null) delete i.hitbox;

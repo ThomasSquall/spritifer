@@ -23,6 +23,8 @@ export function createPlayInspector(send: (msg: Record<string, unknown>) => void
   let view: (WorldView & { paused?: boolean }) | null = null;
   let selected: number | null = null;
   let filter = '';
+  /** Rows of the instance list drawn at once. */
+  const MAX_ROWS = 200;
   let visible = false;
   const open = new Set<string>(['instances']);
   const edit = (e: WorldEdit) => send({ type: 'edit', edit: e });
@@ -107,7 +109,10 @@ export function createPlayInspector(send: (msg: Record<string, unknown>) => void
         search.addEventListener('keydown', (e) => e.stopPropagation());
         const list = v.actors.filter((a) => !filter || a.name.toLowerCase().includes(filter) || a.object.toLowerCase().includes(filter) || a.tags.some((t) => t.includes(filter)));
         const out: Node[] = [search];
-        for (const a of list) {
+        // A map made of thousands of pieces: the first rows only, the rest through the filter (and the selected one).
+        const shown = list.length > MAX_ROWS ? [...list.slice(0, MAX_ROWS), ...list.slice(MAX_ROWS).filter((a) => a.id === selected)] : list;
+        if (shown.length < list.length) out.push(h('p', { class: 'muted small' }, `${list.length} instances: showing ${MAX_ROWS}. Type in the filter to find the others.`));
+        for (const a of shown) {
           const isSel = a.id === selected;
           out.push(h('div', { class: `pi-actor${isSel ? ' active' : ''}`, onclick: () => { selected = isSel ? null : a.id; render(true); } },
             h('span', { class: 'pi-actor-name' }, a.name), a.name !== a.object ? h('span', { class: 'muted small' }, a.object) : null,
